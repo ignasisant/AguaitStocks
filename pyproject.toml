@@ -1,0 +1,40 @@
+[project]
+name = "stocks"
+version = "0.1.0"
+description = "Personal stock tracking: data fetch, indicators, alerts, dashboard"
+readme = "README.md"
+authors = [
+    { name = "Ignasi", email = "ignasi.sant@hotmail.es" }
+]
+requires-python = ">=3.12"
+dependencies = [
+    "pandas>=3.0.5",
+    "plotly>=6.9.0",
+    "python-dotenv>=1.2.2",
+    "pyyaml>=6.0.3",
+    "streamlit>=1.60.0",
+    "yfinance>=1.5.2",
+]
+
+[project.scripts]
+stocks = "stocks.cli:main"
+
+[build-system]
+requires = ["uv_build>=0.11.26,<0.12.0"]
+build-backend = "uv_build"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 90
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+    "ruff>=0.16.0",
+]

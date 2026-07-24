@@ -1,0 +1,23 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# Secrets
+.env
+
+# Cached price data (keep the folder, ignore its contents)
+/data/*.csv
+/data/*.parquet
+
+# Notebooks
+.ipynb_checkpoints/
+
+# OS / editor
+.DS_Store

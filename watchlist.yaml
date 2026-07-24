@@ -1,0 +1,17 @@
+# Stocks I follow. Edit freely.
+# alert types: above | below  (triggered when current price crosses threshold)
+watchlist:
+  - ticker: AAPL
+    name: Apple
+    alerts:
+      - type: below
+        price: 190
+      - type: above
+        price: 260
+  - ticker: MSFT
+    name: Microsoft
+  - ticker: NVDA
+    name: Nvidia
+    alerts:
+      - type: above
+        price: 200
