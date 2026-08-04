@@ -75,6 +75,23 @@ Configure:
 deployed URL + `/oauth2callback` to both the Google client and
 `redirect_uri`.
 
+### Persistent user data (deploys)
+
+Hosts like Streamlit Community Cloud and most containers have an
+**ephemeral filesystem**: `data/users/` and every imported ledger vanish on
+restart or redeploy. To keep them, point the app at any S3-compatible
+bucket (Cloudflare R2 free tier is plenty) via the `[storage]` section of
+`secrets.toml` — see `.streamlit/secrets.example.toml` — or the equivalent
+`STOCKS_STORAGE_*` env vars.
+
+With a bucket configured, every write (watchlist edits, statement imports,
+prefs) is mirrored to it immediately, and each account's files are pulled
+back the first time it's touched after a boot. Object keys mirror the local
+paths (`data/users/<slug>/portfolio.db`, plus the owner's repo-root
+`watchlist.yaml` / `data/portfolio.db`). Unconfigured — the default for
+local dev — everything stays plain files, no bucket or boto3 credentials
+needed.
+
 ## Usage
 
 ```bash

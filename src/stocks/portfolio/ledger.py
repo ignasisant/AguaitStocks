@@ -14,6 +14,7 @@ from contextlib import closing
 from dataclasses import dataclass
 from pathlib import Path
 
+from stocks import storage
 from stocks.config import DATA_DIR
 
 DB_PATH = DATA_DIR / "portfolio.db"
@@ -71,7 +72,9 @@ def add(tx: Transaction, path: Path = DB_PATH) -> int:
             (tx.date, tx.ticker, tx.action, tx.quantity, tx.price,
              tx.currency, tx.fee, tx.note),
         )
-        return int(cur.lastrowid)
+        rowid = int(cur.lastrowid)
+    storage.persist(path)
+    return rowid
 
 
 def add_many(txs: list[Transaction], path: Path = DB_PATH) -> list[int]:
@@ -90,6 +93,7 @@ def add_many(txs: list[Transaction], path: Path = DB_PATH) -> list[int]:
                  t.currency, t.fee, t.note),
             )
             ids.append(int(cur.lastrowid))
+    storage.persist(path)
     return ids
 
 
@@ -97,6 +101,7 @@ def clear(path: Path = DB_PATH) -> None:
     """Delete every transaction (wipe the book — used before a clean re-import)."""
     with closing(connect(path)) as conn, conn:
         conn.execute("DELETE FROM transactions")
+    storage.persist(path)
 
 
 def all_transactions(path: Path = DB_PATH) -> list[Transaction]:
@@ -111,6 +116,7 @@ def all_transactions(path: Path = DB_PATH) -> list[Transaction]:
 def delete(tx_id: int, path: Path = DB_PATH) -> None:
     with closing(connect(path)) as conn, conn:
         conn.execute("DELETE FROM transactions WHERE id = ?", (tx_id,))
+    storage.persist(path)
 
 
 def delete_many(tx_ids: list[int], path: Path = DB_PATH) -> int:
@@ -123,17 +129,18 @@ def delete_many(tx_ids: list[int], path: Path = DB_PATH) -> int:
             f"DELETE FROM transactions WHERE id IN ({','.join('?' * len(tx_ids))})",
             tx_ids,
         )
-        return cur.rowcount
+        removed = cur.rowcount
+    storage.persist(path)
+    return removed
 
 
 def import_csv(csv_path: Path, path: Path = DB_PATH) -> int:
     """Bulk-load transactions from a CSV with a header row matching the fields:
     date,ticker,action,quantity,price,currency,fee,note. Returns rows inserted.
     """
-    count = 0
     with open(csv_path, newline="") as fh:
-        for raw in csv.DictReader(fh):
-            tx = Transaction(
+        txs = [
+            Transaction(
                 date=raw["date"].strip(),
                 ticker=raw["ticker"],
                 action=raw["action"],
@@ -143,9 +150,9 @@ def import_csv(csv_path: Path, path: Path = DB_PATH) -> int:
                 fee=float(raw.get("fee") or 0),
                 note=(raw.get("note") or "").strip(),
             )
-            add(tx, path)
-            count += 1
-    return count
+            for raw in csv.DictReader(fh)
+        ]
+    return len(add_many(txs, path))
 
 
 def _row_to_tx(r: sqlite3.Row) -> Transaction:

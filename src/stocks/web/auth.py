@@ -29,6 +29,7 @@ from pathlib import Path
 import streamlit as st
 import yaml
 
+from stocks import storage
 from stocks.config import DATA_DIR, PROJECT_ROOT, WATCHLIST_FILE
 
 USERS_DIR = DATA_DIR / "users"
@@ -113,10 +114,19 @@ def guest_paths() -> UserPaths:
 
 
 def ensure_user_data(paths: UserPaths) -> None:
-    """First login: create the account's folder and seed a starter watchlist."""
+    """First login: create the account's folder and seed a starter watchlist.
+
+    With [storage] configured, the account's files are pulled from the bucket
+    first (once per process), so an ephemeral redeploy starts from the
+    persisted copies instead of re-seeding.
+    """
     paths.root.mkdir(parents=True, exist_ok=True)
+    storage.restore_once(
+        paths.root, (paths.watchlist, paths.db, paths.last_import, paths.prefs)
+    )
     if not paths.watchlist.exists():
         paths.watchlist.write_text(STARTER_WATCHLIST)
+        storage.persist(paths.watchlist)
 
 
 def is_logged_in() -> bool:
@@ -287,6 +297,7 @@ def load_prefs(path: Path | None = None) -> dict:
 def save_prefs(prefs: dict, path: Path | None = None) -> None:
     p = path or user_paths().prefs
     p.write_text(json.dumps(prefs, indent=2))
+    storage.persist(p)
 
 
 def display_currency() -> str:
@@ -352,6 +363,7 @@ def save_watchlist_entries(entries: list[dict], path: Path | None = None) -> Non
 
     raw["watchlist"] = items
     p.write_text(yaml.safe_dump(raw, sort_keys=False, allow_unicode=True))
+    storage.persist(p)
 
 
 # ------------------------------------------------------- favorites and tags
@@ -388,6 +400,7 @@ def _update_entry(ticker: str, mutate, path: Path | None = None) -> dict:
     mutate(entry)
     raw["watchlist"] = items
     p.write_text(yaml.safe_dump(raw, sort_keys=False, allow_unicode=True))
+    storage.persist(p)
     return entry
 
 
