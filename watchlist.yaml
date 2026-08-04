@@ -1,17 +1,141 @@
 # Stocks I follow. Edit freely.
-# alert types: above | below  (triggered when current price crosses threshold)
+#
+# Per-entry fields:
+#   favorite: true   -> pinned to top of the dashboard + quick-access buttons
+#   shares: 12       -> makes it a real position; portfolio analytics then
+#                       market-value weights (else the watchlist is equal-weighted)
+#   cost: 145.30     -> average buy price/share, for unrealised P/L
+#
+# Alert types (see `stocks alerts`):
+#   above / below    price: 260        latest price crosses the threshold
+#   pct_move         pct: 5            |daily move| >= 5%
+#   drawdown         pct: 20 [window]  >= 20% below the trailing high
+#   rsi_below        level: 30 [window: 14]   RSI oversold
+#   rsi_above        level: 70 [window: 14]   RSI overbought
+#   sma_cross        window: 50        price crosses the SMA(window)
+#   high_52w / low_52w  [window: 252]  new 52-week high / low
+#
+# Example of the richer schema:
+#   - ticker: NVDA
+#     name: Nvidia
+#     shares: 40
+#     cost: 118.5
+#     alerts:
+#       - type: drawdown
+#         pct: 15
+#       - type: rsi_below
+#         level: 30
+#       - type: high_52w
+
+# Broker ticker code -> Yahoo Finance symbol. Revolut lists EU stocks under
+# bare local codes Yahoo doesn't know; every price/profile lookup resolves
+# through this map first, so the ledger keeps the broker code as-is.
+# When an import warns about an unknown ticker, add a line here.
+aliases:
+  RCF: TEP.PA # Teleperformance (Euronext Paris)
+  HMI: RMS.PA # Hermes (Euronext Paris)
+  DHER: DHER.DE # Delivery Hero (XETRA, closed 2026-05)
+  NA9: NA9.DE # Nagarro (XETRA, closed 2026-01)
+  AB9: AB9.DE # ABO Energy (XETRA, closed 2026-06)
+
+# TradingView venues for `stocks tv` (technical consensus). Yahoo aliases above
+# don't work here — TradingView needs EXCHANGE:SYMBOL plus a regional @screener.
+# US tickers auto-probe NASDAQ/NYSE/AMEX, so only map the non-US names.
+tv:
+  RCF: EURONEXT:TEP@france   # Teleperformance
+  HMI: EURONEXT:RMS@france   # Hermes
+  DHER: XETR:DHER@germany    # Delivery Hero
+  NA9: XETR:NA9@germany      # Nagarro
+  AB9: XETR:AB9@germany      # ABO Energy
+
 watchlist:
   - ticker: AAPL
     name: Apple
+    favorite: true
     alerts:
       - type: below
         price: 190
       - type: above
         price: 260
-  - ticker: MSFT
-    name: Microsoft
+
+  # --- USD portfolio ---
+  - ticker: NOW
+    name: ServiceNow
+  - ticker: ENVA
+    name: Enova International
+  - ticker: RDDT
+    name: Reddit
+  - ticker: MNDY
+    name: monday.com
+  - ticker: TSM
+    name: Taiwan Semiconductor
+  - ticker: META
+    name: Meta Platforms
   - ticker: NVDA
     name: Nvidia
+    favorite: true
     alerts:
       - type: above
         price: 200
+  - ticker: CLSK
+    name: CleanSpark
+  - ticker: AMZN
+    name: Amazon
+  - ticker: FISV
+    name: Fiserv  # note: ticker rebranded to FI (Jul 2023); FISV may not resolve in yfinance
+  - ticker: MSFT
+    name: Microsoft
+  - ticker: CRWV
+    name: CoreWeave
+  - ticker: DASH
+    name: DoorDash
+  - ticker: GOOG
+    name: Alphabet
+  - ticker: DUOL
+    name: Duolingo
+  - ticker: SHOP
+    name: Shopify
+  - ticker: UNH
+    name: UnitedHealth
+  - ticker: ESTC
+    name: Elastic
+  - ticker: FSLR
+    name: First Solar
+  - ticker: JD
+    name: JD.com
+  - ticker: DXCM
+    name: DexCom
+  - ticker: FIG
+    name: Figma
+  - ticker: ADBE
+    name: Adobe
+  - ticker: CRM
+    name: Salesforce
+  - ticker: HUBS
+    name: HubSpot
+  - ticker: BABA
+    name: Alibaba
+  - ticker: AVGO
+    name: Broadcom
+  - ticker: TTD
+    name: The Trade Desk
+  - ticker: SEZL
+    name: Sezzle
+  - ticker: SPOT
+    name: Spotify
+  - ticker: WMT
+    name: Walmart
+  - ticker: DSGX
+    name: Descartes Systems
+  - ticker: NVO
+    name: Novo Nordisk
+  - ticker: MELI
+    name: MercadoLibre
+  - ticker: UTHR
+    name: United Therapeutics
+
+  # --- EUR portfolio (Euronext Paris; broker codes, see aliases above) ---
+  - ticker: RCF
+    name: Teleperformance
+  - ticker: HMI
+    name: Hermes

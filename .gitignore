@@ -14,10 +14,24 @@ wheels/
 
 # Cached price data (keep the folder, ignore its contents)
 /data/*.csv
+/data/statements/
 /data/*.parquet
+
+# Portfolio ledger (private holdings) + cached FX history
+/data/portfolio.db
+/data/portfolio.db.bak*
+/data/fx_history.json
+/data/last_import.json
+
+# Per-account data (watchlists, ledgers, prefs — private)
+/data/users/
+/data/prefs.json
 
 # Notebooks
 .ipynb_checkpoints/
 
 # OS / editor
 .DS_Store
+
+# Streamlit secrets (never commit)
+.streamlit/secrets.toml

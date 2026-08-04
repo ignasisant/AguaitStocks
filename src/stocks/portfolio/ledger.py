@@ -1,0 +1,162 @@
+"""Transaction ledger backed by SQLite (data/portfolio.db).
+
+One row per event: buy / sell / dividend / fee / split. This table is the
+single source of truth; positions, realized gains and tax all derive from it.
+Amounts are stored in the transaction's *native* currency — EUR conversion
+happens downstream at the transaction date (see stocks.data.fx).
+"""
+
+from __future__ import annotations
+
+import csv
+import sqlite3
+from contextlib import closing
+from dataclasses import dataclass
+from pathlib import Path
+
+from stocks.config import DATA_DIR
+
+DB_PATH = DATA_DIR / "portfolio.db"
+
+ACTIONS = {"buy", "sell", "dividend", "fee", "split"}
+
+SCHEMA = """
+CREATE TABLE IF NOT EXISTS transactions (
+    id       INTEGER PRIMARY KEY AUTOINCREMENT,
+    date     TEXT    NOT NULL,          -- ISO YYYY-MM-DD (trade/settlement date)
+    ticker   TEXT    NOT NULL,
+    action   TEXT    NOT NULL,          -- buy | sell | dividend | fee | split
+    quantity REAL    NOT NULL DEFAULT 0,-- shares (split: ratio, e.g. 4 for 4:1)
+    price    REAL    NOT NULL DEFAULT 0,-- per-share native ccy (dividend: total)
+    currency TEXT    NOT NULL DEFAULT 'USD',
+    fee      REAL    NOT NULL DEFAULT 0,-- commission in native ccy
+    note     TEXT    NOT NULL DEFAULT ''
+);
+"""
+
+
+@dataclass
+class Transaction:
+    date: str
+    ticker: str
+    action: str
+    quantity: float = 0.0
+    price: float = 0.0
+    currency: str = "USD"
+    fee: float = 0.0
+    note: str = ""
+    id: int | None = None
+
+    def __post_init__(self) -> None:
+        self.ticker = self.ticker.upper()
+        self.action = self.action.lower()
+        self.currency = self.currency.upper()
+        if self.action not in ACTIONS:
+            raise ValueError(f"unknown action {self.action!r}; expected one of {ACTIONS}")
+
+
+def connect(path: Path = DB_PATH) -> sqlite3.Connection:
+    conn = sqlite3.connect(path)
+    conn.row_factory = sqlite3.Row
+    conn.execute(SCHEMA)
+    return conn
+
+
+def add(tx: Transaction, path: Path = DB_PATH) -> int:
+    with closing(connect(path)) as conn, conn:
+        cur = conn.execute(
+            "INSERT INTO transactions "
+            "(date, ticker, action, quantity, price, currency, fee, note) "
+            "VALUES (?,?,?,?,?,?,?,?)",
+            (tx.date, tx.ticker, tx.action, tx.quantity, tx.price,
+             tx.currency, tx.fee, tx.note),
+        )
+        return int(cur.lastrowid)
+
+
+def add_many(txs: list[Transaction], path: Path = DB_PATH) -> list[int]:
+    """Insert many transactions in one commit. Returns the inserted row ids,
+    so callers can record the batch (and later undo exactly these rows)."""
+    if not txs:
+        return []
+    ids: list[int] = []
+    with closing(connect(path)) as conn, conn:
+        for t in txs:
+            cur = conn.execute(
+                "INSERT INTO transactions "
+                "(date, ticker, action, quantity, price, currency, fee, note) "
+                "VALUES (?,?,?,?,?,?,?,?)",
+                (t.date, t.ticker, t.action, t.quantity, t.price,
+                 t.currency, t.fee, t.note),
+            )
+            ids.append(int(cur.lastrowid))
+    return ids
+
+
+def clear(path: Path = DB_PATH) -> None:
+    """Delete every transaction (wipe the book — used before a clean re-import)."""
+    with closing(connect(path)) as conn, conn:
+        conn.execute("DELETE FROM transactions")
+
+
+def all_transactions(path: Path = DB_PATH) -> list[Transaction]:
+    """Every transaction, ordered by date then id (stable FIFO ordering)."""
+    with closing(connect(path)) as conn:
+        rows = conn.execute(
+            "SELECT * FROM transactions ORDER BY date, id"
+        ).fetchall()
+    return [_row_to_tx(r) for r in rows]
+
+
+def delete(tx_id: int, path: Path = DB_PATH) -> None:
+    with closing(connect(path)) as conn, conn:
+        conn.execute("DELETE FROM transactions WHERE id = ?", (tx_id,))
+
+
+def delete_many(tx_ids: list[int], path: Path = DB_PATH) -> int:
+    """Delete the given transaction ids in one commit. Returns rows removed
+    (ids already gone — e.g. after a wipe — are silently skipped)."""
+    if not tx_ids:
+        return 0
+    with closing(connect(path)) as conn, conn:
+        cur = conn.execute(
+            f"DELETE FROM transactions WHERE id IN ({','.join('?' * len(tx_ids))})",
+            tx_ids,
+        )
+        return cur.rowcount
+
+
+def import_csv(csv_path: Path, path: Path = DB_PATH) -> int:
+    """Bulk-load transactions from a CSV with a header row matching the fields:
+    date,ticker,action,quantity,price,currency,fee,note. Returns rows inserted.
+    """
+    count = 0
+    with open(csv_path, newline="") as fh:
+        for raw in csv.DictReader(fh):
+            tx = Transaction(
+                date=raw["date"].strip(),
+                ticker=raw["ticker"],
+                action=raw["action"],
+                quantity=float(raw.get("quantity") or 0),
+                price=float(raw.get("price") or 0),
+                currency=(raw.get("currency") or "USD"),
+                fee=float(raw.get("fee") or 0),
+                note=(raw.get("note") or "").strip(),
+            )
+            add(tx, path)
+            count += 1
+    return count
+
+
+def _row_to_tx(r: sqlite3.Row) -> Transaction:
+    return Transaction(
+        id=r["id"],
+        date=r["date"],
+        ticker=r["ticker"],
+        action=r["action"],
+        quantity=r["quantity"],
+        price=r["price"],
+        currency=r["currency"],
+        fee=r["fee"],
+        note=r["note"],
+    )
