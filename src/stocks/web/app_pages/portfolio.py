@@ -15,7 +15,6 @@ from __future__ import annotations
 
 from collections import defaultdict
 from datetime import date
-from pathlib import Path
 
 import pandas as pd
 import plotly.graph_objects as go
@@ -27,24 +26,19 @@ from stocks.analysis.portfolio import (
     correlation_matrix,
     cumulative_returns,
     effective_positions,
-    flow_series,
     holdings_from_positions,
-    injected_vs_value,
-    load_closes,
     market_value_weights_eur,
     portfolio_returns,
-    time_weighted_returns,
     top_n_weight,
 )
-from stocks.data.fx import rates_range
 from stocks.portfolio import dividends
-from stocks.portfolio.ledger import all_transactions
 from stocks.portfolio.tax_es import fiscal_year, modelo_720_flag
 from stocks.web import auth
 from stocks.web.portfolio_data import (
     basket_history,
     enriched_positions,
     eur_spot,
+    ledger_history,
     ledger_state,
     positions_table,
 )
@@ -83,39 +77,6 @@ tab_pos, tab_risk, tab_tax, tab_div = st.tabs(
     ["Positions", "Allocation & risk", "Realized & tax", "Dividends"],
     on_change="rerun",
 )
-
-
-@st.cache_data(ttl=3600, show_spinner="Building ledger history…")
-def _ledger_history(fingerprint: tuple, db: str):
-    """Full-span daily history from the ledger: injected vs value, TWR, missing.
-
-    One fetch shared by the Positions and Allocation & risk tabs. TWR = daily
-    time-weighted returns of the book (flow-adjusted), so deposits/withdrawals
-    don't read as performance and it's comparable against benchmarks.
-    """
-    ledger = all_transactions(Path(db))
-    tickers = sorted({t.ticker for t in ledger if t.action in ("buy", "sell")})
-    first = min(t.date for t in ledger)
-    span = (date.today() - date.fromisoformat(first)).days
-    period = "2y" if span <= 700 else "5y" if span <= 1780 else "max"
-    closes = load_closes(tickers, period=period)
-    fx = {
-        ccy: pd.Series(rates_range(first, date.today().isoformat(), ccy, "EUR"))
-        for ccy in {t.currency for t in ledger if t.action in ("buy", "sell")}
-        if ccy != "EUR"
-    }
-    hist = injected_vs_value(ledger, closes, fx)
-    if hist.empty:
-        twr = pd.Series(dtype=float)
-    else:
-        # No ticker filter: unpriced names are carried at cost in value_eur,
-        # so their buy/sell flows must offset those value jumps.
-        twr = time_weighted_returns(hist["value_eur"], flow_series(ledger))
-    missing = sorted(
-        {t for t in tickers if t not in closes}
-        | set(hist.attrs.get("carried_at_cost", []) if not hist.empty else [])
-    )
-    return hist, twr, missing
 
 
 # ------------------------------------------------------------------- Positions
@@ -216,7 +177,7 @@ def _positions_section() -> None:
 def _history_section() -> None:
     st.subheader("Injected capital vs market value")
 
-    hist, _, missing = _ledger_history((len(txs), txs[-1].date, date.today()), DB)
+    hist, _, missing = ledger_history((len(txs), txs[-1].date, date.today()), DB)
     if hist.empty:
         st.caption("Not enough data to build the history.")
     else:
@@ -427,7 +388,7 @@ if tab_risk.open:
                 show_chart(pie, container=col)
 
             st.subheader("Cumulative return vs benchmarks")
-            _, twr, twr_missing = _ledger_history(
+            _, twr, twr_missing = ledger_history(
                 (len(txs), txs[-1].date, date.today()), DB
             )
             # Clip the ledger TWR to the window so it rebases with the benchmarks.
