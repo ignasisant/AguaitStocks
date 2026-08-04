@@ -224,7 +224,10 @@ def _login_screen() -> None:
     with st.container(horizontal_alignment="center"):
         with st.container(border=True, width=420, horizontal_alignment="center"):
             st.space("xsmall")
-            st.markdown("# :material/monitoring: Stocks", text_alignment="center")
+            st.image(
+                str(Path(__file__).parent / "assets" / "atalaya-logo.svg"),
+                width=200,
+            )
             st.caption(
                 "Watchlist, portfolio and valuation dashboard.",
                 text_alignment="center",

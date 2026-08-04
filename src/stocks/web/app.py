@@ -24,7 +24,18 @@ import streamlit as st  # noqa: E402
 from stocks.web import auth  # noqa: E402
 from stocks.web.widgets import ticker_picker  # noqa: E402
 
-st.set_page_config(page_title="Stocks", layout="wide")
+# Atalaya — Spanish for watchtower: the place you watch the market from.
+_ASSETS = Path(__file__).parent / "assets"
+st.set_page_config(
+    page_title="Atalaya",
+    page_icon=str(_ASSETS / "atalaya-icon.svg"),
+    layout="wide",
+)
+st.logo(
+    str(_ASSETS / "atalaya-logo.svg"),
+    icon_image=str(_ASSETS / "atalaya-icon.svg"),
+    size="large",
+)
 
 # Dense layout: kill Streamlit's default top padding and wide element gaps so
 # charts and metrics sit high and tight instead of floating in whitespace.
@@ -82,7 +93,11 @@ page = st.navigation(
         ticker_page,
         st.Page("app_pages/portfolio.py", title="Portfolio", icon=":material/pie_chart:"),
         st.Page("app_pages/screener.py", title="Screener", icon=":material/filter_alt:"),
-        st.Page("app_pages/earnings.py", title="Earnings", icon=":material/calendar_month:"),
+        st.Page(
+            "app_pages/earnings.py",
+            title="Earnings",
+            icon=":material/calendar_month:",
+        ),
         st.Page("app_pages/valuation.py", title="Valuation", icon=":material/calculate:"),
         st.Page(
             "app_pages/import_transactions.py",

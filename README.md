@@ -1,7 +1,10 @@
-# stocks
+# Atalaya
 
-Personal stock tracking toolkit — fetch prices, compute indicators, run price
-alerts, and browse a visual dashboard.
+<img src="src/stocks/web/assets/atalaya-logo.svg" alt="Atalaya logo" width="260">
+
+**Atalaya** (Spanish for *watchtower*) — personal stock tracking toolkit:
+fetch prices, compute indicators, run price alerts, and browse a visual
+dashboard.
 
 ## Quickstart — first 10 minutes
 
