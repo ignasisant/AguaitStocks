@@ -24,16 +24,16 @@ import streamlit as st  # noqa: E402
 from stocks.web import auth  # noqa: E402
 from stocks.web.widgets import ticker_picker  # noqa: E402
 
-# Atalaya — Spanish for watchtower: the place you watch the market from.
+# Aguait — Catalan "estar a l'aguait": to be on the lookout.
 _ASSETS = Path(__file__).parent / "assets"
 st.set_page_config(
-    page_title="Atalaya",
-    page_icon=str(_ASSETS / "atalaya-icon.svg"),
+    page_title="Aguait Stocks",
+    page_icon=str(_ASSETS / "aguait-icon.svg"),
     layout="wide",
 )
 st.logo(
-    str(_ASSETS / "atalaya-logo.svg"),
-    icon_image=str(_ASSETS / "atalaya-icon.svg"),
+    str(_ASSETS / "aguait-logo.svg"),
+    icon_image=str(_ASSETS / "aguait-icon.svg"),
     size="large",
 )
 

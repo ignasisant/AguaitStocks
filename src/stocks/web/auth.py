@@ -225,7 +225,7 @@ def _login_screen() -> None:
         with st.container(border=True, width=420, horizontal_alignment="center"):
             st.space("xsmall")
             st.image(
-                str(Path(__file__).parent / "assets" / "atalaya-logo.svg"),
+                str(Path(__file__).parent / "assets" / "aguait-logo.svg"),
                 width=200,
             )
             st.caption(

@@ -1,8 +1,9 @@
-# Atalaya
+# Aguait Stocks
 
-<img src="src/stocks/web/assets/atalaya-logo.svg" alt="Atalaya logo" width="260">
+<img src="src/stocks/web/assets/aguait-logo.svg" alt="Aguait Stocks logo" width="310">
 
-**Atalaya** (Spanish for *watchtower*) — personal stock tracking toolkit:
+**Aguait** (Catalan, from *estar a l'aguait* — to be on the lookout) —
+personal stock tracking toolkit:
 fetch prices, compute indicators, run price alerts, and browse a visual
 dashboard.
 
