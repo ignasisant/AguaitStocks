@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import streamlit as st
 
-from stocks.analysis.fundamentals import KPI_SOURCES
+from stocks.web.kpi_text import kpi_desc, kpi_label
 from stocks.analysis.screener import (
     DEFAULT_COLUMNS,
     LOWER_IS_BETTER,
@@ -21,11 +21,12 @@ from stocks.analysis.screener import (
 )
 from stocks.config import tickers as watchlist_tickers
 from stocks.web import auth
+from stocks.web.i18n import t as tr
 from stocks.web.widgets import is_mobile, ticker_table_html
 
 _MOBILE = is_mobile()
 
-st.title("Watchlist screener")
+st.title(tr("screener.title"))
 
 from stocks.data.crypto import is_crypto
 
@@ -33,19 +34,16 @@ all_tickers = watchlist_tickers(auth.watchlist_path())
 # Crypto has no fundamentals — pairs would only add all-NaN rows here.
 tickers = [t for t in all_tickers if not is_crypto(t)]
 if not all_tickers:
-    st.warning("Watchlist empty. Add tickers on the **Profile** page.")
+    st.warning(tr("screener.watchlist_empty"))
     st.stop()
 if not tickers:
-    st.info("Only crypto on the watchlist — the KPI screener needs stocks.")
+    st.info(tr("screener.only_crypto"))
     st.stop()
 if len(tickers) < len(all_tickers):
-    st.caption(
-        f"{len(all_tickers) - len(tickers)} crypto asset(s) excluded — "
-        "no fundamentals to screen."
-    )
+    st.caption(tr("screener.crypto_excluded", n=len(all_tickers) - len(tickers)))
 
 
-@st.cache_data(ttl=3600, show_spinner="Loading fundamentals for the whole watchlist…")
+@st.cache_data(ttl=3600, show_spinner=tr("screener.loading_fundamentals"))
 def _frame(sig: tuple):
     # `sig` (the ticker tuple) is part of the cache key on purpose: editing
     # the watchlist must invalidate the frame, not wait out the TTL.
@@ -54,13 +52,13 @@ def _frame(sig: tuple):
 
 df = _frame(tuple(tickers))
 
-label = {k: KPI_SOURCES[k].label for k in df.columns}
+label = {k: kpi_label(k) for k in df.columns}
 options = list(df.columns)
 
 # Phones: the sidebar starts collapsed — put the controls in the main area,
 # folded into an expander above the results they filter.
 if _MOBILE:
-    _controls = st.expander("Screen & filters", icon=":material/tune:")
+    _controls = st.expander(tr("screener.screen_filters"), icon=":material/tune:")
 else:
     _controls = st.sidebar
 
@@ -72,24 +70,24 @@ if _MOBILE:
 
 with _controls:
     if not _MOBILE:
-        st.header("Screen")
+        st.header(tr("screener.screen"))
     sort_by = st.selectbox(
-        "Rank by",
+        tr("screener.rank_by"),
         options,
         index=options.index("roic") if "roic" in options else 0,
         format_func=lambda k: label.get(k, k),
     )
-    if KPI_SOURCES[sort_by].desc:
-        st.caption(KPI_SOURCES[sort_by].desc)
-    ascending = st.checkbox("Ascending", value=sort_by in LOWER_IS_BETTER)
+    if kpi_desc(sort_by):
+        st.caption(kpi_desc(sort_by))
+    ascending = st.checkbox(tr("screener.ascending"), value=sort_by in LOWER_IS_BETTER)
     columns = st.multiselect(
-        "Columns",
+        tr("screener.columns"),
         options,
         default=default_cols,
         format_func=lambda k: label.get(k, k),
     )
     st.divider()
-    st.caption("Filters (percent metrics are fractions: 0.15 = 15%)")
+    st.caption(tr("screener.filters_caption"))
     filters: list[Filter] = []
     for key, kind, default in (
         ("pe_ttm", "max", 40.0),
@@ -101,7 +99,7 @@ with _controls:
         if st.checkbox(
             f"{label[key]} {'≤' if kind == 'max' else '≥'}",
             key=f"chk_{key}",
-            help=KPI_SOURCES[key].desc or None,
+            help=kpi_desc(key) or None,
         ):
             val = st.number_input(label[key], value=default, key=f"val_{key}")
             filters.append(Filter(key, kind, val))
@@ -111,19 +109,18 @@ view = rank(view, sort_by, ascending=ascending)
 if columns:
     view = view[[c for c in columns if c in view.columns]]
 
-st.caption(f"{len(view)} of {len(df)} tickers pass — re-sort with **Rank by**.")
+st.caption(tr("screener.pass_caption", n=len(view), total=len(df)))
 # Shared Positions-style table (logo + company-name ticker cells). Values are
 # pre-formatted strings; sorting stays with the Rank-by control above.
 disp = format_frame(view).rename(columns=label)
 disp.insert(0, "ticker", disp.index)
 st.html(ticker_table_html(disp))
 st.download_button(
-    "Download raw numbers (CSV)", df.to_csv().encode(), "screen.csv", "text/csv",
+    tr("screener.download_csv"), df.to_csv().encode(), "screen.csv", "text/csv",
     icon=":material/download:",
 )
 
-with st.expander("What do these metrics mean?", icon=":material/help:"):
+with st.expander(tr("screener.metrics_help"), icon=":material/help:"):
     for k in options:
-        src = KPI_SOURCES[k]
-        if src.desc:
-            st.markdown(f"**{src.label}** — {src.desc}")
+        if kpi_desc(k):
+            st.markdown(f"**{kpi_label(k)}** — {kpi_desc(k)}")

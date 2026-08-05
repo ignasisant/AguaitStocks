@@ -21,6 +21,7 @@ they're reference data, not personal data.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from dataclasses import dataclass
@@ -31,13 +32,14 @@ import yaml
 
 from stocks import storage
 from stocks.config import DATA_DIR, PROJECT_ROOT, WATCHLIST_FILE
+from stocks.web.i18n import t as tr
 
 USERS_DIR = DATA_DIR / "users"
 GUEST_DIR = USERS_DIR / "_guest"
 
 CURRENCIES = ("EUR", "USD", "GBP", "CHF")
 CURRENCY_SYMBOL = {"EUR": "€", "USD": "$", "GBP": "£", "CHF": "CHF "}
-DEFAULT_PREFS = {"currency": "EUR"}
+DEFAULT_PREFS = {"currency": "EUR", "language": None}  # language None = auto (browser)
 
 STARTER_WATCHLIST = """\
 # Personal watchlist — managed from the Profile page.
@@ -66,7 +68,21 @@ class UserPaths:
 
 
 def slug(email: str) -> str:
-    """Filesystem-safe directory name for an account email."""
+    """Filesystem-safe, collision-proof directory name for an account email.
+
+    The readable base maps every non-alphanumeric run to "_", so distinct
+    addresses can collide ("a.b@c.com" and "a@b.c.com" both give
+    "a_b_c_com"). The digest suffix ties the directory to the exact address,
+    so the second account to sign in can never land in the first one's data.
+    """
+    e = email.strip().lower()
+    base = re.sub(r"[^a-z0-9]+", "_", e).strip("_")
+    return f"{base}_{hashlib.sha256(e.encode()).hexdigest()[:8]}"
+
+
+def _legacy_slug(email: str) -> str:
+    """slug() as it was before the digest suffix — kept only so existing
+    account dirs (local or in the bucket) can be migrated on next login."""
     return re.sub(r"[^a-z0-9]+", "_", email.lower()).strip("_")
 
 
@@ -113,13 +129,43 @@ def guest_paths() -> UserPaths:
     )
 
 
-def ensure_user_data(paths: UserPaths) -> None:
+_USER_FILES = ("watchlist.yaml", "portfolio.db", "last_import.json", "prefs.json")
+
+
+def _migrate_legacy(paths: UserPaths, legacy_root: Path) -> None:
+    """Move an account dir named with the pre-digest slug to its new name.
+
+    Runs once per account: a no-op as soon as paths.root exists. Covers both
+    a dir still on local disk and one that only survives in the bucket (an
+    ephemeral host after a redeploy) — bucket objects are re-keyed to the new
+    dir so the next boot restores from there directly.
+    """
+    if paths.root.exists() or legacy_root == paths.root:
+        return
+    if not legacy_root.exists() and storage.enabled():
+        # restore() only writes (and creates the dir) when the key exists,
+        # so after this loop legacy_root exists iff the bucket had the account.
+        for name in _USER_FILES:
+            storage.restore(legacy_root / name)
+    if not legacy_root.exists():
+        return
+    legacy_root.rename(paths.root)
+    for name in _USER_FILES:
+        storage.persist(paths.root / name)  # push under the new key
+        storage.persist(legacy_root / name)  # gone locally -> delete old key
+
+
+def ensure_user_data(paths: UserPaths, legacy_root: Path | None = None) -> None:
     """First login: create the account's folder and seed a starter watchlist.
 
     With [storage] configured, the account's files are pulled from the bucket
     first (once per process), so an ephemeral redeploy starts from the
-    persisted copies instead of re-seeding.
+    persisted copies instead of re-seeding. `legacy_root` is the account's
+    pre-digest-slug dir; when it still exists (locally or in the bucket) it
+    is renamed and re-keyed before anything is restored or seeded.
     """
+    if legacy_root is not None:
+        _migrate_legacy(paths, legacy_root)
     paths.root.mkdir(parents=True, exist_ok=True)
     storage.restore_once(
         paths.root, (paths.watchlist, paths.db, paths.last_import, paths.prefs)
@@ -145,13 +191,16 @@ def resolve_user() -> UserPaths:
     visitors get the shared guest dir so the public pages can render. Stores
     the paths in session state for the page modules.
     """
+    legacy = None
     if is_logged_in():
         email = str(st.user.email).strip()
         owner = str(st.secrets.get("app", {}).get("owner_email", "")).strip() or None
         paths = paths_for(email, owner)
+        if paths.root != PROJECT_ROOT:  # owner uses repo-root files, no slug
+            legacy = USERS_DIR / _legacy_slug(email)
     else:
         paths = guest_paths()
-    ensure_user_data(paths)
+    ensure_user_data(paths, legacy_root=legacy)
     st.session_state["user_paths"] = paths
     return paths
 
@@ -166,12 +215,8 @@ def require_login() -> UserPaths:
     session state for the page modules.
     """
     if "auth" not in st.secrets:
-        st.error("Authentication is not configured.", icon=":material/lock:")
-        st.markdown(
-            "Copy `.streamlit/secrets.example.toml` to `.streamlit/secrets.toml` "
-            "and fill in the Google OAuth client — see the *Login* section of the "
-            "README. Portfolio features stay locked until then."
-        )
+        st.error(tr("auth.not_configured"), icon=":material/lock:")
+        st.markdown(tr("auth.setup_help"))
         st.stop()
 
     if not st.user.is_logged_in:
@@ -180,11 +225,8 @@ def require_login() -> UserPaths:
 
     email = str(getattr(st.user, "email", "") or "").strip()
     if not email:
-        st.error(
-            "Your identity provider returned no email address, and the app keys "
-            "all personal data to it. Sign in with an account that shares one."
-        )
-        st.button("Log out", icon=":material/logout:", on_click=st.logout)
+        st.error(tr("auth.no_email"))
+        st.button(tr("common.log_out"), icon=":material/logout:", on_click=st.logout)
         st.stop()
 
     return resolve_user()
@@ -239,24 +281,23 @@ def _login_screen() -> None:
                 width=200,
             )
             st.caption(
-                "Watchlist, portfolio and valuation dashboard.",
+                tr("auth.tagline"),
                 text_alignment="center",
             )
             st.space("xsmall")
             st.markdown(
-                "Sign in to use this page. Your watchlist, portfolio ledger "
-                "and preferences are private to your account.",
+                tr("auth.signin_prompt"),
                 text_alignment="center",
             )
             st.button(
-                "Sign in with Google",
+                tr("common.sign_in_google"),
                 type="primary",
                 key="google_signin",
                 on_click=st.login,
                 width="stretch",
             )
             st.caption(
-                ":material/public: Browsing the market pages needs no login.",
+                tr("auth.browsing_public"),
                 text_alignment="center",
             )
             st.space("xsmall")

@@ -34,6 +34,7 @@ from stocks.analysis.portfolio import (
 from stocks.portfolio import dividends
 from stocks.portfolio.tax_es import fiscal_year, modelo_720_flag
 from stocks.web import auth
+from stocks.web.i18n import t as tr
 from stocks.web.portfolio_data import (
     basket_history,
     enriched_positions,
@@ -58,7 +59,7 @@ _MOBILE = is_mobile()
 # Everything below derives from the personal transaction ledger.
 auth.require_login()
 
-st.title("Portfolio")
+st.title(tr("nav.portfolio"))
 
 # This session user's ledger; with its mtime it keys every ledger-derived
 # cache (web/portfolio_data.py) so concurrent users never read each other's
@@ -67,14 +68,15 @@ DB = str(auth.db_path())
 
 txs, positions, realized = ledger_state(DB, db_mtime(DB))
 if not txs:
-    st.warning("No transactions yet — upload a Revolut CSV on the **Import** page.")
+    st.warning(tr("portfolio.no_transactions"))
     st.stop()
 if not positions and not realized:
-    st.warning("Ledger has rows but no positions could be built. Check the Import preview.")
+    st.warning(tr("portfolio.ledger_no_positions"))
     st.stop()
 
 tab_pos, tab_risk, tab_tax, tab_div = st.tabs(
-    ["Positions", "Allocation & risk", "Realized & tax", "Dividends"],
+    [tr("portfolio.tab_positions"), tr("portfolio.tab_alloc_risk"),
+     tr("portfolio.tab_realized_tax"), tr("portfolio.tab_dividends")],
     on_change="rerun",
 )
 
@@ -85,12 +87,12 @@ tab_pos, tab_risk, tab_tax, tab_div = st.tabs(
 # concurrently instead of back to back.
 @st.fragment(parallel=True)
 def _positions_section() -> None:
-    st.subheader("Open positions & P/L (EUR)")
+    st.subheader(tr("portfolio.open_positions_pl"))
     # Shared loader (web/portfolio_data.py) — already weight/day-enriched and
     # weight-sorted; Home shows the same frame, so the price burst is shared.
     tbl = enriched_positions(DB, db_mtime(DB))
     if tbl.empty:
-        st.caption("No open positions (everything sold).")
+        st.caption(tr("portfolio.no_open_positions"))
     else:
         cost = tbl["cost_eur"].sum()
         value = tbl["value_eur"].dropna().sum()
@@ -102,35 +104,34 @@ def _positions_section() -> None:
             ccy, fx = "EUR", 1.0
         sym = auth.CURRENCY_SYMBOL[ccy]
         c1, c2, c3, c4 = metric_cells(4)
-        c1.metric("Cost basis", f"{sym}{cost * fx:,.0f}")
-        c2.metric("Market value", f"{sym}{value * fx:,.0f}")
+        c1.metric(tr("portfolio.cost_basis"), f"{sym}{cost * fx:,.0f}")
+        c2.metric(tr("portfolio.market_value"), f"{sym}{value * fx:,.0f}")
         c3.metric(
-            "Unrealised P/L",
+            tr("portfolio.unrealised_pl"),
             f"{sym}{(value - cost) * fx:,.0f}",
             f"{(value / cost - 1) * 100:+.1f}%",
         )
         realized_gain = sum(s.gain_eur for s in realized)
         realized_cost = sum(s.cost_eur for s in realized)
         c4.metric(
-            "Realised P/L",
+            tr("portfolio.realised_pl"),
             f"{sym}{realized_gain * fx:,.0f}",
             f"{realized_gain / realized_cost * 100:+.1f}%" if realized_cost else None,
-            help="All-time FIFO gains from closed sales, at transaction-date ECB "
-            "rates. Per-year breakdown and tax on the Realized & tax tab.",
+            help=tr("portfolio.realised_pl_help"),
         )
         if ccy != "EUR":
-            st.caption(f"Headline converted EUR→{ccy} at the latest spot rate.")
+            st.caption(tr("portfolio.headline_converted", ccy=ccy))
 
         vals = basket_history(DB, db_mtime(DB))
         d1, d2, d3 = metric_cells(3)
         for col, label, days in (
-            (d1, "Today", 1),
-            (d2, "1 week", 7),
-            (d3, "1 month", 30),
+            (d1, tr("portfolio.today"), 1),
+            (d2, tr("portfolio.one_week"), 7),
+            (d3, tr("portfolio.one_month"), 30),
         ):
             chg = basket_change(vals, days)
             if chg is None:
-                col.metric(label, "n/a")
+                col.metric(label, tr("portfolio.na"))
             else:
                 col.metric(label, f"{sym}{chg[0] * fx:+,.0f}", f"{chg[1]:+.2%}")
 
@@ -161,37 +162,36 @@ def _positions_section() -> None:
             # clunky on touch. Full table one expander below.
             slim = tbl[["ticker", "value_eur", "weight", "day_pct", "pnl_pct"]]
             st.html(ticker_table_html(slim, fmt=fmt, signed=pnl_cols))
-            with st.expander("All columns (shares, cost, day €, P/L €)"):
+            with st.expander(tr("portfolio.all_columns")):
                 st.html(ticker_table_html(tbl, fmt=fmt, signed=pnl_cols))
         else:
             st.html(ticker_table_html(tbl, fmt=fmt, signed=pnl_cols))
-        st.caption(
-            "Live prices via yfinance, converted at the ECB spot rate. "
-            "Today/week/month mark today's holdings at daily closes × daily ECB FX "
-            "(fixed basket — buys/sells inside the window aren't flow-adjusted; "
-            "per-ticker day change includes the FX move). n/a = price/FX unavailable."
-        )
+        st.caption(tr("portfolio.positions_caption"))
 
 
 @st.fragment(parallel=True)
 def _history_section() -> None:
-    st.subheader("Injected capital vs market value")
+    st.subheader(tr("portfolio.injected_vs_value"))
 
     hist, _, missing = ledger_history((len(txs), txs[-1].date, date.today()), DB)
     if hist.empty:
-        st.caption("Not enough data to build the history.")
+        st.caption(tr("portfolio.not_enough_history"))
     else:
         # Filter in Python (not plotly rangeselector) so the y-axis rescales
         # to the visible window.
         SPANS = {"1m": 30, "3m": 91, "6m": 182, "1y": 365}
+        # "All" is both a display label and the default/comparison key, so bind
+        # the translated label to a variable; "YTD" and the SPANS codes stay
+        # untranslated (they're compared/keyed against the raw values).
+        ALL = tr("portfolio.range_all")
         sel = st.segmented_control(
-            "Range",
-            [*SPANS, "YTD", "All"],
-            default="All",
+            tr("portfolio.range"),
+            [*SPANS, "YTD", ALL],
+            default=ALL,
             key="hist_range",
             label_visibility="collapsed",
         )
-        sel = sel or "All"  # segmented_control returns None if cleared.
+        sel = sel or ALL  # segmented_control returns None if cleared.
         if sel in SPANS:
             hist = hist[hist.index >= hist.index.max() - pd.Timedelta(days=SPANS[sel])]
         elif sel == "YTD":
@@ -219,7 +219,7 @@ def _history_section() -> None:
         fig = go.Figure()
         fig.add_trace(
             go.Scatter(
-                x=hist.index, y=hist["injected_eur"], name="Injected",
+                x=hist.index, y=hist["injected_eur"], name=tr("portfolio.series_injected"),
                 line=dict(color="#9aa4b2", width=2, shape="hv"),
                 hoverinfo="skip",
             )
@@ -248,14 +248,14 @@ def _history_section() -> None:
         )
         fig.add_trace(
             go.Scatter(
-                x=hist.index, y=up, name="Value (profit)",
+                x=hist.index, y=up, name=tr("portfolio.series_value_profit"),
                 line=dict(color=GREEN, width=2),
                 hoverinfo="skip", showlegend=bool(gain.any()),
             )
         )
         fig.add_trace(
             go.Scatter(
-                x=hist.index, y=down, name="Value (loss)",
+                x=hist.index, y=down, name=tr("portfolio.series_value_loss"),
                 line=dict(color=RED, width=2),
                 hoverinfo="skip", showlegend=bool((~gain).any()),
             )
@@ -267,12 +267,7 @@ def _history_section() -> None:
                 x=hist.index, y=hist["value_eur"],
                 line=dict(width=0), opacity=0, showlegend=False,
                 customdata=customdata,
-                hovertemplate=(
-                    "<b>%{x|%d %b %Y}</b><br>"
-                    "Value  <b>€%{y:,.0f}</b><br>"
-                    "Injected  €%{customdata[0]:,.0f}<br>"
-                    "P/L  %{customdata[1]}<extra></extra>"
-                ),
+                hovertemplate=tr("portfolio.hist_hover_tmpl"),
             )
         )
         fig.update_layout(
@@ -282,14 +277,10 @@ def _history_section() -> None:
         )
         fig.update_xaxes(showspikes=True, spikemode="across", spikethickness=1)
         show_chart(fig)
-        notes = [
-            "Injected = cumulative buys (incl. fees) minus sale proceeds, at "
-            "transaction-date ECB rates. Value = daily closes × ECB daily FX. "
-            "Dividends excluded."
-        ]
+        notes = [tr("portfolio.hist_note_injected")]
         if missing:
             notes.append(
-                f"No price history for: {', '.join(missing)} — carried at cost."
+                tr("portfolio.hist_note_missing", tickers=", ".join(missing))
             )
         st.caption(" ".join(notes))
 
@@ -302,12 +293,12 @@ if tab_pos.open:
 # ----------------------------------------------------------- Allocation & risk
 if tab_risk.open:
     with tab_risk:
-        FROM_START = "From the beginning"
+        FROM_START = tr("portfolio.from_start")
         choice = st.selectbox(
-            "Return window", [FROM_START, "6mo", "1y", "2y", "5y"], index=0
+            tr("portfolio.return_window"), [FROM_START, "6mo", "1y", "2y", "5y"], index=0
         )
         if not positions:
-            st.caption("No open positions to analyse.")
+            st.caption(tr("portfolio.no_positions_analyse"))
         else:
             tickers = tuple(p.ticker for p in positions)
             first_tx = min(t.date for t in txs)
@@ -324,12 +315,17 @@ if tab_risk.open:
             else:
                 period = choice
 
-            @st.cache_data(ttl=3600, show_spinner="Loading prices & company profiles…")
-            def _report(period: str, tickers: tuple[str, ...]):
-                holds = holdings_from_positions([p for p in positions if p.ticker in tickers])
+            # (db, mtime) must be arguments: st.cache_data keys on arguments
+            # only, and the cache is shared across sessions — reading the
+            # session's positions through the closure would serve one user's
+            # report to another whose ticker tuple matches.
+            @st.cache_data(ttl=3600, show_spinner=tr("portfolio.loading_prices_profiles"))
+            def _report(period: str, tickers: tuple[str, ...], db: str, mtime: float):
+                pos = ledger_state(db, mtime)[1]
+                holds = holdings_from_positions([p for p in pos if p.ticker in tickers])
                 return analyze(period=period, holdings=holds)
 
-            rep = _report(period, tickers)
+            rep = _report(period, tickers, DB, db_mtime(DB))
             if choice == FROM_START:
                 start = pd.Timestamp(first_tx)
 
@@ -346,37 +342,33 @@ if tab_risk.open:
             rep.port_returns = portfolio_returns(rep.returns, rep.weights)
 
             c1, c2, c3, c4 = metric_cells(4)
-            c1.metric("Annualised return", f"{rep.cagr * 100:.1f}%",
-                      help="Geometric yearly return of the weighted book over the "
-                      "selected window.")
-            c2.metric("Annualised vol", f"{rep.volatility * 100:.1f}%",
-                      help="Standard deviation of daily returns scaled to a year — "
-                      "how bumpy the ride is.")
-            c3.metric("Max drawdown", f"{rep.max_drawdown * 100:.1f}%",
-                      help="Worst peak-to-trough fall over the window — the most you "
-                      "would have been down buying the top.")
-            c4.metric("Effective names", f"{effective_positions(rep.weights):.1f}",
-                      help="Diversification (1/HHI): how many equal-size positions the "
-                      "book behaves like. 10 holdings concentrated in 2 big ones ≈ 3–4 "
-                      "effective names.")
+            c1.metric(tr("portfolio.annualised_return"), f"{rep.cagr * 100:.1f}%",
+                      help=tr("portfolio.annualised_return_help"))
+            c2.metric(tr("portfolio.annualised_vol"), f"{rep.volatility * 100:.1f}%",
+                      help=tr("portfolio.annualised_vol_help"))
+            c3.metric(tr("portfolio.max_drawdown"), f"{rep.max_drawdown * 100:.1f}%",
+                      help=tr("portfolio.max_drawdown_help"))
+            c4.metric(tr("portfolio.effective_names"), f"{effective_positions(rep.weights):.1f}",
+                      help=tr("portfolio.effective_names_help"))
 
             betas = " · ".join(f"β {b} {rep.beta_vs(b):.2f}" for b in rep.bench_returns)
             if betas:
                 st.caption(
-                    f"Beta vs benchmarks: {betas} · Top-5 concentration "
-                    f"{top_n_weight(rep.weights, 5) * 100:.0f}%. "
-                    "β > 1 amplifies the benchmark's moves, < 1 dampens them."
+                    tr("portfolio.beta_caption", betas=betas,
+                       pct=f"{top_n_weight(rep.weights, 5) * 100:.0f}")
                 )
 
-            st.subheader("Allocation")
+            st.subheader(tr("portfolio.allocation"))
             cols = st.columns(3)
             for col, key, title in zip(
-                cols, ("sector", "country", "currency"), ("Sector", "Geography", "Currency"),
+                cols, ("sector", "country", "currency"),
+                (tr("portfolio.alloc_sector"), tr("portfolio.alloc_geography"),
+                 tr("portfolio.alloc_currency")),
                 strict=True,
             ):
                 alloc = rep.allocation(key)
                 if alloc.empty:
-                    col.caption(f"No {title.lower()} data.")
+                    col.caption(tr("portfolio.no_alloc_data", kind=title.lower()))
                     continue
                 pie = go.Figure(
                     go.Pie(
@@ -387,7 +379,7 @@ if tab_risk.open:
                 pie.update_layout(**chart_layout(title=title, height=300))
                 show_chart(pie, container=col)
 
-            st.subheader("Cumulative return vs benchmarks")
+            st.subheader(tr("portfolio.cumulative_return"))
             _, twr, twr_missing = ledger_history(
                 (len(txs), txs[-1].date, date.today()), DB
             )
@@ -402,16 +394,16 @@ if tab_risk.open:
                 twr_cum = cumulative_returns(twr_win)
                 line.add_trace(
                     go.Scatter(
-                        x=twr_cum.index, y=twr_cum * 100, name="Portfolio (actual, TWR)",
-                        hovertemplate="Portfolio (TWR)  <b>%{y:+.1f}%</b><extra></extra>",
+                        x=twr_cum.index, y=twr_cum * 100, name=tr("portfolio.series_portfolio_twr"),
+                        hovertemplate=tr("portfolio.hover_portfolio_twr"),
                     )
                 )
             basket_cum = cumulative_returns(rep.port_returns)
             line.add_trace(
                 go.Scatter(
                     x=basket_cum.index, y=basket_cum * 100,
-                    name="Current basket (backtest)", line=dict(dash="dot"),
-                    hovertemplate="Current basket  <b>%{y:+.1f}%</b><extra></extra>",
+                    name=tr("portfolio.series_current_basket"), line=dict(dash="dot"),
+                    hovertemplate=tr("portfolio.hover_current_basket"),
                 )
             )
             for b, r in rep.bench_returns.items():
@@ -427,30 +419,21 @@ if tab_risk.open:
                 height=420, hovermode="x unified", yaxis=dict(title="%", fixedrange=True)
             )
             show_chart(line)
-            notes = [
-                "Actual (TWR) = daily time-weighted return of the ledger book — "
-                "flow-adjusted, so deposits/withdrawals don't count as performance; "
-                "starts at your first transaction. Current basket = today's holdings "
-                "backtested at fixed weights over the window."
-            ]
+            notes = [tr("portfolio.twr_note")]
             if twr_missing:
                 notes.append(
-                    f"No usable price history for: {', '.join(twr_missing)} — "
-                    "carried at cost in the TWR."
+                    tr("portfolio.twr_note_missing", tickers=", ".join(twr_missing))
                 )
             st.caption(" ".join(notes))
 
-            st.subheader("Return correlation")
+            st.subheader(tr("portfolio.return_correlation"))
             corr = correlation_matrix(rep.returns)
             if not corr.empty:
                 heat = go.Figure(
                     go.Heatmap(
                         z=corr.values, x=corr.columns, y=corr.index,
                         zmin=-1, zmax=1, colorscale="RdBu", reversescale=True,
-                        hovertemplate=(
-                            "<b>%{y} × %{x}</b><br>"
-                            "correlation  <b>%{z:.2f}</b><extra></extra>"
-                        ),
+                        hovertemplate=tr("portfolio.hover_correlation"),
                     )
                 )
                 # ≥24px per row so ticker labels never collide; headroom covers
@@ -466,36 +449,34 @@ if tab_tax.open:
     with tab_tax:
         sell_years = sorted({int(s.sell_date[:4]) for s in realized}, reverse=True)
         if not sell_years:
-            st.caption("No realized sales yet.")
+            st.caption(tr("portfolio.no_realized_sales"))
         else:
-            year = st.selectbox("Fiscal year", sell_years, key="tax_year")
+            year = st.selectbox(tr("portfolio.fiscal_year"), sell_years, key="tax_year")
             buy_dates: dict[str, list[str]] = defaultdict(list)
             for t in txs:
                 if t.action == "buy":
                     buy_dates[t.ticker].append(t.date)
             ty = fiscal_year(realized, year, buy_dates)
 
-            st.subheader(f"IRPF savings base — FY {year}")
-            st.caption(
-                "IRPF = Spanish personal income tax; capital gains and dividends fall "
-                "in its *savings base*, taxed at progressive 19–28% brackets. FIFO: "
-                "sales match your oldest shares first (art. 37 LIRPF)."
-            )
+            st.subheader(tr("portfolio.irpf_savings_base", year=year))
+            st.caption(tr("portfolio.irpf_caption"))
             c1, c2, c3 = metric_cells(3)
-            c1.metric("Net taxable", f"€{ty.net_taxable_eur:,.0f}",
-                      help="Realized gains minus deductible losses for the year, in EUR "
-                      "at each transaction date's ECB rate.")
-            c2.metric("Estimated tax", f"€{ty.estimated_tax_eur:,.0f}",
-                      help="Savings-base brackets applied to the net taxable amount — "
-                      "ignores your other income and regional quirks.")
-            c3.metric("Carryforward loss", f"€{ty.carryforward_loss_eur:,.0f}",
-                      help="Net loss you can offset against gains in the next 4 years.")
-            st.caption(
-                f"Realized gains €{ty.realized_gain_eur:,.0f} · deductible losses "
-                f"€{ty.deductible_loss_eur:,.0f}"
-                + (f" · deferred (2-month rule) €{ty.deferred_loss_eur:,.0f}"
-                   if ty.deferred_loss_eur else "")
+            c1.metric(tr("portfolio.net_taxable"), f"€{ty.net_taxable_eur:,.0f}",
+                      help=tr("portfolio.net_taxable_help"))
+            c2.metric(tr("portfolio.estimated_tax"), f"€{ty.estimated_tax_eur:,.0f}",
+                      help=tr("portfolio.estimated_tax_help"))
+            c3.metric(tr("portfolio.carryforward_loss"), f"€{ty.carryforward_loss_eur:,.0f}",
+                      help=tr("portfolio.carryforward_loss_help"))
+            summary = tr(
+                "portfolio.realized_summary",
+                gain=f"{ty.realized_gain_eur:,.0f}",
+                loss=f"{ty.deductible_loss_eur:,.0f}",
             )
+            if ty.deferred_loss_eur:
+                summary += tr(
+                    "portfolio.deferred_note", deferred=f"{ty.deferred_loss_eur:,.0f}"
+                )
+            st.caption(summary)
 
             rows = [
                 {
@@ -528,18 +509,24 @@ if tab_tax.open:
                 if not ptbl.empty
                 else 0.0
             )
-            st.caption(
-                "Modelo 720 (informative declaration of assets held abroad, "
-                "50.000 EUR line): " + modelo_720_flag(foreign).message
+            # Build the message web-side from the flag's fields (tax_es stays
+            # English for the CLI); localize the ≥/< 50k branch here.
+            _flag = modelo_720_flag(foreign)
+            _msg = tr(
+                "portfolio.modelo_720_reportable"
+                if _flag.reportable
+                else "portfolio.modelo_720_ok",
+                val=f"{_flag.total_value_eur:,.0f}",
             )
-            st.caption("Planning aid, not tax advice — verify with your gestor / Renta.")
+            st.caption(tr("portfolio.modelo_720", message=_msg))
+            st.caption(tr("portfolio.planning_aid"))
 
 # ------------------------------------------------------------------- Dividends
 if tab_div.open:
     with tab_div:
         years = dividends.by_year(txs)
         if not years:
-            st.caption("No dividends recorded. (Revolut dividends import as gross, 0 withholding.)")
+            st.caption(tr("portfolio.no_dividends"))
         else:
             rows = [
                 {
@@ -552,8 +539,4 @@ if tab_div.open:
             st.dataframe(
                 pd.DataFrame(rows).set_index("year").style.format("€{:,.0f}"),
             )
-            st.caption(
-                "Creditable = Spanish double-tax credit (capped at 15% treaty rate). "
-                "Withholding shows 0 unless you edited dividend fees — Revolut's CSV "
-                "doesn't break it out."
-            )
+            st.caption(tr("portfolio.dividends_caption"))

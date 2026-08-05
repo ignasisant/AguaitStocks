@@ -1,0 +1,23 @@
+{
+  "profile.account_caption": "Your watchlist, portfolio ledger and preferences are attached to this account — other users of this app never see them. Data folder: `{folder}`.",
+  "profile.preferences": "Preferences",
+  "profile.language": "Language",
+  "profile.lang_auto": "Auto (browser)",
+  "profile.language_caption": "Sets the interface language. Auto follows your browser's language; pick one to override it on every device.",
+  "profile.display_currency": "Display currency",
+  "profile.currency_set": "Display currency set to {ccy}",
+  "profile.currency_caption": "Converts the Portfolio headline figures at the latest FX rate. Tax figures stay in EUR — Spanish fiscal rules are euro-denominated.",
+  "profile.watchlist": "Watchlist",
+  "profile.watchlist_caption": "Drives Overview, Screener, Earnings and the ticker picker. Add or remove rows and hit **Save**. `shares` + `cost` make an entry a position for the equal-weight fallback analytics; the real book still comes from imported transactions. Alert rules on kept tickers are preserved. Crypto goes in as a Yahoo pair symbol — `BTC-USD`, `ETH-EUR` — never a bare coin code (bare codes collide with stock tickers).",
+  "profile.watchlist_empty": "Watchlist is empty — add a row below (**+** at the bottom of the table), type a ticker like `AAPL`, and hit **Save**. Overview, Screener and Earnings come alive as soon as one ticker is in.",
+  "profile.col_ticker": "Ticker",
+  "profile.col_name": "Name",
+  "profile.col_favorite": "Favorite",
+  "profile.col_shares": "Shares",
+  "profile.col_avg_cost": "Avg cost",
+  "profile.col_avg_cost_help": "Average buy price per share, in the stock's native currency",
+  "profile.col_tags": "Tags",
+  "profile.col_tags_help": "Comma-separated groups, e.g. `semis, EM` — the ticker picker search matches them",
+  "profile.save_watchlist": "Save watchlist",
+  "profile.saved": "Saved — watchlist now has {n} entries."
+}

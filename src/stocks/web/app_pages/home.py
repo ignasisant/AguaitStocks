@@ -21,6 +21,7 @@ from stocks.data.crypto import is_crypto
 from stocks.data.earnings import upcoming
 from stocks.portfolio.ledger import all_transactions
 from stocks.web import auth
+from stocks.web.i18n import t as tr
 from stocks.web.portfolio_data import (
     basket_history,
     enriched_positions,
@@ -52,24 +53,23 @@ def _first_run_banner() -> None:
             return
         if "auth" in st.secrets:
             st.info(
-                "Browsing as a guest with a starter watchlist. Sign in to "
-                "build your own watchlist and import your broker history.",
+                tr("home.guest_banner"),
                 icon=":material/waving_hand:",
             )
             row = st.container(horizontal=True)
             row.button(
-                "Sign in with Google",
+                tr("common.sign_in_google"),
                 key="guest_banner_login",
                 icon=":material/login:",
                 on_click=st.login,
             )
         else:
             st.info(
-                "Browsing as a guest with a starter watchlist.",
+                tr("home.guest_banner_short"),
                 icon=":material/waving_hand:",
             )
             row = st.container(horizontal=True)
-        if row.button("Dismiss", key="guest_banner_dismiss", type="tertiary"):
+        if row.button(tr("home.dismiss"), key="guest_banner_dismiss", type="tertiary"):
             st.session_state["guest_banner_dismissed"] = True
             st.rerun()
         return
@@ -82,19 +82,8 @@ def _first_run_banner() -> None:
     except Exception:
         pass  # unreadable/missing ledger = still new — show the banner
     with st.container(border=True):
-        st.markdown(
-            ":material/waving_hand: **New here? Three steps to a live portfolio**\n\n"
-            "1. **Profile** — add the tickers you follow "
-            "(you start with Apple and Microsoft as examples).\n"
-            "2. **Import** — drop a Revolut statement (CSV) to fill your "
-            "transaction ledger; every row is previewed before committing.\n"
-            "3. **Portfolio** — positions, P/L, risk and Spanish tax then derive "
-            "from the ledger automatically.\n\n"
-            "No broker statement? The watchlist below, the **Screener** and "
-            "**Valuation** work without one — click any ticker for its full "
-            "analysis page."
-        )
-        if st.button("Got it — don't show this again", key="onboarding_dismiss"):
+        st.markdown(tr("home.onboarding_md"))
+        if st.button(tr("home.onboarding_dismiss"), key="onboarding_dismiss"):
             prefs["onboarding_dismissed"] = True
             auth.save_prefs(prefs)
             st.rerun()
@@ -107,7 +96,7 @@ _first_run_banner()
 # a 30-day sparkline, then today's top movers. The full positions table, risk,
 # tax and dividends stay on the Portfolio page.
 MOVER_FMT = {"day_pct": "{:+.2%}"}
-MOVER_LABELS = {"ticker": "Ticker", "day_pct": "Day %"}
+MOVER_LABELS = {"ticker": tr("home.col_ticker"), "day_pct": tr("home.col_day_pct")}
 
 txs: list = []
 positions: list = []  # guests hold nothing; the refresh button below checks it
@@ -118,11 +107,11 @@ if auth.is_logged_in():
     # realized non-empty proves ledger activity even with every position
     # closed; both empty = brand-new user, already covered by the banner.
     if positions or realized:
-        st.subheader("Portfolio")
+        st.subheader(tr("nav.portfolio"))
     if positions:
         tbl = enriched_positions(DB, db_mtime(DB))
         if tbl.empty:
-            st.caption("Prices unavailable right now — try Refresh prices below.")
+            st.caption(tr("home.prices_unavailable"))
         else:
             cost = tbl["cost_eur"].sum()
             value = tbl["value_eur"].dropna().sum()
@@ -143,14 +132,14 @@ if auth.is_logged_in():
             # (not metric_cells): the sparkline needs the width, and on phones
             # the cells stack naturally.
             c1, c2, c3, c4 = st.columns([1, 1, 1, 2], vertical_alignment="center")
-            c1.metric("Market value", f"{sym}{value * fx:,.0f}")
+            c1.metric(tr("home.market_value"), f"{sym}{value * fx:,.0f}")
             c2.metric(
-                "Today",
-                f"{sym}{day[0] * fx:+,.0f}" if day else "n/a",
+                tr("home.today"),
+                f"{sym}{day[0] * fx:+,.0f}" if day else tr("home.na"),
                 f"{day[1]:+.2%}" if day else None,
             )
             c3.metric(
-                "Unrealised P/L",
+                tr("home.unrealised_pl"),
                 f"{sym}{(value - cost) * fx:+,.0f}",
                 f"{gain_pct:+.1%}" if gain_pct is not None else None,
             )
@@ -169,13 +158,13 @@ if auth.is_logged_in():
             gainers = movers[movers > 0].nlargest(3)
             losers = movers[movers < 0].nsmallest(3)
             if not gainers.empty or not losers.empty:
-                st.markdown("**Movers today**")
+                st.markdown(tr("home.movers_today"))
                 gcol, lcol = st.columns(2)
 
                 def _mover_table(box, series: pd.Series, label: str) -> None:
                     box.caption(label)
                     if series.empty:
-                        box.caption("None today.")
+                        box.caption(tr("home.none_today"))
                         return
                     box.html(
                         ticker_table_html(
@@ -189,19 +178,18 @@ if auth.is_logged_in():
                         )
                     )
 
-                _mover_table(gcol, gainers, "Gainers")
-                _mover_table(lcol, losers, "Losers")
+                _mover_table(gcol, gainers, tr("home.gainers"))
+                _mover_table(lcol, losers, tr("home.losers"))
     elif realized:
         # Ledger has history but every position is closed.
         st.info(
-            "No open positions — realised history and tax detail live on "
-            "the Portfolio page.",
+            tr("home.no_open_positions"),
             icon=":material/history:",
         )
     if positions or realized:
         st.page_link(
             "app_pages/portfolio.py",
-            label="Full portfolio — allocation, risk, tax & dividends",
+            label=tr("home.link_full_portfolio"),
             icon=":material/pie_chart:",
         )
 
@@ -218,11 +206,11 @@ closes = recent_closes(tuple(h.ticker for h in holdings)) if holdings else {}
 # earnings and 52-week cards only reserve containers here — their yfinance
 # passes (slow on a cold cache) fill at the bottom of the script so the rest
 # of the page paints first.
-st.subheader("What's new")
+st.subheader(tr("home.whats_new"))
 
 _r1a, _r1b = st.columns(2)
 with _r1a, st.container(border=True):
-    st.markdown(":material/bolt: **Big moves today**")
+    st.markdown(tr("home.big_moves"))
     # Watchlist-only: held tickers already appear under Movers today.
     _big = []
     for t in dict.fromkeys(h.ticker for h in holdings):
@@ -242,13 +230,13 @@ with _r1a, st.container(border=True):
             )
         )
     else:
-        st.caption("No watchlist moves over ±3%.")
+        st.caption(tr("home.no_big_moves"))
 _earn_slot = _r1b.container()
 
 _r2a, _r2b = st.columns(2)
 if txs:
     with _r2a, st.container(border=True):
-        st.markdown(":material/receipt_long: **Recent transactions**")
+        st.markdown(tr("home.recent_transactions"))
 
         def _tx_amount_eur(t) -> float:
             """Cash amount in EUR at the trade date (split has none). The
@@ -283,9 +271,9 @@ if txs:
                 fmt={"amount_eur": "€{:,.2f}"},
                 left_cols=("date", "action"),
                 labels={
-                    "date": "Date",
-                    "action": "Type",
-                    "ticker": "Ticker",
+                    "date": tr("home.col_date"),
+                    "action": tr("home.col_type"),
+                    "ticker": tr("home.col_ticker"),
                     "amount_eur": "EUR",
                 },
                 names=False,
@@ -293,7 +281,7 @@ if txs:
         )
         st.page_link(
             "app_pages/import_transactions.py",
-            label="Import & manage transactions",
+            label=tr("home.link_import"),
             icon=":material/upload_file:",
         )
     _xt_slot = _r2b.container()
@@ -304,37 +292,33 @@ else:
 # Defined above the refresh button so its clear() call can reference it; the
 # actual 1y fetch still only runs in the deferred fill at the bottom.
 @st.cache_data(ttl=6 * 3600, show_spinner=False)
-def _year_extremes(tickers: tuple[str, ...]) -> list[tuple[str, float, str]]:
-    """(ticker, last close, distance label) for names within 2% of their
-    52-week high or low — one bulk 1y download, keyed by the ticker tuple so
-    watchlist or portfolio edits invalidate it."""
+def _year_extremes(tickers: tuple[str, ...]) -> list[tuple[str, float, str, float | None]]:
+    """(ticker, last close, "high"/"low", distance) for names within 2% of
+    their 52-week high or low — one bulk 1y download, keyed by the ticker tuple
+    so watchlist or portfolio edits invalidate it. Distance is None when the
+    price is at/beyond the extreme; the display label is built and localized at
+    render so a cached row never carries a fixed-language string."""
     from stocks.data.fetch import fetch_many
 
-    out: list[tuple[str, float, str]] = []
+    out: list[tuple[str, float, str, float | None]] = []
     for t, df in fetch_many(list(tickers), period="1y").items():
         close = df["Close"].dropna() if "Close" in df else None
         if close is None or len(close) < 2:
             continue
         last, hi, lo = float(close.iloc[-1]), float(close.max()), float(close.min())
         if hi and last >= hi * 0.98:
-            label = (
-                "at 52w high" if last >= hi else f"{last / hi - 1:+.1%} from 52w high"
-            )
-            out.append((t, last, label))
+            out.append((t, last, "high", None if last >= hi else last / hi - 1))
         elif lo and last <= lo * 1.02:
-            label = (
-                "at 52w low" if last <= lo else f"{last / lo - 1:+.1%} from 52w low"
-            )
-            out.append((t, last, label))
+            out.append((t, last, "low", None if last <= lo else last / lo - 1))
     return out
 
 
 # ------------------------------------------------------------------ watchlist
 if not holdings:
-    st.warning("Watchlist empty.")
+    st.warning(tr("home.watchlist_empty"))
     st.page_link(
         "app_pages/profile.py",
-        label="Add tickers on the Profile page",
+        label=tr("home.link_add_tickers"),
         icon=":material/account_circle:",
     )
 
@@ -352,7 +336,11 @@ def _watch_table(tickers: list[str]) -> None:
             pd.DataFrame(rows),
             fmt={"price": "{:,.2f}", "day_pct": "{:+.2%}"},
             signed=("day_pct",),
-            labels={"ticker": "Ticker", "price": "Last close", "day_pct": "Day %"},
+            labels={
+                "ticker": tr("home.col_ticker"),
+                "price": tr("home.col_last_close"),
+                "day_pct": tr("home.col_day_pct"),
+            },
         )
     )
 
@@ -367,25 +355,21 @@ for h in holdings:
 rest = [h.ticker for h in holdings if not h.favorite and not h.tags]
 
 if favs:
-    with st.expander("Favorites", expanded=True, icon=":material/star:"):
+    with st.expander(tr("home.favorites"), expanded=True, icon=":material/star:"):
         _watch_table(favs)
 for tag in sorted(tag_groups, key=str.upper):
     with st.expander(tag, expanded=False, icon=":material/label:"):
         _watch_table(tag_groups[tag])
 if rest:
-    with st.expander("Watchlist", expanded=False, icon=":material/list:"):
+    with st.expander(tr("home.watchlist"), expanded=False, icon=":material/list:"):
         _watch_table(rest)
 if holdings:
-    st.caption(
-        "Last close vs previous close (yfinance, cached 15 min). Click a "
-        "ticker for price, fundamentals, insiders and comps; star or tag it "
-        "from the sidebar to group it here."
-    )
+    st.caption(tr("home.watchlist_caption"))
 if holdings or positions:
     # Manual escape hatch for stale quotes: drop the price caches (watchlist
     # closes, both position price loads, the ledger history, the 52-week
     # scan) and rerun; ledger caches stay hot.
-    if st.button("Refresh prices", icon=":material/refresh:"):
+    if st.button(tr("home.refresh_prices"), icon=":material/refresh:"):
         recent_closes.clear()
         positions_table.clear()
         basket_history.clear()
@@ -417,9 +401,16 @@ if _spark_slot is not None:
             color = PROFIT_COLOR if p >= 0 else LOSS_COLOR
             return f'<span style="color:{color}"><b>{p:+.1%}</b></span>'
 
+        # Localized date for the hover (plotly's %{x|%b} would render the month
+        # in English); day/year stay numeric, month name comes from the catalog.
+        def _spark_date(ts) -> str:
+            return f"{ts.day:02d} {tr(f'home.mon_{ts.month}')} {ts.year}"
+
         _custom = [
-            [inj, _pct_span(p)]
-            for inj, p in zip(_hist["injected_eur"], _hist["pnl_pct"], strict=True)
+            [inj, _pct_span(p), _spark_date(ts)]
+            for ts, inj, p in zip(
+                _hist.index, _hist["injected_eur"], _hist["pnl_pct"], strict=True
+            )
         ]
         fig = go.Figure()
         # Injected is the reference line: muted gray step (contributions are
@@ -428,7 +419,7 @@ if _spark_slot is not None:
             go.Scatter(
                 x=_hist.index,
                 y=_hist["injected_eur"],
-                name="Injected",
+                name=tr("home.chart_injected"),
                 line=dict(color="#9aa4b2", width=1.5, shape="hv", dash="dot"),
                 hoverinfo="skip",
             )
@@ -440,15 +431,10 @@ if _spark_slot is not None:
             go.Scatter(
                 x=_hist.index,
                 y=_hist["value_eur"],
-                name="Value",
+                name=tr("home.chart_value"),
                 line=dict(color="#60A5FA", width=2),
                 customdata=_custom,
-                hovertemplate=(
-                    "<b>%{x|%d %b %Y}</b><br>"
-                    "Value <b>€%{y:,.0f}</b> · "
-                    "Injected €%{customdata[0]:,.0f} · "
-                    "%{customdata[1]}<extra></extra>"
-                ),
+                hovertemplate=tr("home.spark_hover_tmpl"),
             )
         )
         fig.update_layout(
@@ -490,14 +476,19 @@ _earn_tickers = tuple(
 
 if _earn_tickers:
     with _earn_slot.container(border=True):
-        st.markdown(":material/event_upcoming: **Earnings next week**")
+        st.markdown(tr("home.earnings_next_week"))
         _events = _week_events(_earn_tickers)
         if _events:
 
             def _when(iso: str, days: int) -> str:
                 d = date.fromisoformat(iso)
-                label = {0: "today", 1: "tomorrow"}.get(days, d.strftime("%A"))
-                return f"{d.strftime('%d %b')} · {label}"
+                if days == 0:
+                    label = tr("home.rel_today")
+                elif days == 1:
+                    label = tr("home.rel_tomorrow")
+                else:
+                    label = tr(f"home.weekday_{d.weekday()}")
+                return f"{d.day:02d} {tr(f'home.month_{d.month}')} · {label}"
 
             st.html(
                 ticker_table_html(
@@ -507,14 +498,17 @@ if _earn_tickers:
                             for t, iso, days in _events
                         ]
                     ),
-                    labels={"ticker": "Ticker", "reports": "Reports"},
+                    labels={
+                        "ticker": tr("home.col_ticker"),
+                        "reports": tr("home.col_reports"),
+                    },
                 )
             )
         else:
-            st.caption("No reports due in the next 7 days.")
+            st.caption(tr("home.no_reports"))
         st.page_link(
             "app_pages/earnings.py",
-            label="Full earnings calendar",
+            label=tr("home.link_earnings_calendar"),
             icon=":material/calendar_month:",
         )
 
@@ -525,24 +519,38 @@ _xt_tickers = tuple(sorted(t for t in _held | set(favs) if not is_crypto(t)))
 
 if _xt_tickers:
     with _xt_slot.container(border=True):
-        st.markdown(":material/candlestick_chart: **52-week extremes**")
+        st.markdown(tr("home.extremes_52w"))
         _extremes = _year_extremes(_xt_tickers)
         if _extremes:
+
+            def _where(kind: str, pct: float | None) -> str:
+                if kind == "high":
+                    return (
+                        tr("home.at_52w_high")
+                        if pct is None
+                        else tr("home.from_52w_high", pct=f"{pct:+.1%}")
+                    )
+                return (
+                    tr("home.at_52w_low")
+                    if pct is None
+                    else tr("home.from_52w_low", pct=f"{pct:+.1%}")
+                )
+
             st.html(
                 ticker_table_html(
                     pd.DataFrame(
                         [
-                            {"ticker": t, "price": px, "where": label}
-                            for t, px, label in _extremes
+                            {"ticker": t, "price": px, "where": _where(kind, pct)}
+                            for t, px, kind, pct in _extremes
                         ]
                     ),
                     fmt={"price": "{:,.2f}"},
                     labels={
-                        "ticker": "Ticker",
-                        "price": "Last close",
-                        "where": "52-week",
+                        "ticker": tr("home.col_ticker"),
+                        "price": tr("home.col_last_close"),
+                        "where": tr("home.col_52week"),
                     },
                 )
             )
         else:
-            st.caption("Nothing at 52-week extremes.")
+            st.caption(tr("home.no_extremes"))

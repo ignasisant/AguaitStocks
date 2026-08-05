@@ -1,0 +1,21 @@
+{
+  "chat.title": "Asistente",
+  "chat.provider": "Proveedor de IA",
+  "chat.model": "Modelo",
+  "chat.settings": "Ajustes de IA",
+  "chat.using": "Usando {provider} · {model}",
+  "chat.byok_help": "Usa tu propia clave de API de {provider} para chatear. Se mantiene en esta sesión, o se guarda cifrada durante 15 días si marcas Recordar.",
+  "chat.key_label": "Clave de API de {provider}",
+  "chat.key_help": "Se cifra y guarda 15 días si marcas Recordar; si no, solo durante esta sesión. Nunca se registra.",
+  "chat.remember": "Recordar en esta cuenta durante 15 días",
+  "chat.get_key": "Obtener una clave →",
+  "chat.forget": "Olvidar clave de API",
+  "chat.close": "Cerrar",
+  "chat.panel_setup": "Configura primero el asistente en la página de Chat — elige un proveedor y añade tu clave de API.",
+  "chat.regenerate": "Regenerar",
+  "chat.placeholder": "Pregunta sobre tu cartera…",
+  "chat.invalid_key": "Clave de API de {provider} no válida.",
+  "chat.api_error": "El asistente no está disponible ahora mismo — inténtalo de nuevo en un momento.",
+  "chat.no_credits": "Tu clave de {provider} no tiene crédito ni cuota disponible. Añade facturación en la consola del proveedor para seguir usando el asistente.",
+  "chat.no_enc": "Persistencia desactivada — falta el secreto [chat] enc_key; la clave se mantiene solo en esta sesión."
+}

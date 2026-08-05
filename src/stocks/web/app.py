@@ -22,6 +22,9 @@ if _SRC not in sys.path:
 import streamlit as st  # noqa: E402
 
 from stocks.web import auth  # noqa: E402
+from stocks.web import chat_core  # noqa: E402
+from stocks.web import i18n  # noqa: E402
+from stocks.web.i18n import t as tr  # noqa: E402
 from stocks.web.widgets import ticker_picker  # noqa: E402
 
 # Aguait — Catalan "estar a l'aguait": to be on the lookout.
@@ -54,6 +57,12 @@ st.html(
         .block-container {padding-left: 0.75rem; padding-right: 0.75rem;}
         [data-testid="stMetricLabel"] p {font-size: 0.8rem;}
         [data-testid="stCaptionContainer"] p {font-size: 0.8rem;}
+        /* Phone metric rows (metric_cells) are wrapping horizontal containers of
+           fixed-width tiles. Streamlit under-sizes each tile's flex box, so the
+           verdict caption under the last wrapped row spills ~14px past the row
+           and the next element paints over it. Pad the row bottom to swallow the
+           spill. :has(stMetric) targets exactly these rows, not button groups. */
+        [data-testid="stHorizontalBlock"]:has([data-testid="stMetric"]) {padding-bottom: 1.1rem;}
       }
       [data-testid="stMainBlockContainer"] [data-testid="stVerticalBlock"] {gap: 0.4rem;}
       [data-testid="stMetric"] {padding: 0;}
@@ -75,9 +84,14 @@ st.html(
 # widgets gate themselves with require_login()/is_logged_in().
 auth.resolve_user()
 
+# Resolve the run's language (Profile pref > browser locale > English) before
+# the nav is built and any page runs, so page titles and page bodies read one
+# stable value. A Profile change lands on its rerun, which re-runs this first.
+i18n.set_active_language()
+
 ticker_page = st.Page(
     "app_pages/ticker.py",
-    title="Ticker",
+    title=tr("nav.ticker"),
     icon=":material/query_stats:",
     url_path="ticker",
 )
@@ -86,27 +100,26 @@ page = st.navigation(
     [
         st.Page(
             "app_pages/home.py",
-            title="Home",
+            title=tr("nav.home"),
             icon=":material/home:",
             default=True,
         ),
         ticker_page,
-        st.Page("app_pages/portfolio.py", title="Portfolio", icon=":material/pie_chart:"),
-        st.Page("app_pages/screener.py", title="Screener", icon=":material/filter_alt:"),
+        st.Page("app_pages/portfolio.py", title=tr("nav.portfolio"), icon=":material/pie_chart:"),
+        st.Page("app_pages/screener.py", title=tr("nav.screener"), icon=":material/filter_alt:"),
         st.Page(
             "app_pages/earnings.py",
-            title="Earnings",
+            title=tr("nav.earnings"),
             icon=":material/calendar_month:",
         ),
-        st.Page("app_pages/valuation.py", title="Valuation", icon=":material/calculate:"),
         st.Page(
             "app_pages/import_transactions.py",
-            title="Import",
+            title=tr("nav.import"),
             icon=":material/upload_file:",
         ),
         st.Page(
             "app_pages/profile.py",
-            title="Profile",
+            title=tr("nav.profile"),
             icon=":material/account_circle:",
         ),
     ]
@@ -116,7 +129,7 @@ page = st.navigation(
 # pages (Portfolio, Import, Profile) render a full login screen themselves.
 if "auth" in st.secrets and not auth.is_logged_in():
     st.sidebar.button(
-        "Sign in with Google",
+        tr("common.sign_in_google"),
         icon=":material/login:",
         on_click=st.login,
         width="stretch",
@@ -142,3 +155,11 @@ if _clicked and page.url_path != ticker_page.url_path:
     st.switch_page(ticker_page)
 
 page.run()
+
+# Assistant overlay: a top-right launcher icon + slide-in chat panel, reachable
+# from every page and carrying the current view (page + focused ticker) as
+# context. The panel is fully self-contained (provider choice, key entry, chat),
+# so there is no separate Chat page in the nav. Signed-in only — it reads the
+# account's real book.
+if auth.is_logged_in():
+    chat_core.render_side_panel(page.title)

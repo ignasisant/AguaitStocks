@@ -1,10 +1,13 @@
 """Per-account data resolution: slugs, owner mapping, prefs, watchlist save."""
 
+import re
+
 import yaml
 
 from stocks.config import DATA_DIR, PROJECT_ROOT, load_watchlist
 from stocks.web.auth import (
     DEFAULT_PREFS,
+    _legacy_slug,
     all_tags,
     ensure_user_data,
     load_prefs,
@@ -18,13 +21,21 @@ from stocks.web.auth import (
 
 
 def test_slug_is_filesystem_safe():
-    assert slug("Jane.Doe+test@Gmail.com") == "jane_doe_test_gmail_com"
-    assert slug("--a@b--") == "a_b"
+    s = slug("Jane.Doe+test@Gmail.com")
+    assert s.startswith("jane_doe_test_gmail_com_")
+    assert re.fullmatch(r"[a-z0-9_]+", s)
+    assert slug("jane.doe+test@gmail.com") == s  # case/whitespace-insensitive
+    assert slug("--a@b--").startswith("a_b_")
+
+
+def test_slug_collision_proof():
+    # Same readable base, different addresses -> different data dirs.
+    assert slug("a.b@c.com") != slug("a@b.c.com")
 
 
 def test_paths_for_regular_user(tmp_path):
     p = paths_for("jane@example.com", users_dir=tmp_path)
-    assert p.root == tmp_path / "jane_example_com"
+    assert p.root == tmp_path / slug("jane@example.com")
     assert p.watchlist == p.root / "watchlist.yaml"
     assert p.db == p.root / "portfolio.db"
     assert p.last_import == p.root / "last_import.json"
@@ -40,7 +51,7 @@ def test_paths_for_owner_maps_to_root_files(tmp_path):
     other = paths_for(
         "jane@example.com", owner_email="me@example.com", users_dir=tmp_path
     )
-    assert other.root == tmp_path / "jane_example_com"
+    assert other.root == tmp_path / slug("jane@example.com")
 
 
 def test_ensure_user_data_seeds_starter_watchlist(tmp_path):
@@ -52,6 +63,22 @@ def test_ensure_user_data_seeds_starter_watchlist(tmp_path):
     ensure_user_data(p)  # idempotent — must not overwrite
     p.watchlist.write_text("watchlist:\n  - ticker: NVDA\n")
     ensure_user_data(p)
+    assert [h.ticker for h in load_watchlist(p.watchlist)] == ["NVDA"]
+
+
+def test_ensure_user_data_migrates_legacy_dir(tmp_path):
+    email = "jane@example.com"
+    p = paths_for(email, users_dir=tmp_path)
+    legacy = tmp_path / _legacy_slug(email)
+    legacy.mkdir(parents=True)
+    (legacy / "watchlist.yaml").write_text("watchlist:\n  - ticker: NVDA\n")
+    ensure_user_data(p, legacy_root=legacy)
+    assert not legacy.exists()  # renamed, not copied
+    assert [h.ticker for h in load_watchlist(p.watchlist)] == ["NVDA"]
+    # Idempotent: once the new dir exists the legacy path is ignored.
+    legacy.mkdir()
+    (legacy / "watchlist.yaml").write_text("watchlist:\n  - ticker: EVIL\n")
+    ensure_user_data(p, legacy_root=legacy)
     assert [h.ticker for h in load_watchlist(p.watchlist)] == ["NVDA"]
 
 

@@ -22,7 +22,6 @@ from stocks.analysis.fundamentals import (
     compute_metrics,
     format_value,
     quarterly_eps,
-    sources_table,
     verdict_md,
 )
 from stocks.analysis.indicators import add_indicators
@@ -48,6 +47,8 @@ from stocks.formatting import compact_money
 from stocks.portfolio.ledger import all_transactions
 from stocks.portfolio.positions import build as build_positions
 from stocks.web import auth
+from stocks.web.i18n import t as tr
+from stocks.web.kpi_text import kpi_desc, sources_table
 from stocks.web.widgets import (
     chart_layout,
     company_name,
@@ -67,7 +68,7 @@ _MOBILE = is_mobile()
 # deep-link handling there feeds the same session key.
 ticker = (st.session_state.get("picker_selected") or "").strip().upper()
 if not ticker:
-    st.info("Search or pick a ticker from the sidebar list.")
+    st.info(tr("ticker.pick_prompt"))
     st.stop()
 
 holdings = load_watchlist(auth.watchlist_path())
@@ -164,6 +165,83 @@ def _ledger(db: str):
     return all_transactions(Path(db))
 
 
+# Corporate-event verticals on the price chart: letter tag, line/marker color.
+_EVENT_KINDS = {
+    "d": (tr("ticker.ev_dividends"), "#f59e0b"),
+    "r": (tr("ticker.ev_results"), "#3b82f6"),
+}
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def _earnings_events(t: str):
+    """All known earnings dates + reported results, from the earnings module
+    (one yfinance pass, cached an hour; empty on any fetch failure)."""
+    from stocks.data.earnings import fetch_earnings
+
+    try:
+        return fetch_earnings(t)
+    except Exception:
+        return [], []
+
+
+def _event_markers(
+    df: pd.DataFrame, ticker: str, *, daily: bool
+) -> list[tuple[str, pd.Timestamp, str]]:
+    """(kind, bar timestamp, hover html) per dividend / results event in view.
+
+    Dividends ride along in the history frame (yfinance actions column), so
+    they cost nothing; results dates come from the cached earnings calendar.
+    Each event is snapped to a bar of the trimmed frame so the unified hover
+    box picks its text up on that date's column.
+    """
+    events: list[tuple[str, pd.Timestamp, str]] = []
+    if df.empty or is_crypto(ticker):
+        return events
+
+    div = df.get("Dividends")
+    if div is not None:
+        for ts, amt in div[div > 0].items():
+            txt = tr("ticker.hover_dividend", amt=f"{amt:,.4g}", date=f"{ts:%Y-%m-%d}")
+            if close := float(df.at[ts, "Close"]):
+                txt += tr("ticker.hover_div_yield", pct=f"{amt / close * 100:.2f}")
+            events.append(("d", ts, txt))
+
+    dates, results = _earnings_events(ticker)
+    by_date = {r.date: r for r in results}
+    lo, hi = df.index[0].normalize(), df.index[-1]
+    for d in dates:
+        ts = pd.Timestamp(d)
+        if not (lo <= ts <= hi):
+            continue
+        # First bar of the event's session; a report on a non-trading day
+        # (or after the close) lands on the next bar, where the gap shows.
+        pos = min(df.index.searchsorted(ts), len(df) - 1)
+        r = by_date.get(d)
+        parts = [tr("ticker.hover_results", date=f"{d:%Y-%m-%d}")]
+        if r and r.reported_eps is not None:
+            line = f"EPS {r.reported_eps:.2f}"
+            if r.eps_estimate is not None:
+                line += tr("ticker.hover_vs_est", est=f"{r.eps_estimate:.2f}")
+            if r.surprise_pct is not None:
+                color = "#26a69a" if r.surprise_pct >= 0 else "#ef5350"
+                line += (
+                    f" · <span style='color:{color}'>"
+                    f"<b>{r.surprise_pct:+.1f}%</b></span> " + tr("ticker.hover_surprise")
+                )
+            parts.append(line)
+        # Two-session move spanning the print (report timing pre/post market
+        # is unknown) — same window as earnings.price_reaction, but free here.
+        if daily and 0 < pos < len(df) - 1:
+            before = float(df["Close"].iloc[pos - 1])
+            after = float(df["Close"].iloc[pos + 1])
+            if before:
+                parts.append(
+                    tr("ticker.hover_move", pct=f"{(after / before - 1) * 100:+.1f}")
+                )
+        events.append(("r", df.index[pos], "<br>".join(parts)))
+    return events
+
+
 @st.cache_data(ttl=60, show_spinner=False)
 def _held(db: str):
     """Open positions with *native-currency* cost (identity FX: no network)."""
@@ -222,11 +300,11 @@ def _legend(label: str, s: pd.Series) -> str:
     s = s.dropna()
     if s.empty:
         return label
-    parts = [f"{label} · {_fmt_money(s.iloc[-1])} latest"]
+    parts = [tr("ticker.legend_latest", label=label, val=_fmt_money(s.iloc[-1]))]
     first, last, n = s.iloc[0], s.iloc[-1], len(s)
     if n > 1 and first > 0 and last > 0:  # CAGR only meaningful for positive spans
         cagr = ((last / first) ** (1 / (n - 1)) - 1) * 100
-        parts.append(f"{cagr:+.0f}%/yr CAGR")
+        parts.append(tr("ticker.legend_cagr", pct=f"{cagr:+.0f}"))
     return " · ".join(parts)
 
 
@@ -241,22 +319,22 @@ def _position_metrics(cols, pos, last: float) -> None:
     value_eur = values_eur.get(pos.ticker)
 
     p1, p2, p3, p4 = cols
-    p1.metric("Position value", f"{value_native:,.2f} {pos.currency}")
+    p1.metric(tr("ticker.position_value"), f"{value_native:,.2f} {pos.currency}")
     if value_eur:
         p1.caption(f"≈ €{value_eur:,.2f}")
     p2.metric(
-        "% of portfolio",
+        tr("ticker.pct_portfolio"),
         f"{value_eur / total_eur * 100:.1f}%" if value_eur and total_eur else "—",
-        help="EUR market value vs total of all open positions",
+        help=tr("ticker.pct_portfolio_help"),
     )
     p3.metric(
-        "Unrealised P/L",
+        tr("ticker.unrealised_pl"),
         f"{pnl_native:+,.2f} {pos.currency}",
         f"{pnl_pct:+.2f}%",
-        help="Latest price vs FIFO average cost, fees included",
+        help=tr("ticker.unrealised_pl_help"),
     )
-    p4.metric("Avg buy price", f"{pos.avg_cost_native:,.2f} {pos.currency}")
-    p4.caption(f"{pos.quantity:,.4f} shares")
+    p4.metric(tr("ticker.avg_buy_price"), f"{pos.avg_cost_native:,.2f} {pos.currency}")
+    p4.caption(tr("ticker.n_shares", n=f"{pos.quantity:,.4f}"))
 
 
 @st.fragment
@@ -275,13 +353,27 @@ def _price_section(ticker: str) -> None:
         [p for p in PERIODS if p not in ("6m", "2y")] if _MOBILE else list(PERIODS)
     )
     sel = st.segmented_control(
-        "Period",
+        tr("ticker.period"),
         period_opts,
         default="1y",
         key="period_sel",
         label_visibility="collapsed",
     )
     sel = sel or "1y"  # segmented_control returns None if the user clears it.
+
+    # Candlesticks pack ~250 bars into a ~390px phone canvas — the bodies
+    # collapse to sub-pixel mush. Default phones to a Close line (readable),
+    # desktop to candles (OHLC useful); either way the toggle lets you flip.
+    default_chart = "line" if _MOBILE else "candles"
+    chart_type = st.segmented_control(
+        tr("ticker.chart_type"),
+        ["candles", "line"],
+        default=default_chart,
+        format_func=lambda o: tr(f"ticker.chart_{o}"),
+        key="chart_type_sel",
+        label_visibility="collapsed",
+    )
+    chart_type = chart_type or default_chart
 
     df = _history(ticker, sel)
     db = str(auth.db_path())
@@ -298,33 +390,47 @@ def _price_section(ticker: str) -> None:
         # held. metric_cells wraps 2-3 per row on phones instead of stacking.
         cols = metric_cells(7 if my_pos else 3)
         c1, c2, c3 = cols[:3]
-        c1.metric("Price", f"{last:,.2f}", f"{(last - prev) / prev * 100:+.2f}%")
+        c1.metric(tr("ticker.price"), f"{last:,.2f}", f"{(last - prev) / prev * 100:+.2f}%")
 
         rsi_val = float(df["RSI14"].iloc[-1])
-        c2.metric("RSI (14)", f"{rsi_val:.1f}", help="<30 oversold · 30–70 neutral · >70 overbought")
+        c2.metric(tr("ticker.rsi_label"), f"{rsi_val:.1f}", help=tr("ticker.rsi_help"))
         c2.caption(verdict_md("rsi", rsi_val))
 
         sma20 = float(df["SMA20"].iloc[-1])
-        c3.metric("SMA20", f"{sma20:,.2f}", help="Price above SMA20 = short-term uptrend, below = downtrend")
+        c3.metric(tr("ticker.sma20_label"), f"{sma20:,.2f}", help=tr("ticker.sma20_help"))
         # Price vs its 20-day average: a quick trend read alongside the level.
         c3.caption(
-            ":green[price above]" if last >= sma20 else ":red[price below]"
+            f":green[{tr('ticker.price_above')}]"
+            if last >= sma20
+            else f":red[{tr('ticker.price_below')}]"
         )
 
         if my_pos:
             _position_metrics(cols[3:], my_pos, last)
 
     fig = go.Figure()
-    fig.add_trace(
-        go.Candlestick(
-            x=df.index,
-            open=df["Open"],
-            high=df["High"],
-            low=df["Low"],
-            close=df["Close"],
-            name="Price",
+    if chart_type == "line":
+        # Explicit colour so the price line doesn't consume a colorway slot and
+        # shift SMA20/SMA50 off their established orange/green.
+        fig.add_trace(
+            go.Scatter(
+                x=df.index, y=df["Close"], name=tr("ticker.price"),
+                mode="lines",
+                line=dict(color="#4c9be8", width=1.6),
+                hovertemplate=tr("ticker.price") + "  <b>%{y:,.2f}</b><extra></extra>",
+            )
         )
-    )
+    else:
+        fig.add_trace(
+            go.Candlestick(
+                x=df.index,
+                open=df["Open"],
+                high=df["High"],
+                low=df["Low"],
+                close=df["Close"],
+                name=tr("ticker.price"),
+            )
+        )
     fig.add_trace(
         go.Scatter(
             x=df.index, y=df["SMA20"], name="SMA20",
@@ -364,29 +470,29 @@ def _price_section(ticker: str) -> None:
                 for t, _ in pts:
                     pct = (last / t.price - 1) * 100 if t.price else 0.0
                     pct_color = "#26a69a" if pct >= 0 else "#ef5350"
-                    text = (
-                        f"<b>Buy</b>  {t.quantity:.4f} sh @ <b>{t.price:,.2f}</b>"
-                        f" · {t.date}"
-                        f"<br><span style='color:{pct_color}'><b>{pct:+.2f}%</b></span>"
-                        f" to current {last:,.2f}"
+                    text = tr(
+                        "ticker.hover_buy",
+                        qty=f"{t.quantity:.4f}",
+                        price=f"{t.price:,.2f}",
+                        date=t.date,
+                        color=pct_color,
+                        pct=f"{pct:+.2f}",
+                        last=f"{last:,.2f}",
                     )
                     if avg_cost:
-                        text += f"<br>avg buy {avg_cost:,.2f}"
+                        text += tr("ticker.hover_avg_buy", avg=f"{avg_cost:,.2f}")
                     hover.append(text)
                 customdata = hover
                 hovertemplate = "%{customdata}<extra></extra>"
             else:
                 customdata = [t.quantity for t, _ in pts]
-                hovertemplate = (
-                    "<b>Sell</b>  %{customdata:.4f} sh @ <b>%{y:,.2f}</b>"
-                    " · %{x|%Y-%m-%d}<extra></extra>"
-                )
+                hovertemplate = tr("ticker.hover_sell_tmpl")
             fig.add_trace(
                 go.Scatter(
                     x=[x for _, x in pts],
                     y=[t.price for t, _ in pts],
                     mode="markers",
-                    name=f"My {action}s",
+                    name=tr("ticker.my_buys") if action == "buy" else tr("ticker.my_sells"),
                     marker=dict(
                         symbol=symbol, size=12, color=color,
                         line=dict(width=1.5, color="white"),
@@ -395,6 +501,40 @@ def _price_section(ticker: str) -> None:
                     hovertemplate=hovertemplate,
                 )
             )
+
+    # Dividends (d) and results dates (r) as dotted verticals with a letter
+    # tag on top, plus a small diamond at the bar high whose hover carries the
+    # detail (amount & yield, EPS vs estimate & surprise, move across print).
+    ev = _event_markers(df, ticker, daily=PERIODS[sel][1] == "1d")
+    for kind, (name, color) in _EVENT_KINDS.items():
+        pts = [(ts, txt) for k, ts, txt in ev if k == kind]
+        if not pts:
+            continue
+        for ts, _ in pts:
+            fig.add_vline(
+                x=ts,
+                line_dash="dot",
+                line_width=1,
+                line_color=color,
+                opacity=0.55,
+                annotation_text=kind,
+                annotation_position="top",
+                annotation_font=dict(size=11, color=color),
+            )
+        fig.add_trace(
+            go.Scatter(
+                x=[ts for ts, _ in pts],
+                y=[float(df.at[ts, "High"]) * 1.01 for ts, _ in pts],
+                mode="markers",
+                name=name,
+                marker=dict(
+                    symbol="diamond", size=7, color=color,
+                    line=dict(width=1, color="white"),
+                ),
+                customdata=[txt for _, txt in pts],
+                hovertemplate="%{customdata}<extra></extra>",
+            )
+        )
 
     fig.update_layout(
         **chart_layout(height=440, top_legend=True),
@@ -414,13 +554,23 @@ def _price_section(ticker: str) -> None:
 # Off-watchlist symbols (SEC search / held-only) fall back to the map name.
 label = labels.get(ticker) or company_name(ticker) or ticker
 src = _logo(ticker)
-if src:
-    h1, h2, h3 = st.columns([1, 10, 4], vertical_alignment="center")
-    h1.image(src, width=44)
+if _MOBILE:
+    # Phones: columns stack full-width, so the star + tags controls would drop
+    # into two full-width rows under the title. Keep title + a single compact
+    # actions menu on one flex row instead (logo stays above, full-size).
+    if src:
+        st.image(src, width=44)
+    row = st.container(horizontal=True, vertical_alignment="center")
+    row.container(width="stretch").header(f"{ticker} — {label}")
+    ticker_actions(ticker, container=row, key="page")
 else:
-    h2, h3 = st.columns([11, 4], vertical_alignment="center")
-h2.header(f"{ticker} — {label}")
-ticker_actions(ticker, container=h3, key="page")
+    if src:
+        h1, h2, h3 = st.columns([1, 10, 4], vertical_alignment="center")
+        h1.image(src, width=44)
+    else:
+        h2, h3 = st.columns([11, 4], vertical_alignment="center")
+    h2.header(f"{ticker} — {label}")
+    ticker_actions(ticker, container=h3, key="page")
 
 _price_section(ticker)
 
@@ -441,7 +591,7 @@ def _crypto_info(t: str) -> dict:
 def _crypto_section(t: str) -> None:
     """Asset stats for a coin — the crypto stand-in for the fundamentals,
     insiders and comps blocks, none of which exist for crypto."""
-    st.subheader("Asset stats")
+    st.subheader(tr("ticker.asset_stats"))
     info = _crypto_info(t)
     _, quote = split_pair(t) or (t, "USD")
     sym = {"USD": "$", "EUR": "€", "GBP": "£"}.get(quote, "")
@@ -449,21 +599,19 @@ def _crypto_section(t: str) -> None:
     vol = info.get("volume24Hr") or info.get("volume")
     supply = info.get("circulatingSupply")
     hi, lo = info.get("fiftyTwoWeekHigh"), info.get("fiftyTwoWeekLow")
+    na = tr("ticker.na")
 
     c1, c2, c3, c4 = metric_cells(4)
-    c1.metric("Market cap", compact_money(cap, sym) if cap else "n/a")
-    c2.metric("Volume (24h)", compact_money(vol, sym) if vol else "n/a")
+    c1.metric(tr("ticker.market_cap"), compact_money(cap, sym) if cap else na)
+    c2.metric(tr("ticker.volume_24h"), compact_money(vol, sym) if vol else na)
     c3.metric(
-        "Circulating supply", compact_money(supply, "") if supply else "n/a"
+        tr("ticker.circulating_supply"), compact_money(supply, "") if supply else na
     )
     c4.metric(
-        "52w range",
-        f"{lo:,.0f} – {hi:,.0f}" if lo and hi else "n/a",
+        tr("ticker.range_52w"),
+        f"{lo:,.0f} – {hi:,.0f}" if lo and hi else na,
     )
-    st.caption(
-        f"Quoted in {quote}. Fundamentals, insider filings, earnings and DCF "
-        "don't apply to crypto — those sections are hidden for this asset."
-    )
+    st.caption(tr("ticker.crypto_caption", quote=quote))
 
 
 # Crypto pairs stop after price + stats: statements, Form 4 filings and
@@ -494,7 +642,10 @@ def _annual_combined_chart(fin: pd.DataFrame, proj: pd.DataFrame) -> None:
 
     fig = go.Figure()
     has_bars = False
-    for col, label in (("Revenue", "Revenue"), ("Net Income", "Net income")):
+    for col, label in (
+        ("Revenue", tr("ticker.revenue")),
+        ("Net Income", tr("ticker.net_income")),
+    ):
         if col not in fin:
             continue
         has_bars = True
@@ -515,7 +666,9 @@ def _annual_combined_chart(fin: pd.DataFrame, proj: pd.DataFrame) -> None:
                 y.append(v)
                 text.append(f"{(v / prev - 1) * 100:+.0f}%" if prev else "")
                 kind.append(
-                    "extrapolated" if proj.loc[lbl, "RevenueExt"] else "consensus avg"
+                    tr("ticker.k_extrapolated")
+                    if proj.loc[lbl, "RevenueExt"]
+                    else tr("ticker.k_consensus")
                 )
                 pattern.append("/")
                 opacity.append(0.5)
@@ -579,16 +732,18 @@ def _annual_combined_chart(fin: pd.DataFrame, proj: pd.DataFrame) -> None:
                 x=eps_years,
                 y=eps,
                 yaxis=eps_axis,
-                name="EPS (reported)",
+                name=tr("ticker.eps_reported"),
                 mode="lines+markers",
                 line=dict(color=violet, width=2),
                 marker=dict(size=7),
-                hovertemplate="EPS  <b>%{y:.2f}</b> · reported<extra></extra>",
+                hovertemplate=tr("ticker.eps_hover_reported"),
             )
         )
         if not eps_est.empty:
             kind = [
-                "extrapolated" if proj.loc[i, "EPSExt"] else "consensus avg"
+                tr("ticker.k_extrapolated")
+                if proj.loc[i, "EPSExt"]
+                else tr("ticker.k_consensus")
                 for i in eps_est.index
             ]
             fig.add_trace(
@@ -598,7 +753,7 @@ def _annual_combined_chart(fin: pd.DataFrame, proj: pd.DataFrame) -> None:
                     x=[eps_years[-1]] + list(eps_est.index),
                     y=[eps.iloc[-1]] + list(eps_est.values),
                     yaxis=eps_axis,
-                    name="EPS consensus (3y)",
+                    name=tr("ticker.eps_consensus"),
                     mode="lines+markers",
                     line=dict(color=violet, width=2, dash="dash"),
                     marker=dict(
@@ -606,7 +761,7 @@ def _annual_combined_chart(fin: pd.DataFrame, proj: pd.DataFrame) -> None:
                         symbol="circle-open",
                         opacity=[0.0] + [1.0] * len(eps_est),
                     ),
-                    customdata=["reported"] + kind,
+                    customdata=[tr("ticker.k_reported")] + kind,
                     hovertemplate="EPS  <b>%{y:.2f}</b> · %{customdata}<extra></extra>",
                 )
             )
@@ -615,7 +770,7 @@ def _annual_combined_chart(fin: pd.DataFrame, proj: pd.DataFrame) -> None:
         fig.add_vline(x=len(years) - 0.5, **_FORECAST_DIVIDER)
     layout = dict(
         **chart_layout(
-            title="Revenue, net income & diluted EPS by year",
+            title=tr("ticker.chart_annual_title"),
             height=320,
             top_legend=True,
         ),
@@ -642,12 +797,7 @@ def _annual_combined_chart(fin: pd.DataFrame, proj: pd.DataFrame) -> None:
     fig.update_layout(**layout)
     show_chart(fig)
     if not rev_est.empty or not eps_est.empty:
-        st.caption(
-            "Hatched bars = analyst consensus revenue; dashed = consensus EPS "
-            "(right axis) with shaded low-high analyst range (yfinance); years "
-            "beyond published estimates extrapolated (revenue at next-FY "
-            "consensus growth, EPS at long-term growth with next-FY fallback)."
-        )
+        st.caption(tr("ticker.annual_caption"))
 
 
 @st.fragment
@@ -660,18 +810,20 @@ def _financials_section(ticker: str, fin: pd.DataFrame, proj: pd.DataFrame) -> N
         "EPS" in fin and fin["EPS"].notna().any()
     )
 
+    v_annual = tr("ticker.view_annual")
+    v_quarterly = tr("ticker.view_quarterly")
     views = []
     if has_annual:
-        views.append("Annual · consensus")
+        views.append(v_annual)
     if not eps_q.empty:
-        views.append("Quarterly")
+        views.append(v_quarterly)
     if not views:
         return
     view = views[0]
     if len(views) > 1:
         view = (
             st.segmented_control(
-                "Financials view",
+                tr("ticker.financials_view"),
                 views,
                 default=views[0],
                 key="eps_view",
@@ -680,7 +832,7 @@ def _financials_section(ticker: str, fin: pd.DataFrame, proj: pd.DataFrame) -> N
             or views[0]
         )
 
-    if view == "Quarterly":
+    if view == v_quarterly:
         ef = go.Figure()
         ef.add_trace(
             go.Scatter(
@@ -693,7 +845,7 @@ def _financials_section(ticker: str, fin: pd.DataFrame, proj: pd.DataFrame) -> N
             )
         )
         ef.update_layout(
-            **chart_layout(title="Diluted EPS by quarter"),
+            **chart_layout(title=tr("ticker.chart_quarterly_title")),
             yaxis=dict(fixedrange=True),
         )
         show_chart(ef)
@@ -720,11 +872,11 @@ def _fx_usd_eur() -> tuple[float, str]:
     return usd_eur()
 
 
-st.subheader("Fundamentals")
-with st.spinner(f"Loading fundamentals for {ticker}…"):
+st.subheader(tr("ticker.fundamentals"))
+with st.spinner(tr("ticker.loading_fundamentals", ticker=ticker)):
     mets = _metrics(ticker)
 
-st.caption("Verdict tags: :green[cheap / strong / safe] · :orange[fair] · :red[expensive / weak / risky]")
+st.caption(tr("ticker.verdict_tags"))
 
 
 def _kpi(col, label: str, key: str, help: str | None = None) -> None:
@@ -733,8 +885,7 @@ def _kpi(col, label: str, key: str, help: str | None = None) -> None:
     Tooltip defaults to the plain-language definition in KPI_SOURCES; pass
     `help` only to override it (e.g. the PEG reliability warning).
     """
-    src = KPI_SOURCES.get(key)
-    tip = help or (src.desc if src else None)
+    tip = help or (kpi_desc(key) if key in KPI_SOURCES else None)
     col.metric(label, format_value(key, mets[key]), help=tip)
     col.caption(verdict_md(key, mets[key]))
 
@@ -742,27 +893,31 @@ def _kpi(col, label: str, key: str, help: str | None = None) -> None:
 # Single dense KPI row — one metric height for the whole fundamentals block.
 # On phones the 9 tiles wrap 3 per row instead of stacking full-width.
 kpi_cols = metric_cells(9)
-_kpi(kpi_cols[0], "P/E (TTM)", "pe_ttm")
-_kpi(kpi_cols[1], "P/E (fwd)", "pe_fwd")
-_kpi(kpi_cols[2], "PEG (TTM)", "peg", help="yfinance PEG unreliable — cross-check analyst consensus (Koyfin/TIKR)")
-_kpi(kpi_cols[3], "EV/EBITDA", "ev_ebitda")
-_kpi(kpi_cols[4], "EV/Sales", "ev_sales")
-_kpi(kpi_cols[5], "ROIC", "roic")
-_kpi(kpi_cols[6], "FCF yield", "fcf_yield")
-_kpi(kpi_cols[7], "Net debt/EBITDA", "net_debt_ebitda")
-_kpi(kpi_cols[8], "Dilution (CAGR)", "share_dilution")
+_kpi(kpi_cols[0], tr("ticker.kpi_pe_ttm"), "pe_ttm")
+_kpi(kpi_cols[1], tr("ticker.kpi_pe_fwd"), "pe_fwd")
+_kpi(kpi_cols[2], tr("ticker.kpi_peg"), "peg", help=tr("ticker.kpi_peg_help"))
+_kpi(kpi_cols[3], tr("ticker.kpi_ev_ebitda"), "ev_ebitda")
+_kpi(kpi_cols[4], tr("ticker.kpi_ev_sales"), "ev_sales")
+_kpi(kpi_cols[5], tr("ticker.kpi_roic"), "roic")
+_kpi(kpi_cols[6], tr("ticker.kpi_fcf_yield"), "fcf_yield")
+_kpi(kpi_cols[7], tr("ticker.kpi_net_debt_ebitda"), "net_debt_ebitda")
+_kpi(kpi_cols[8], tr("ticker.kpi_dilution"), "share_dilution")
 
 if mets.get("market_cap") and mets.get("currency") == "USD":
     try:
         rate, as_of = _fx_usd_eur()
         cap_eur = float(mets["market_cap"]) * rate
         st.caption(
-            f"Market cap: {format_value('market_cap', mets['market_cap'])} USD "
-            f"≈ {format_value('market_cap', cap_eur)} EUR "
-            f"(ECB spot {rate:.4f}, {as_of})"
+            tr(
+                "ticker.market_cap_fx",
+                usd=format_value("market_cap", mets["market_cap"]),
+                eur=format_value("market_cap", cap_eur),
+                rate=f"{rate:.4f}",
+                as_of=as_of,
+            )
         )
     except Exception:
-        st.caption("EUR conversion unavailable (FX endpoint unreachable).")
+        st.caption(tr("ticker.fx_unavailable"))
 
 
 # ------------------------------------------------------------------ moat
@@ -771,34 +926,27 @@ def _moat(t: str) -> MoatScore:
     return moat_score(_raw(t))
 
 
-st.subheader("Moat")
+st.subheader(tr("ticker.moat"))
 moat = _moat(ticker)
 if moat.score is None:
-    st.caption(
-        "Not enough statement history to score a moat — needs at least 3 of the "
-        "5 pillars (ROIC, margins, growth, FCF, dilution)."
-    )
+    st.caption(tr("ticker.moat_insufficient"))
 else:
     moat_cols = metric_cells(len(moat.pillars) + 1)
     moat_cols[0].metric(
-        "Moat score",
+        tr("ticker.moat_score"),
         format_value("moat", moat.score),
-        help=KPI_SOURCES["moat"].desc,
+        help=kpi_desc("moat"),
     )
     moat_cols[0].caption(verdict_md("moat", moat.score))
     for col, pillar in zip(moat_cols[1:], moat.pillars):
         col.metric(
             pillar.label,
-            "n/a" if pillar.score is None else f"{pillar.score:.0f}",
+            tr("ticker.na") if pillar.score is None else f"{pillar.score:.0f}",
             help=pillar.detail,
         )
         if pillar.score is not None:
-            col.caption(f"weight {PILLAR_WEIGHTS[pillar.key]:.0%}")
-    st.caption(
-        f"Quant proxies from {moat.years} filed years — the score sees what a "
-        "moat leaves in the numbers, not its cause (brand, network effects, "
-        "switching costs). Screen, not verdict."
-    )
+            col.caption(tr("ticker.weight", pct=f"{PILLAR_WEIGHTS[pillar.key]:.0%}"))
+    st.caption(tr("ticker.moat_caption", years=moat.years))
 
 # ---------------------------------------------------------- insider activity
 @st.cache_data(ttl=3600, show_spinner=False)
@@ -806,44 +954,33 @@ def _insiders(t: str):
     return insider_transactions(t)
 
 
-st.subheader("Insider activity")
-st.caption(
-    "SEC Form 4 — officers, directors and 10% owners trading their own stock. "
-    "Open-market buys (P) and sells (S) are the signal; grants, option "
-    "exercises and tax withholding are shown but excluded from the buy/sell net."
-)
-with st.spinner(f"Loading Form 4 filings for {ticker}…"):
+st.subheader(tr("ticker.insider_activity"))
+st.caption(tr("ticker.insider_caption"))
+with st.spinner(tr("ticker.loading_form4", ticker=ticker)):
     txs = _insiders(ticker)
 
 if not txs:
-    st.caption("No recent Form 4 filings on record (non-US filers have none here).")
+    st.caption(tr("ticker.no_form4"))
 else:
     summ = summarize(txs, ref=date.today())
     i1, i2, i3, i4 = metric_cells(4)
     i1.metric(
-        "Buys · open market",
+        tr("ticker.buys_open_market"),
         str(summ.buy_count),
         delta=f"+{_fmt_money(summ.buy_value)}" if summ.buy_value else None,
     )
     i2.metric(
-        "Sells · open market",
+        tr("ticker.sells_open_market"),
         str(summ.sell_count),
         delta=f"-{_fmt_money(summ.sell_value)}" if summ.sell_value else None,
     )
-    i3.metric(f"Net · {summ.window_days}d", _fmt_money(summ.net_value))
-    i4.metric("Distinct buyers / sellers", f"{summ.buyers} / {summ.sellers}")
+    i3.metric(tr("ticker.net_window", days=summ.window_days), _fmt_money(summ.net_value))
+    i4.metric(tr("ticker.distinct_buyers_sellers"), f"{summ.buyers} / {summ.sellers}")
 
     if summ.cluster_buy:
-        st.success(
-            "Cluster buying — multiple insiders bought on the open market "
-            "over the window and net flow is positive.",
-            icon=":material/trending_up:",
-        )
+        st.success(tr("ticker.cluster_buying"), icon=":material/trending_up:")
     elif summ.sell_value > summ.buy_value * 3 and summ.sell_count:
-        st.warning(
-            "Selling dominates open-market insider flow over the window.",
-            icon=":material/trending_down:",
-        )
+        st.warning(tr("ticker.selling_dominates"), icon=":material/trending_down:")
 
     # Monthly open-market buy vs sell value — the buy/sell balance over time.
     om = [t for t in txs if t.is_open_market and t.date and t.value]
@@ -859,17 +996,21 @@ else:
             flow.groupby(["month", "side"])["value"].sum().unstack(fill_value=0)
         )
         bar = go.Figure()
+        # Keep "Buy"/"Sell" as the pivot data keys; only the display name is
+        # localized (translated labels would break the pivot column lookup).
+        side_labels = {"Buy": tr("ticker.buy"), "Sell": tr("ticker.sell")}
         for side, color in (("Buy", "#26a69a"), ("Sell", "#ef5350")):
             if side in pivot.columns:
                 bar.add_trace(
                     go.Bar(
-                        x=pivot.index, y=pivot[side], name=side, marker_color=color,
-                        hovertemplate=f"{side}  <b>$%{{y:.3s}}</b><extra></extra>",
+                        x=pivot.index, y=pivot[side], name=side_labels[side],
+                        marker_color=color,
+                        hovertemplate=f"{side_labels[side]}  <b>$%{{y:.3s}}</b><extra></extra>",
                     )
                 )
         bar.update_layout(
             **chart_layout(
-                title="Open-market insider buys vs sells by month ($)",
+                title=tr("ticker.chart_insider_title"),
                 top_legend=True,
                 height=220,
             ),
@@ -885,13 +1026,13 @@ else:
         hide_index=True,
         height=280,
         column_config={
-            "Date": st.column_config.DateColumn(format="YYYY-MM-DD"),
-            "Shares": st.column_config.NumberColumn(format="%d"),
-            "Price": st.column_config.NumberColumn(format="$%.2f"),
-            "Value": st.column_config.NumberColumn(format="$%.0f"),
+            "Date": st.column_config.DateColumn(tr("ticker.col_date"), format="YYYY-MM-DD"),
+            "Shares": st.column_config.NumberColumn(tr("ticker.col_shares"), format="%d"),
+            "Price": st.column_config.NumberColumn(tr("ticker.col_price"), format="$%.2f"),
+            "Value": st.column_config.NumberColumn(tr("ticker.col_value"), format="$%.0f"),
         },
     )
-    st.caption("Shares/value are signed: negative = disposition (sale/withholding).")
+    st.caption(tr("ticker.signed_caption"))
 
 # Comparables: framework wants 2-3 direct competitors side by side.
 @st.cache_data(ttl=86400, show_spinner=False)
@@ -901,41 +1042,47 @@ def _related(t: str) -> list[str]:
     return related_tickers(t)
 
 
-st.subheader("Comparables")
-# Both selectors are pills, not multiselects: pills render option Markdown,
-# so every candidate shows logo + symbol + company name. Options are stable
-# per viewed ticker (no cross-filtering) — pills with a key crash when a
-# selected value drops out of its options between reruns.
+st.subheader(tr("ticker.comparables"))
+# Related tickers stay pills (Markdown labels render logo + symbol + name) for
+# fast one-tap comparison. The full watchlist is too long to dump as a pill
+# wall, so it lives in a searchable, collapsed multiselect instead — options
+# are stable per viewed ticker, so a selected value never drops out mid-rerun.
 # Crypto pairs never belong in a stock comps table.
 peer_pool = [t for t in tickers if t != ticker and not is_crypto(t)]
+
+
+def _peer_label(t: str) -> str:
+    name = company_name(t)
+    return f"{t} — {name}" if name and name.upper() != t.upper() else t
+
+
 peers = list(
-    st.pills(
-        "Peers from watchlist",
+    st.multiselect(
+        tr("ticker.peers_watchlist"),
         peer_pool,
-        selection_mode="multi",
-        format_func=ticker_pill_md,
+        format_func=_peer_label,
         key=f"peers_{ticker}",
+        placeholder=tr("ticker.peers_search"),
     )
-    or []
 )
 suggested = [s for s in _related(ticker) if s not in peer_pool]
 picked = (
     st.pills(
-        "Related tickers",
+        tr("ticker.related_tickers"),
         suggested,
         selection_mode="multi",
         format_func=ticker_pill_md,
         key=f"related_{ticker}",
-        help="People-also-watch peers from Yahoo Finance — tap to add to the comps table.",
+        help=tr("ticker.related_help"),
     )
     if suggested
     else []
 )
-extra = st.text_input("Extra peer tickers (comma-separated)", "")
+extra = st.text_input(tr("ticker.extra_peers"), "")
 peers += [p for p in picked if p not in peers]
 peers += [p.strip().upper() for p in extra.split(",") if p.strip() and p.strip().upper() not in peers]
 if peers:
-    with st.spinner("Loading peers…"):
+    with st.spinner(tr("ticker.loading_peers")):
         rows = [mets] + [_metrics(p) for p in peers]
     # Tickers run across the columns here, so the logo+symbol cell goes in
     # the header (no company name — comps stay compact); KPI labels keep the
@@ -948,20 +1095,10 @@ if peers:
     ]
     st.html(ticker_table_html(comp, ticker_col=None, show_index=True))
     if medals:
-        st.caption(
-            "🥇🥈🥉 = best composite rank across the comparable KPIs "
-            "(valuation, quality, growth, leverage — each metric ranked "
-            "across the set, size ignored)."
-        )
+        st.caption(tr("ticker.medals_caption"))
 else:
-    st.caption("Pick peers to build the comps table.")
+    st.caption(tr("ticker.pick_peers"))
 
-with st.expander("KPI sources & verification (fact / consensus / derived)"):
+with st.expander(tr("ticker.kpi_sources_title")):
     st.dataframe(sources_table(), hide_index=True)
-    st.caption(
-        "Verification hierarchy: SEC EDGAR (primary, 10-K/10-Q) > "
-        "stockanalysis.com (10y ratios) > Macrotrends (15-20y trends) > "
-        "Koyfin/TIKR (multi-company comps). yfinance loads the numbers; "
-        "EDGAR confirms them. All KPIs defined in "
-        f"{len(KPI_SOURCES)} entries of KPI_SOURCES."
-    )
+    st.caption(tr("ticker.kpi_sources_caption", n=len(KPI_SOURCES)))

@@ -1,6 +1,16 @@
 # Professional Financial Dashboard Theme (Dark)
 # Conservative, trustworthy palette with clear data visualization
 
+[client]
+# Don't render tracebacks or exception messages in the browser: deployed
+# errors would expose filesystem paths (user-dir names) and storage details.
+# Full details still print to the server console. When debugging locally:
+#   STREAMLIT_CLIENT_SHOW_ERROR_DETAILS=full uv run stocks dashboard
+showErrorDetails = "type"
+# Hide the "Deploy" button (a developer toolbar item) — it overlapped the chat
+# FAB launcher (chat_core.py .st-key-chatfab). "viewer" keeps the ⋮ app menu.
+toolbarMode = "viewer"
+
 [theme]
 base = "dark"
 primaryColor = "#60A5FA"             # Bright blue for dark mode

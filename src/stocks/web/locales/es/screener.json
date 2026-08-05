@@ -1,0 +1,16 @@
+{
+  "screener.title": "Filtro de la lista de seguimiento",
+  "screener.watchlist_empty": "Lista de seguimiento vacía. Añade valores en la página **Perfil**.",
+  "screener.only_crypto": "Solo hay cripto en la lista de seguimiento — el filtro por KPI necesita acciones.",
+  "screener.crypto_excluded": "{n} activo(s) cripto excluido(s) — sin fundamentales que filtrar.",
+  "screener.loading_fundamentals": "Cargando fundamentales de toda la lista de seguimiento…",
+  "screener.screen_filters": "Cribado y filtros",
+  "screener.screen": "Cribado",
+  "screener.rank_by": "Ordenar por",
+  "screener.ascending": "Ascendente",
+  "screener.columns": "Columnas",
+  "screener.filters_caption": "Filtros (las métricas en porcentaje son fracciones: 0.15 = 15%)",
+  "screener.pass_caption": "{n} de {total} valores pasan — reordena con **Ordenar por**.",
+  "screener.download_csv": "Descargar números en bruto (CSV)",
+  "screener.metrics_help": "¿Qué significan estas métricas?"
+}

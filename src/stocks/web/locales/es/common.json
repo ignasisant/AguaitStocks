@@ -1,0 +1,14 @@
+{
+  "nav.home": "Inicio",
+  "nav.ticker": "Valor",
+  "nav.portfolio": "Cartera",
+  "nav.screener": "Filtro",
+  "nav.earnings": "Resultados",
+  "nav.import": "Importar",
+  "nav.chat": "Chat",
+  "nav.profile": "Perfil",
+  "common.sign_in_google": "Iniciar sesión con Google",
+  "common.log_out": "Cerrar sesión",
+  "common.save": "Guardar",
+  "common.loading": "Cargando…"
+}

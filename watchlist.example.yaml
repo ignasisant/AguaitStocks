@@ -1,4 +1,4 @@
-# Stocks I follow. Edit freely.
+# Copy to watchlist.yaml (git-ignored — it holds your personal positions).
 #
 # Per-entry fields:
 #   favorite: true   -> pinned to top of the dashboard + quick-access buttons
@@ -31,12 +31,14 @@
 # bare local codes Yahoo doesn't know; every price/profile lookup resolves
 # through this map first, so the ledger keeps the broker code as-is.
 # When an import warns about an unknown ticker, add a line here.
+# These maps are global reference data (not personal): when watchlist.yaml
+# doesn't exist yet, the app reads them from this example file instead.
 aliases:
   RCF: TEP.PA # Teleperformance (Euronext Paris)
   HMI: RMS.PA # Hermes (Euronext Paris)
-  DHER: DHER.DE # Delivery Hero (XETRA, closed 2026-05)
-  NA9: NA9.DE # Nagarro (XETRA, closed 2026-01)
-  AB9: AB9.DE # ABO Energy (XETRA, closed 2026-06)
+  DHER: DHER.DE # Delivery Hero (XETRA)
+  NA9: NA9.DE # Nagarro (XETRA)
+  AB9: AB9.DE # ABO Energy (XETRA)
 
 # TradingView venues for `stocks tv` (technical consensus). Yahoo aliases above
 # don't work here — TradingView needs EXCHANGE:SYMBOL plus a regional @screener.
@@ -55,87 +57,7 @@ watchlist:
     alerts:
       - type: below
         price: 190
-      - type: above
-        price: 260
-
-  # --- USD portfolio ---
-  - ticker: NOW
-    name: ServiceNow
-  - ticker: ENVA
-    name: Enova International
-  - ticker: RDDT
-    name: Reddit
-  - ticker: MNDY
-    name: monday.com
-  - ticker: TSM
-    name: Taiwan Semiconductor
-  - ticker: META
-    name: Meta Platforms
-  - ticker: NVDA
-    name: Nvidia
-    favorite: true
-    alerts:
-      - type: above
-        price: 200
-  - ticker: CLSK
-    name: CleanSpark
-  - ticker: AMZN
-    name: Amazon
-  - ticker: FISV
-    name: Fiserv  # note: ticker rebranded to FI (Jul 2023); FISV may not resolve in yfinance
   - ticker: MSFT
     name: Microsoft
-  - ticker: CRWV
-    name: CoreWeave
-  - ticker: DASH
-    name: DoorDash
-  - ticker: GOOG
-    name: Alphabet
-  - ticker: DUOL
-    name: Duolingo
-  - ticker: SHOP
-    name: Shopify
-  - ticker: UNH
-    name: UnitedHealth
-  - ticker: ESTC
-    name: Elastic
-  - ticker: FSLR
-    name: First Solar
-  - ticker: JD
-    name: JD.com
-  - ticker: DXCM
-    name: DexCom
-  - ticker: FIG
-    name: Figma
-  - ticker: ADBE
-    name: Adobe
-  - ticker: CRM
-    name: Salesforce
-  - ticker: HUBS
-    name: HubSpot
-  - ticker: BABA
-    name: Alibaba
-  - ticker: AVGO
-    name: Broadcom
-  - ticker: TTD
-    name: The Trade Desk
-  - ticker: SEZL
-    name: Sezzle
-  - ticker: SPOT
-    name: Spotify
-  - ticker: WMT
-    name: Walmart
-  - ticker: DSGX
-    name: Descartes Systems
-  - ticker: NVO
-    name: Novo Nordisk
-  - ticker: MELI
-    name: MercadoLibre
-  - ticker: UTHR
-    name: United Therapeutics
-
-  # --- EUR portfolio (Euronext Paris; broker codes, see aliases above) ---
-  - ticker: RCF
-    name: Teleperformance
-  - ticker: HMI
-    name: Hermes
+  - ticker: NVDA
+    name: Nvidia

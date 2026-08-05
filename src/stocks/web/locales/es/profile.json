@@ -1,0 +1,23 @@
+{
+  "profile.account_caption": "Tu lista de seguimiento, el libro de la cartera y las preferencias están vinculados a esta cuenta — ningún otro usuario de esta app los ve. Carpeta de datos: `{folder}`.",
+  "profile.preferences": "Preferencias",
+  "profile.language": "Idioma",
+  "profile.lang_auto": "Automático (navegador)",
+  "profile.language_caption": "Define el idioma de la interfaz. El modo automático sigue el idioma de tu navegador; elige uno para forzarlo en todos los dispositivos.",
+  "profile.display_currency": "Moneda de visualización",
+  "profile.currency_set": "Moneda de visualización fijada en {ccy}",
+  "profile.currency_caption": "Convierte las cifras principales de la Cartera al último tipo de cambio. Las cifras fiscales se mantienen en EUR — las normas fiscales españolas están denominadas en euros.",
+  "profile.watchlist": "Lista de seguimiento",
+  "profile.watchlist_caption": "Alimenta Resumen, Filtro, Resultados y el selector de valores. Añade o elimina filas y pulsa **Guardar**. `shares` + `cost` convierten una entrada en una posición para el análisis de reserva a peso equitativo; el libro real sigue viniendo de las transacciones importadas. Se conservan las reglas de alerta de los valores mantenidos. Las criptos se añaden como símbolo de par de Yahoo — `BTC-USD`, `ETH-EUR` — nunca como código de moneda a secas (los códigos simples chocan con los tickers de acciones).",
+  "profile.watchlist_empty": "La lista de seguimiento está vacía — añade una fila abajo (**+** al final de la tabla), escribe un ticker como `AAPL` y pulsa **Guardar**. Resumen, Filtro y Resultados cobran vida en cuanto haya un valor.",
+  "profile.col_ticker": "Ticker",
+  "profile.col_name": "Nombre",
+  "profile.col_favorite": "Favorito",
+  "profile.col_shares": "Acciones",
+  "profile.col_avg_cost": "Coste medio",
+  "profile.col_avg_cost_help": "Precio medio de compra por acción, en la moneda nativa del valor",
+  "profile.col_tags": "Etiquetas",
+  "profile.col_tags_help": "Grupos separados por comas, p. ej. `semis, EM` — la búsqueda del selector de valores los encuentra",
+  "profile.save_watchlist": "Guardar lista",
+  "profile.saved": "Guardado — la lista de seguimiento tiene ahora {n} entradas."
+}

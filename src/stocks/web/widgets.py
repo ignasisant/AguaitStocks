@@ -20,6 +20,7 @@ import streamlit as st
 from stocks.config import load_watchlist
 from stocks.data.logo import logo_url
 from stocks.web import auth
+from stocks.web.i18n import t as tr
 
 # One hover-label look for every chart: bigger type than Plotly's ~13px
 # default, dark slate box with light text (readable on both Streamlit themes
@@ -111,15 +112,20 @@ def chart_layout(
     Splat into update_layout before chart-specific keys:
         fig.update_layout(**chart_layout(title=..., top_legend=True), ...)
     """
+    # On phones the chart is ~390px wide: a long title wraps to two lines and a
+    # horizontal legend with long entries wraps to three rows. Both render in the
+    # top margin, so the single-line bands below would let them collide (title
+    # over legend). Reserve taller bands on mobile so each clears the other.
+    mobile = is_mobile()
     top = 8
     layout: dict = {"height": height}
     if title:
-        top += 34
+        top += 52 if mobile else 34
         layout["title"] = dict(
             text=title, x=0, xanchor="left", y=1, yanchor="top", pad=dict(t=8)
         )
     if top_legend:
-        top += 26
+        top += 60 if mobile else 26
         layout["legend"] = dict(orientation="h", yanchor="bottom", y=1.0, x=0)
     layout["margin"] = dict(l=0, r=0, t=top, b=0)
     return layout
@@ -425,7 +431,7 @@ def ticker_picker(
     *,
     key: str = "ticker",
     container=None,
-    title: str = "Tickers",
+    title: str | None = None,
     allow_custom: bool = True,
     show_changes: bool = True,
     list_height: int = 360,
@@ -439,7 +445,8 @@ def ticker_picker(
             keys "picker_selected"/"picker_sort_by"), so switching pages keeps
             the same selection and ordering.
         container: where to render; defaults to `st.sidebar`.
-        title: bold label above the searchbar.
+        title: bold label above the searchbar (defaults to the localized
+            "Tickers" heading when None).
         allow_custom: show an "Analyze <SYMBOL>" button when the query is a
             symbol not on the watchlist, so any ticker can be analyzed.
         show_changes: render the per-ticker daily-change chip (one bulk
@@ -449,6 +456,8 @@ def ticker_picker(
     Returns the selected ticker (upper-cased, stripped) or None when the
     watchlist is empty and nothing has been typed.
     """
+    if title is None:
+        title = tr("widgets.tickers_title")
     mobile = is_mobile()
     if container is not None:
         box = container
@@ -504,16 +513,23 @@ def ticker_picker(
     weights, pnl = (
         portfolio_stats(tuple(tickers), _db, db_mtime(_db)) if held_set else ({}, {})
     )
-    sort_opts = ["Watchlist", "A–Z"]
+    # Sort labels double as the compared/stored value (session "picker_sort_by"),
+    # so bind each translated label to a variable and compare against those.
+    lbl_watchlist = tr("widgets.sort_watchlist")
+    lbl_az = tr("widgets.sort_az")
+    lbl_change_up = tr("widgets.sort_change_up")
+    lbl_change_down = tr("widgets.sort_change_down")
+    lbl_portfolio = tr("widgets.sort_portfolio")
+    sort_opts = [lbl_watchlist, lbl_az]
     if show_changes:
-        sort_opts += ["Change ▲", "Change ▼"]
+        sort_opts += [lbl_change_up, lbl_change_down]
     if weights:
-        sort_opts.append("Portfolio %")
+        sort_opts.append(lbl_portfolio)
     sc1, sc2 = box.columns([5, 1], vertical_alignment="bottom")
     query = sc1.text_input(
-        "Search",
+        tr("widgets.search"),
         key=f"{key}_search",
-        placeholder="Search ticker or name…",
+        placeholder=tr("widgets.search_placeholder"),
         label_visibility="collapsed",
     ).strip()
     # The sort choice mirrors into a shared session key: a page switch drops
@@ -526,9 +542,9 @@ def ticker_picker(
     def _set_sort() -> None:
         st.session_state["picker_sort_by"] = st.session_state[f"{key}_sort"]
 
-    with sc2.popover(":material/sort:", help="Sort the list", width="stretch"):
+    with sc2.popover(":material/sort:", help=tr("widgets.sort_help"), width="stretch"):
         sort_by = st.radio(
-            "Sort by",
+            tr("widgets.sort_by"),
             sort_opts,
             index=sort_opts.index(stored_sort),
             key=f"{key}_sort",
@@ -554,10 +570,10 @@ def ticker_picker(
 
     # Apply the sort chosen in the popover. "Watchlist" keeps the favorites-first
     # source order; the rest reorder `shown`. Missing changes sink to the bottom.
-    if sort_by == "A–Z":
+    if sort_by == lbl_az:
         shown = sorted(shown)
-    elif sort_by in ("Change ▲", "Change ▼"):
-        desc = sort_by == "Change ▼"
+    elif sort_by in (lbl_change_up, lbl_change_down):
+        desc = sort_by == lbl_change_down
         # Unknown change → +inf so it sorts last in both directions.
         shown = sorted(
             shown,
@@ -569,7 +585,7 @@ def ticker_picker(
             known = [t for t in shown if changes.get(t) is not None]
             unknown = [t for t in shown if changes.get(t) is None]
             shown = known + unknown
-    elif sort_by == "Portfolio %":
+    elif sort_by == lbl_portfolio:
         # Biggest position first; unheld tickers weigh 0 and sink to the bottom
         # keeping their watchlist order (sorted is stable).
         shown = sorted(shown, key=lambda t: -weights.get(t, 0.0))
@@ -623,7 +639,7 @@ def ticker_picker(
         known = set(labels) | {t for t, _ in matches} | {t for t, _ in crypto_hits}
         if q not in known and re.fullmatch(r"[A-Z0-9.\-]{1,12}", q):
             box.button(
-                f"Analyze **{q}**",
+                tr("widgets.analyze", q=q),
                 key=f"{key}_analyze_new",
                 on_click=_select,
                 args=(q,),
@@ -635,11 +651,11 @@ def ticker_picker(
     # Fixed-height scroll region so a long watchlist stays a tidy, scrollable list.
     with box.container(height=list_height):
         if not shown and not q:
-            st.caption("No tickers.")
+            st.caption(tr("widgets.no_tickers"))
         for t in shown:
             star = "⭐ " if t in fav_set else ("💼 " if t in held_set else "")
             chip = f"  {_change_md(changes.get(t))}" if show_changes else ""
-            if sort_by == "Portfolio %":
+            if sort_by == lbl_portfolio:
                 # Sorting by weight — show the weight plus the position's total
                 # P/L (green/red) instead of the day change.
                 w = weights.get(t)
@@ -660,7 +676,7 @@ def ticker_picker(
         # Same no-logo rule as SEC rows; 🪙 marks them. Picking one selects the
         # Yahoo pair symbol (BTC-USD), the only form the app stores.
         if crypto_hits:
-            st.caption("Crypto")
+            st.caption(tr("widgets.crypto"))
             for t, name in crypto_hits:
                 st.button(
                     f"🪙 **{t}** {name}",
@@ -675,7 +691,7 @@ def ticker_picker(
         # 🔎 marks these as searched, not listed. Picking one selects it like
         # any row (and the favorite star can then pin it to the watchlist).
         if matches:
-            st.caption("From SEC ticker search")
+            st.caption(tr("widgets.from_sec_search"))
             for t, name in matches:
                 st.button(
                     f"🔎 **{t}** {name}",
@@ -708,7 +724,7 @@ def ticker_actions(ticker: str, *, container=None, key: str = "ticker") -> None:
     if not auth.is_logged_in():
         if "auth" in st.secrets:
             box.button(
-                "Sign in to favorite & tag",
+                tr("widgets.sign_in_favorite"),
                 key=f"{key}_login_{_slug(ticker)}",
                 icon=":material/login:",
                 on_click=st.login,
@@ -725,42 +741,61 @@ def ticker_actions(ticker: str, *, container=None, key: str = "ticker") -> None:
     )
     fav = bool(h and h.favorite)
     tags = list(h.tags) if h else []
+    ms_key = f"{key}_tags_{_slug(ticker)}"
 
     def _toggle_fav() -> None:
         now = auth.toggle_favorite(ticker)
-        st.toast(
-            f"{ticker} {'added to' if now else 'removed from'} favorites",
-            icon=":material/star:",
+        msg = (
+            tr("widgets.toast_fav_added", ticker=ticker)
+            if now
+            else tr("widgets.toast_fav_removed", ticker=ticker)
         )
+        st.toast(msg, icon=":material/star:")
+
+    def _save_tags() -> None:
+        auth.set_tags(ticker, st.session_state[ms_key])
+
+    def _tag_editor() -> None:
+        st.multiselect(
+            tr("widgets.tag_groups"),
+            options=auth.all_tags(),
+            default=tags,
+            key=ms_key,
+            accept_new_options=True,
+            on_change=_save_tags,
+            placeholder=tr("widgets.tags_placeholder"),
+            help=tr("widgets.tags_help"),
+        )
+
+    if is_mobile():
+        # Phones: both actions fold into one compact kebab menu that sits inline
+        # beside the title, instead of two full-width rows under the header. The
+        # favorited state and current tags show once the menu is open.
+        with box.popover(":material/more_vert:"):
+            st.button(
+                tr("widgets.remove_favorite") if fav else tr("widgets.add_favorite"),
+                key=f"{key}_fav_{_slug(ticker)}",
+                icon=":material/star:",
+                on_click=_toggle_fav,
+                type="primary" if fav else "secondary",
+                width="stretch",
+            )
+            _tag_editor()
+        return
 
     c1, c2 = box.columns([1, 4], vertical_alignment="center")
     c1.button(
         ":material/star:",
         key=f"{key}_fav_{_slug(ticker)}",
         on_click=_toggle_fav,
-        help="Remove from favorites" if fav else "Add to favorites",
+        help=tr("widgets.remove_favorite") if fav else tr("widgets.add_favorite"),
         # Primary fill marks the favorited state (label is the same star).
         type="primary" if fav else "secondary",
         width="stretch",
     )
 
-    ms_key = f"{key}_tags_{_slug(ticker)}"
-
-    def _save_tags() -> None:
-        auth.set_tags(ticker, st.session_state[ms_key])
-
-    with c2.popover(":material/label: Tags", width="stretch"):
-        st.multiselect(
-            "Tag groups",
-            options=auth.all_tags(),
-            default=tags,
-            key=ms_key,
-            accept_new_options=True,
-            on_change=_save_tags,
-            placeholder="Pick or type a new tag…",
-            help="Free-form groups, saved to your watchlist as you edit. "
-            "Search the ticker list by tag to filter a group.",
-        )
+    with c2.popover(f":material/label: {tr('widgets.tags')}", width="stretch"):
+        _tag_editor()
 
     if tags:
         box.markdown(" ".join(f":gray-badge[{t}]" for t in tags))

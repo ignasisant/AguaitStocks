@@ -17,6 +17,10 @@ wheels/
 /data/statements/
 /data/*.parquet
 
+# Personal watchlist (holdings, favorites, alert levels) — the tracked
+# template is watchlist.example.yaml
+/watchlist.yaml
+
 # Portfolio ledger (private holdings) + cached FX history
 /data/portfolio.db
 /data/portfolio.db.bak*
@@ -39,3 +43,7 @@ wheels/
 
 # Streamlit secrets (never commit)
 .streamlit/secrets.toml
+
+# Agent tooling: local symlinks into .venv (per-machine, not for the repo)
+/.claude/
+/.agents/

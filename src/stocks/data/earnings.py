@@ -19,6 +19,7 @@ from datetime import date, timedelta
 import pandas as pd
 
 from stocks.config import Holding, load_watchlist
+from stocks.data.fetch import resolve
 
 
 @dataclass
@@ -125,7 +126,7 @@ def fetch_earnings(ticker: str) -> tuple[list[date], list[EarningsResult]]:
     """
     import yfinance as yf
 
-    t = yf.Ticker(ticker)
+    t = yf.Ticker(resolve(ticker))
     found: set[date] = set()
     results: dict[date, EarningsResult] = {}
     try:
@@ -172,7 +173,7 @@ def price_reaction(ticker: str, event_date: date) -> float | None:
     import yfinance as yf
 
     try:
-        hist = yf.Ticker(ticker).history(
+        hist = yf.Ticker(resolve(ticker)).history(
             start=event_date - timedelta(days=7),
             end=event_date + timedelta(days=7),
             interval="1d",

@@ -29,10 +29,11 @@ from stocks.data.earnings import (
     price_reaction,
 )
 from stocks.web import auth
+from stocks.web.i18n import t as tr
 from stocks.web.widgets import db_mtime, held_tickers, is_mobile, ticker_table_html
 from stocks.web.widgets import logo as _logo
 
-st.title("Earnings calendar")
+st.title(tr("earnings.title"))
 
 from stocks.data.crypto import is_crypto
 
@@ -41,10 +42,7 @@ holdings = [
     h for h in load_watchlist(auth.watchlist_path()) if not is_crypto(h.ticker)
 ]
 if not holdings:
-    st.warning(
-        "No stocks on the watchlist (crypto has no earnings). Add tickers on "
-        "the **Profile** page."
-    )
+    st.warning(tr("earnings.no_stocks"))
     st.stop()
 
 tickers = [h.ticker for h in holdings]
@@ -59,9 +57,9 @@ _portfolio = set(held_tickers(_db, db_mtime(_db))) | {
     h.ticker for h in holdings if h.is_position
 }
 if _portfolio:
-    _groups["Portfolio"] = _portfolio
+    _groups[tr("earnings.filter_portfolio")] = _portfolio
 if favs := {h.ticker for h in holdings if h.favorite}:
-    _groups["Favorites"] = favs
+    _groups[tr("earnings.filter_favorites")] = favs
 _tag_groups: dict[str, set[str]] = {}
 for h in holdings:
     for t in h.tags:
@@ -69,7 +67,7 @@ for h in holdings:
 _groups.update(sorted(_tag_groups.items()))
 
 
-@st.cache_data(ttl=6 * 3600, show_spinner="Fetching earnings dates…")
+@st.cache_data(ttl=6 * 3600, show_spinner=tr("earnings.fetching_dates"))
 def _calendar_data(sig: tuple):
     # One parallel yfinance pass -> (upcoming events, past reported results).
     # The calendar places both on their month; the list splits them into two
@@ -86,14 +84,14 @@ def _reaction(ticker: str, iso: str) -> float | None:
 
 events, results = _calendar_data(tuple(tickers))
 if not events and not results:
-    st.info("No earnings dates found for the watchlist.")
+    st.info(tr("earnings.no_dates"))
     st.stop()
 
 logos = {t: _logo(t) for t in {e.ticker for e in events} | {r.ticker for r in results}}
 today = date.today()
 imminent = sum(1 for e in events if e.days_until is not None and e.days_until <= 7)
 if imminent:
-    st.warning(f"{imminent} report(s) within 7 days.")
+    st.warning(tr("earnings.imminent_warning", n=imminent))
 
 # ────────────────────────────────────────────────────────────── calendar view
 CAL_CSS = """
@@ -163,11 +161,15 @@ def _result_chip(r) -> str:
     arrow = "" if r.beat is None else (" ▲" if r.beat else " ▼")
     bits = [f"{r.ticker} — {names.get(r.ticker, r.ticker)}"]
     if r.reported_eps is not None:
-        est = f" vs est {r.eps_estimate:.2f}" if r.eps_estimate is not None else ""
+        est = (
+            tr("earnings.chip_vs_est", est=f"{r.eps_estimate:.2f}")
+            if r.eps_estimate is not None
+            else ""
+        )
         bits.append(f"EPS {r.reported_eps:.2f}{est}")
     if r.surprise_pct is not None:
         bits.append(f"{r.surprise_pct:+.1f}%")
-    title = html.escape(" · ".join(bits) + " — click for details")
+    title = html.escape(" · ".join(bits) + tr("earnings.chip_click_details"))
     return (
         f'<div class="earn-chip past{verdict}" title="{title}"'
         f' data-ticker="{html.escape(r.ticker)}" data-date="{r.date.isoformat()}">'
@@ -175,7 +177,7 @@ def _result_chip(r) -> str:
     )
 
 
-@st.dialog("Earnings result")
+@st.dialog(tr("earnings.dialog_title"))
 def _result_dialog(ticker: str, iso: str) -> None:
     d = date.fromisoformat(iso)
     r = next((x for x in results if x.ticker == ticker and x.date == d), None)
@@ -183,40 +185,39 @@ def _result_dialog(ticker: str, iso: str) -> None:
     head_logo, head_txt = st.columns([1, 6], vertical_alignment="center")
     if src := logos.get(ticker):
         head_logo.image(src, width=40)
+    reported = f"{tr(f'earnings.mon_{d.month}')} {d.day:02d}, {d.year}"
     head_txt.markdown(
         f"**{ticker}** — {names.get(ticker, ticker)}  \n"
-        f":gray[Reported {d.strftime('%b %d, %Y')}]"
+        + tr("earnings.reported_on", date=reported)
     )
 
     if r is None:
-        st.info("No reported figures for this date.")
+        st.info(tr("earnings.no_figures"))
         return
 
     move = _reaction(ticker, iso)
     m1, m2, m3 = st.columns(3)
     m1.metric(
-        "Reported EPS",
+        tr("earnings.reported_eps"),
         f"{r.reported_eps:.2f}" if r.reported_eps is not None else "—",
-        delta=f"{r.surprise_pct:+.2f}% vs est" if r.surprise_pct is not None else None,
+        delta=tr("earnings.surprise_vs_est", pct=f"{r.surprise_pct:+.2f}")
+        if r.surprise_pct is not None
+        else None,
     )
     m2.metric(
-        "EPS estimate",
+        tr("earnings.eps_estimate"),
         f"{r.eps_estimate:.2f}" if r.eps_estimate is not None else "—",
     )
     m3.metric(
-        "Price reaction",
+        tr("earnings.price_reaction"),
         f"{move:+.2f}%" if move is not None else "—",
         delta=f"{move:+.2f}%" if move is not None else None,
     )
-    st.caption(
-        "Price reaction spans the print: last close before the date vs first "
-        "close after, so it always contains the gap regardless of pre/post "
-        "market timing."
-    )
+    st.caption(tr("earnings.price_reaction_caption"))
 
     history = [x for x in results if x.ticker == ticker]
     if len(history) > 1:
-        st.markdown("**Recent quarters**")
+        st.markdown(tr("earnings.recent_quarters"))
         frame = pd.DataFrame(
             {
                 "Date": [x.date for x in history],
@@ -229,9 +230,16 @@ def _result_dialog(ticker: str, iso: str) -> None:
             frame,
             hide_index=True,
             column_config={
-                "EPS est": st.column_config.NumberColumn(format="%.2f"),
-                "Reported": st.column_config.NumberColumn(format="%.2f"),
-                "Surprise": st.column_config.NumberColumn(format="%+.1f%%"),
+                "Date": st.column_config.DateColumn(tr("earnings.col_date")),
+                "EPS est": st.column_config.NumberColumn(
+                    tr("earnings.col_eps_est"), format="%.2f"
+                ),
+                "Reported": st.column_config.NumberColumn(
+                    tr("earnings.col_reported"), format="%.2f"
+                ),
+                "Surprise": st.column_config.NumberColumn(
+                    tr("earnings.col_surprise"), format="%+.1f%%"
+                ),
             },
         )
 
@@ -240,7 +248,15 @@ def _render_calendar(offset: int, events, results) -> None:
     year, month = add_months(today.year, today.month, offset)
     by_date = group_by_date(events)
     res_by_date = group_by_date(results)
-    weekdays = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+    weekdays = [
+        tr("earnings.wd_mon"),
+        tr("earnings.wd_tue"),
+        tr("earnings.wd_wed"),
+        tr("earnings.wd_thu"),
+        tr("earnings.wd_fri"),
+        tr("earnings.wd_sat"),
+        tr("earnings.wd_sun"),
+    ]
 
     rows = ["<tr>" + "".join(f"<th>{d}</th>" for d in weekdays) + "</tr>"]
     for week in month_weeks(year, month):
@@ -280,16 +296,18 @@ def _views() -> None:
     # Phones default to the list: the 7-column month grid squeezes cells to
     # ~55px at 390px viewport and the chips ellipsize to nothing. The grid
     # stays one tap away.
+    v_calendar = tr("earnings.view_calendar")
+    v_list = tr("earnings.view_list")
     with st.container(horizontal=True, vertical_alignment="center"):
         view = st.segmented_control(
-            "View",
-            ["Calendar", "List"],
-            default="List" if is_mobile() else "Calendar",
+            tr("earnings.view_label"),
+            [v_calendar, v_list],
+            default=v_list if is_mobile() else v_calendar,
             label_visibility="collapsed",
         )
         picked = (
             st.pills(
-                "Filter",
+                tr("earnings.filter_label"),
                 list(_groups),
                 selection_mode="multi",
                 label_visibility="collapsed",
@@ -306,16 +324,16 @@ def _views() -> None:
         f_events = [e for e in events if e.ticker in allowed]
         f_results = [r for r in results if r.ticker in allowed]
         if not f_events and not f_results:
-            st.info("No earnings dates match the selected filters.")
+            st.info(tr("earnings.no_match_filters"))
             return
     else:
         f_events, f_results = events, results
 
-    if view == "List":
+    if view == v_list:
         # Positions-style shared table: logo + name live in the ticker cell,
         # surprise gets the semantic green/red beat/miss color.
         if f_events:
-            st.markdown("**Upcoming**")
+            st.markdown(tr("earnings.upcoming"))
             frame = pd.DataFrame(
                 {
                     "ticker": [e.ticker for e in f_events],
@@ -325,11 +343,18 @@ def _views() -> None:
             )
             st.html(
                 ticker_table_html(
-                    frame, fmt={"days out": "{:.0f} d"}, left_cols=("date",)
+                    frame,
+                    fmt={"days out": "{:.0f} d"},
+                    left_cols=("date",),
+                    labels={
+                        "ticker": tr("earnings.list_col_ticker"),
+                        "date": tr("earnings.list_col_date"),
+                        "days out": tr("earnings.list_col_days_out"),
+                    },
                 )
             )
         if f_results:
-            st.markdown("**Past results**")
+            st.markdown(tr("earnings.past_results"))
             past = pd.DataFrame(
                 {
                     "ticker": [r.ticker for r in f_results],
@@ -349,6 +374,13 @@ def _views() -> None:
                     },
                     signed=("surprise",),
                     left_cols=("date",),
+                    labels={
+                        "ticker": tr("earnings.list_col_ticker"),
+                        "date": tr("earnings.list_col_date"),
+                        "eps est": tr("earnings.list_col_eps_est"),
+                        "reported": tr("earnings.list_col_reported"),
+                        "surprise": tr("earnings.list_col_surprise"),
+                    },
                 )
             )
     else:
@@ -363,14 +395,11 @@ def _views() -> None:
         nav_next.button(
             ":material/chevron_right:", on_click=_shift_month, args=(1,), width="stretch"
         )
-        nav_today.button("Today", on_click=_reset_month, width="stretch")
-        nav_label.subheader(date(y, m, 1).strftime("%B %Y"))
+        nav_today.button(tr("earnings.today_btn"), on_click=_reset_month, width="stretch")
+        nav_label.subheader(f"{tr(f'earnings.month_{m}')} {y}")
 
         _render_calendar(offset, f_events, f_results)
-        st.caption(
-            "Red chips = report within 7 days. Green ▲ / red ▼ = past beat/miss "
-            "— click for the result overview. Blue cell = today."
-        )
+        st.caption(tr("earnings.calendar_legend"))
 
 
 _views()

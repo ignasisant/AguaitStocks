@@ -13,6 +13,9 @@ load_dotenv()
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DATA_DIR = PROJECT_ROOT / "data"
 WATCHLIST_FILE = PROJECT_ROOT / "watchlist.yaml"
+# watchlist.yaml is git-ignored (personal positions); the tracked example
+# carries the global reference maps (aliases/tv) for checkouts without it.
+EXAMPLE_WATCHLIST_FILE = PROJECT_ROOT / "watchlist.example.yaml"
 
 DATA_DIR.mkdir(exist_ok=True)
 
@@ -77,6 +80,21 @@ class Holding:
         return self.shares > 0
 
 
+def _reference_raw(path: Path) -> dict:
+    """Raw watchlist YAML for the global reference maps (aliases/tv).
+
+    The default watchlist.yaml is git-ignored, so fresh checkouts and deploys
+    don't have it; fall back to the tracked example there so broker-code
+    resolution works before the personal file exists. Explicit paths (tests,
+    per-user files) never fall back.
+    """
+    if not path.exists() and path == WATCHLIST_FILE:
+        path = EXAMPLE_WATCHLIST_FILE
+    if not path.exists():
+        return {}
+    return yaml.safe_load(path.read_text()) or {}
+
+
 def ticker_aliases(path: Path = WATCHLIST_FILE) -> dict[str, str]:
     """Broker ticker code -> Yahoo Finance symbol, from watchlist.yaml `aliases`.
 
@@ -84,9 +102,7 @@ def ticker_aliases(path: Path = WATCHLIST_FILE) -> dict[str, str]:
     doesn't know; the ledger and watchlist keep the broker code and every
     yfinance lookup resolves through this map (stocks.data.fetch.resolve).
     """
-    if not path.exists():
-        return {}
-    raw = yaml.safe_load(path.read_text()) or {}
+    raw = _reference_raw(path)
     return {
         str(code).upper(): str(symbol)
         for code, symbol in (raw.get("aliases") or {}).items()
@@ -104,9 +120,7 @@ def tv_symbols(path: Path = WATCHLIST_FILE) -> dict[str, str]:
     stocks.data.tradingview.candidates. Empty dict when the file or key is
     absent, so TradingView support is entirely opt-in.
     """
-    if not path.exists():
-        return {}
-    raw = yaml.safe_load(path.read_text()) or {}
+    raw = _reference_raw(path)
     return {
         str(code).upper(): str(spec)
         for code, spec in (raw.get("tv") or {}).items()

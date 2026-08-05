@@ -31,39 +31,32 @@ from stocks.portfolio import last_import, platforms
 from stocks.portfolio.ledger import add_many, all_transactions, clear, delete_many
 from stocks.portfolio.validate import known_tickers, validate
 from stocks.web import auth
+from stocks.web.i18n import t as tr
 from stocks.web.widgets import ticker_table_html
 
 # Imports write the personal ledger — no anonymous access.
 auth.require_login()
 
-st.title("Import transactions")
+st.title(tr("import.title"))
 
 # Everything on this page reads/writes the session user's own book.
 paths = auth.user_paths()
 
-st.caption(
-    "Pick the platform, then upload its statement. Rows are parsed and "
-    "validated; nothing is written until you commit. Duplicates against the "
-    "ledger are flagged, not removed — wipe first for a clean re-import of an "
-    "overlapping export."
-)
+st.caption(tr("import.intro_caption"))
 
 ledger = all_transactions(paths.db)
 if st.session_state.pop("imports_cleared", False):
-    st.toast("All imports cleared — the ledger is empty.", icon=":material/delete_forever:")
+    st.toast(tr("import.toast_cleared"), icon=":material/delete_forever:")
 
 with st.container(horizontal=True, vertical_alignment="center"):
-    st.metric("Transactions currently in ledger", len(ledger))
+    st.metric(tr("import.metric_in_ledger"), len(ledger))
     with st.popover(
-        "Clear all imports", icon=":material/delete_forever:", disabled=not ledger
+        tr("import.clear_all_imports"), icon=":material/delete_forever:", disabled=not ledger
     ):
-        st.markdown(
-            f"Delete **all {len(ledger)} transactions** from your ledger? "
-            "Positions, realized gains and tax reports all derive from it, so "
-            "the portfolio resets to empty — as if nothing was ever imported. "
-            "This cannot be undone."
-        )
-        if st.button("Delete everything", type="primary", icon=":material/delete_forever:"):
+        st.markdown(tr("import.clear_all_confirm", n=len(ledger)))
+        if st.button(
+            tr("import.delete_everything"), type="primary", icon=":material/delete_forever:"
+        ):
             clear(paths.db)
             last_import.forget(paths.last_import)
             st.session_state["imports_cleared"] = True
@@ -99,18 +92,27 @@ def _tx_table(frame: pd.DataFrame, *, rich: bool = True) -> None:
     )
 
 
-platform = st.segmented_control(
-    "Importing from",
-    platforms.PLATFORMS,
-    format_func=lambda p: p.label,
-    default=platforms.PLATFORMS[0],
-    required=True,  # clicking the active segment must not deselect it
+# Options are keys, not Platform objects: Streamlit's default-value check
+# converts a dataclass default via its dataframe logic (exploding it into
+# field values), which raises "default not part of the options".
+platform = platforms.by_key(
+    st.segmented_control(
+        tr("import.importing_from"),
+        [p.key for p in platforms.PLATFORMS],
+        format_func=lambda k: platforms.by_key(k).label,
+        default=platforms.PLATFORMS[0].key,
+        required=True,  # clicking the active segment must not deselect it
+    )
 )
 
 # Key the uploader by platform so switching platforms drops the staged file —
 # a statement must never be parsed by another platform's parser.
 uploaded = st.file_uploader(
-    f"{platform.label} statement ({', '.join(t.upper() for t in platform.file_types)})",
+    tr(
+        "import.uploader_label",
+        platform=platform.label,
+        types=", ".join(t.upper() for t in platform.file_types),
+    ),
     type=list(platform.file_types),
     key=f"upload_{platform.key}",
 )
@@ -122,41 +124,42 @@ if uploaded is None:
 
     # Committed imports live in the ledger (SQLite) — nothing to re-upload.
     # Show what the last commit did and offer to undo exactly that batch.
-    st.subheader("Last import")
+    st.subheader(tr("import.last_import"))
     when = datetime.fromisoformat(record.imported_at).strftime("%Y-%m-%d %H:%M UTC")
     st.markdown(
-        f"**{record.filename}** ({platforms.by_key(record.platform).label}) — "
-        f"{len(record.tx_ids)} transactions committed {when}"
-        + (" (ledger wiped first)" if record.wiped else "")
+        tr(
+            "import.last_import_summary",
+            filename=record.filename,
+            platform=platforms.by_key(record.platform).label,
+            n=len(record.tx_ids),
+            when=when,
+        )
+        + (tr("import.ledger_wiped_suffix") if record.wiped else "")
     )
 
     batch_ids = set(record.tx_ids)
     still_in_ledger = [t for t in ledger if t.id in batch_ids]
     if len(still_in_ledger) < len(record.tx_ids):
         st.caption(
-            f"{len(record.tx_ids) - len(still_in_ledger)} of those rows are no "
-            "longer in the ledger (deleted or wiped since)."
+            tr("import.rows_no_longer", n=len(record.tx_ids) - len(still_in_ledger))
         )
     if still_in_ledger:
-        with st.expander(f"Imported rows still in ledger ({len(still_in_ledger)})"):
+        with st.expander(tr("import.imported_rows_still", n=len(still_in_ledger))):
             _tx_table(_tx_frame(still_in_ledger))
 
     with st.container(horizontal=True):
         if st.button(
-            f"Clear last import ({len(still_in_ledger)} rows)",
+            tr("import.clear_last_import", n=len(still_in_ledger)),
             icon=":material/delete:",
             disabled=not still_in_ledger,
         ):
             delete_many(record.tx_ids, paths.db)
             last_import.forget(paths.last_import)
             st.rerun()
-        if st.button("Dismiss record (keep transactions)", icon=":material/close:"):
+        if st.button(tr("import.dismiss_record"), icon=":material/close:"):
             last_import.forget(paths.last_import)
             st.rerun()
-    st.caption(
-        "**Clear last import** deletes exactly these rows from the ledger — no "
-        "re-upload needed. **Dismiss** only forgets this note; the ledger stays."
-    )
+    st.caption(tr("import.last_import_help"))
     st.stop()
 
 
@@ -175,7 +178,7 @@ result = platform.parse(uploaded.name, uploaded.getvalue())
 
 if not result.transactions and not result.skipped:
     st.error(
-        f"No rows parsed — is this a {platform.label} statement? {platform.hint}"
+        tr("import.no_rows_parsed", platform=platform.label, hint=platform.hint)
     )
     st.stop()
 
@@ -183,9 +186,9 @@ if not result.transactions and not result.skipped:
 # derivation and the oversell replay all read the prior ledger. Validating
 # against rows that are about to be wiped rejects sells whose "missing" buys
 # are merely doubled, and makes real split ratios underivable.
-wipe = st.checkbox("Wipe ledger before importing (clean re-import)")
+wipe = st.checkbox(tr("import.wipe_checkbox"))
 
-with st.spinner("Validating tickers, dates and quantities…"):
+with st.spinner(tr("import.validating")):
     validation = validate(
         result,
         [] if wipe else ledger,
@@ -193,16 +196,16 @@ with st.spinner("Validating tickers, dates and quantities…"):
         lookup=_ticker_exists,
     )
 
-st.subheader(f"Preview — {validation.summary}")
+st.subheader(tr("import.preview", summary=validation.summary))
 
 importable = validation.importable
 if importable:
     _tx_table(_tx_frame(importable))
 else:
-    st.warning("No importable rows survived validation.")
+    st.warning(tr("import.no_importable"))
 
 if validation.flagged:
-    st.warning(f"{len(validation.flagged)} rows import with warnings — review:")
+    st.warning(tr("import.rows_with_warnings", n=len(validation.flagged)))
     _tx_table(
         pd.DataFrame(
             {
@@ -215,7 +218,7 @@ if validation.flagged:
     )
 
 if validation.rejected:
-    st.error(f"{len(validation.rejected)} rows rejected — quarantined, not imported:")
+    st.error(tr("import.rows_rejected", n=len(validation.rejected)))
     _tx_table(
         pd.DataFrame(
             {
@@ -227,31 +230,18 @@ if validation.rejected:
         ),
         rich=False,
     )
-    st.caption(
-        "Fix these in the export, or add them by hand from a terminal with the "
-        "bundled CLI: `uv run stocks tx add <date> <ticker> <action> --qty … "
-        "--price …` (run `uv run stocks tx add --help` in the repo folder)."
-    )
+    st.caption(tr("import.rejected_help"))
 
 if result.skipped:
-    with st.expander(
-        f"Skipped rows ({len(result.skipped)}) — by design, nothing lost"
-    ):
+    with st.expander(tr("import.skipped_rows", n=len(result.skipped))):
         st.dataframe(pd.DataFrame(result.skipped), hide_index=True)
         if platform.key == "revolut":
-            st.caption(
-                "Cash movements, rewards and dividend-tax corrections don't affect "
-                "positions. Splits are auto-resolved when the ratio is derivable; "
-                "underivable ones stay here — add those manually."
-            )
+            st.caption(tr("import.skipped_caption_revolut"))
         else:
-            st.caption(
-                "Each row lists why it couldn't become a transaction — fix the "
-                "CSV and re-upload, or add those rows manually."
-            )
+            st.caption(tr("import.skipped_caption_generic"))
 
 st.divider()
-if st.button("Commit to ledger", type="primary", disabled=not importable):
+if st.button(tr("import.commit_button"), type="primary", disabled=not importable):
     if wipe:
         clear(paths.db)
     ids = add_many(importable, paths.db)
@@ -266,11 +256,10 @@ if st.button("Commit to ledger", type="primary", disabled=not importable):
         paths.last_import,
     )
     st.success(
-        f"Imported {len(ids)} transactions. "
-        f"Ledger now holds {len(all_transactions(paths.db))}."
+        tr(
+            "import.commit_success",
+            n=len(ids),
+            total=len(all_transactions(paths.db)),
+        )
     )
-    st.caption(
-        "Committed rows persist in the ledger across reloads — no need to "
-        "re-upload. Open **Portfolio** for positions & tax, or **Overview** to "
-        "see your buys/sells on the price chart."
-    )
+    st.caption(tr("import.commit_help"))

@@ -1,0 +1,16 @@
+{
+  "screener.title": "Watchlist screener",
+  "screener.watchlist_empty": "Watchlist empty. Add tickers on the **Profile** page.",
+  "screener.only_crypto": "Only crypto on the watchlist — the KPI screener needs stocks.",
+  "screener.crypto_excluded": "{n} crypto asset(s) excluded — no fundamentals to screen.",
+  "screener.loading_fundamentals": "Loading fundamentals for the whole watchlist…",
+  "screener.screen_filters": "Screen & filters",
+  "screener.screen": "Screen",
+  "screener.rank_by": "Rank by",
+  "screener.ascending": "Ascending",
+  "screener.columns": "Columns",
+  "screener.filters_caption": "Filters (percent metrics are fractions: 0.15 = 15%)",
+  "screener.pass_caption": "{n} of {total} tickers pass — re-sort with **Rank by**.",
+  "screener.download_csv": "Download raw numbers (CSV)",
+  "screener.metrics_help": "What do these metrics mean?"
+}

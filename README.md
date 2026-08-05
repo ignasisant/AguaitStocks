@@ -28,8 +28,10 @@ Then:
 6. **Portfolio** page — positions, EUR P/L, risk and Spanish tax now derive
    from the ledger automatically.
 
-Prefer the terminal? Skip the OAuth setup: edit [`watchlist.yaml`](watchlist.yaml),
-then `uv run stocks update && uv run stocks alerts`. The full command set is
+Prefer the terminal? Skip the OAuth setup: copy
+[`watchlist.example.yaml`](watchlist.example.yaml) to `watchlist.yaml`
+(git-ignored — it holds your personal positions) and edit it, then
+`uv run stocks update && uv run stocks alerts`. The full command set is
 under [Usage](#usage).
 
 ## Stack
@@ -58,7 +60,8 @@ watchlist, portfolio ledger, last-import record and preferences — keyed by
 the verified account email. The optional `[app].owner_email` account maps to
 the repo-root `watchlist.yaml` and `data/portfolio.db` instead, so it shares
 one book with the (single-user) CLI. Broker-code `aliases` stay global in
-the root `watchlist.yaml`.
+the root `watchlist.yaml`, falling back to the tracked
+`watchlist.example.yaml` while that file doesn't exist.
 
 Configure:
 
@@ -126,7 +129,9 @@ uv run stocks tax --year 2025        # IRPF savings-base summary + estimated tax
 uv run stocks dividends --year 2025  # dividend income + foreign withholding (EUR)
 ```
 
-Edit the tickers you follow in [`watchlist.yaml`](watchlist.yaml).
+Edit the tickers you follow in `watchlist.yaml` (copy
+[`watchlist.example.yaml`](watchlist.example.yaml) to create it — the real
+file is git-ignored because it carries your positions).
 
 ### Upload your Revolut transactions (dashboard)
 

@@ -19,6 +19,22 @@ def test_ticker_aliases_parses_yaml(tmp_path):
     assert ticker_aliases(f) == {"RCF": "TEP.PA", "HMI": "RMS.PA"}
 
 
+def test_reference_maps_fall_back_to_example(monkeypatch, tmp_path):
+    # watchlist.yaml is git-ignored: on a checkout without it, the global
+    # aliases/tv maps must come from the tracked example file instead.
+    from stocks import config
+
+    missing = tmp_path / "watchlist.yaml"
+    example = tmp_path / "watchlist.example.yaml"
+    example.write_text("aliases:\n  RCF: TEP.PA\ntv:\n  RCF: EURONEXT:TEP@france\n")
+    monkeypatch.setattr(config, "WATCHLIST_FILE", missing)
+    monkeypatch.setattr(config, "EXAMPLE_WATCHLIST_FILE", example)
+    assert config.ticker_aliases(missing) == {"RCF": "TEP.PA"}
+    assert config.tv_symbols(missing) == {"RCF": "EURONEXT:TEP@france"}
+    # An explicit non-default path never falls back.
+    assert config.ticker_aliases(tmp_path / "other.yaml") == {}
+
+
 def test_ticker_aliases_missing_file_or_section(tmp_path):
     assert ticker_aliases(tmp_path / "nope.yaml") == {}
     f = tmp_path / "watchlist.yaml"

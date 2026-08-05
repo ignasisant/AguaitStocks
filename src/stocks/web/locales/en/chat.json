@@ -1,0 +1,21 @@
+{
+  "chat.title": "Assistant",
+  "chat.provider": "AI provider",
+  "chat.model": "Model",
+  "chat.settings": "AI settings",
+  "chat.using": "Using {provider} · {model}",
+  "chat.byok_help": "Bring your own {provider} API key to chat. It stays in this session, or is stored encrypted for 15 days if you check Remember.",
+  "chat.key_label": "{provider} API key",
+  "chat.key_help": "Encrypted and stored for 15 days if you check Remember; otherwise this session only. Never logged.",
+  "chat.remember": "Remember on this account for 15 days",
+  "chat.get_key": "Get a key →",
+  "chat.forget": "Forget API key",
+  "chat.close": "Close",
+  "chat.panel_setup": "Set up the assistant on the Chat page first — pick a provider and add your API key.",
+  "chat.regenerate": "Regenerate",
+  "chat.placeholder": "Ask about your portfolio…",
+  "chat.invalid_key": "Invalid {provider} API key.",
+  "chat.api_error": "The assistant is unavailable right now — try again in a moment.",
+  "chat.no_credits": "Your {provider} key has no credit or quota left. Add billing in the provider's console to keep using the assistant.",
+  "chat.no_enc": "Persistence off — no [chat] enc_key secret configured; key kept for this session only."
+}

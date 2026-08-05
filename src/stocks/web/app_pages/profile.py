@@ -11,12 +11,13 @@ import pandas as pd
 import streamlit as st
 
 from stocks.config import load_watchlist
-from stocks.web import auth, widgets
+from stocks.web import auth, i18n, widgets
+from stocks.web.i18n import t as tr
 
 # Account identity, prefs and the watchlist editor are all per-account.
 auth.require_login()
 
-st.title("Profile")
+st.title(tr("nav.profile"))
 
 paths = auth.user_paths()
 
@@ -27,22 +28,44 @@ with st.container(horizontal=True, vertical_alignment="center"):
         st.image(picture, width=56)
     name = getattr(st.user, "name", None) or st.user.email
     st.markdown(f"**{name}**  \n{st.user.email}")
-    st.button("Log out", icon=":material/logout:", on_click=st.logout)
+    st.button(tr("common.log_out"), icon=":material/logout:", on_click=st.logout)
 
-st.caption(
-    "Your watchlist, portfolio ledger and preferences are attached to this "
-    "account — other users of this app never see them. "
-    f"Data folder: `{paths.root}`."
-)
+st.caption(tr("profile.account_caption", folder=paths.root))
 
 st.divider()
 
 # -------------------------------------------------------------- preferences
-st.subheader("Preferences")
+st.subheader(tr("profile.preferences"))
 
 prefs = auth.load_prefs()
+
+# Language: "auto" follows the browser locale (st.context.locale); an explicit
+# pick is stored and wins over the browser on every page (see i18n).
+_AUTO = "auto"
+lang_opts = [_AUTO, *i18n.LANGUAGES]
+current_lang = prefs.get("language") or _AUTO
+
+
+def _lang_label(code: str) -> str:
+    return tr("profile.lang_auto") if code == _AUTO else i18n.LANGUAGES[code]
+
+
+lang = st.selectbox(
+    tr("profile.language"),
+    lang_opts,
+    index=lang_opts.index(current_lang if current_lang in lang_opts else _AUTO),
+    format_func=_lang_label,
+    key="pref_language",
+)
+_lang_val = None if lang == _AUTO else lang
+if _lang_val != prefs.get("language"):
+    prefs["language"] = _lang_val
+    auth.save_prefs(prefs)
+    st.rerun()  # re-run so app.py re-resolves the language for the whole app
+st.caption(tr("profile.language_caption"))
+
 ccy = st.segmented_control(
-    "Display currency",
+    tr("profile.display_currency"),
     auth.CURRENCIES,
     default=prefs.get("currency", "EUR"),
     key="pref_currency",
@@ -50,32 +73,18 @@ ccy = st.segmented_control(
 if ccy and ccy != prefs.get("currency"):
     prefs["currency"] = ccy
     auth.save_prefs(prefs)
-    st.toast(f"Display currency set to {ccy}", icon=":material/check:")
-st.caption(
-    "Converts the Portfolio headline figures at the latest FX rate. Tax "
-    "figures stay in EUR — Spanish fiscal rules are euro-denominated."
-)
+    st.toast(tr("profile.currency_set", ccy=ccy), icon=":material/check:")
+st.caption(tr("profile.currency_caption"))
 
 st.divider()
 
 # ---------------------------------------------------------------- watchlist
-st.subheader("Watchlist")
-st.caption(
-    "Drives Overview, Screener, Earnings and the ticker picker. Add or remove "
-    "rows and hit **Save**. `shares` + `cost` make an entry a position for the "
-    "equal-weight fallback analytics; the real book still comes from imported "
-    "transactions. Alert rules on kept tickers are preserved. Crypto goes in "
-    "as a Yahoo pair symbol — `BTC-USD`, `ETH-EUR` — never a bare coin code "
-    "(bare codes collide with stock tickers)."
-)
+st.subheader(tr("profile.watchlist"))
+st.caption(tr("profile.watchlist_caption"))
 
 holdings = load_watchlist(paths.watchlist)
 if not holdings:
-    st.info(
-        "Watchlist is empty — add a row below (**+** at the bottom of the table), "
-        "type a ticker like `AAPL`, and hit **Save**. Overview, Screener and "
-        "Earnings come alive as soon as one ticker is in."
-    )
+    st.info(tr("profile.watchlist_empty"))
 frame = pd.DataFrame(
     [
         {
@@ -99,24 +108,27 @@ edited = st.data_editor(
     disabled=("logo",),
     column_config={
         "logo": st.column_config.ImageColumn("", width=40),
-        "ticker": st.column_config.TextColumn("Ticker", required=True, max_chars=12),
-        "name": st.column_config.TextColumn("Name"),
-        "favorite": st.column_config.CheckboxColumn("Favorite", default=False),
-        "shares": st.column_config.NumberColumn("Shares", min_value=0.0),
+        "ticker": st.column_config.TextColumn(
+            tr("profile.col_ticker"), required=True, max_chars=12
+        ),
+        "name": st.column_config.TextColumn(tr("profile.col_name")),
+        "favorite": st.column_config.CheckboxColumn(
+            tr("profile.col_favorite"), default=False
+        ),
+        "shares": st.column_config.NumberColumn(tr("profile.col_shares"), min_value=0.0),
         "cost": st.column_config.NumberColumn(
-            "Avg cost",
+            tr("profile.col_avg_cost"),
             min_value=0.0,
-            help="Average buy price per share, in the stock's native currency",
+            help=tr("profile.col_avg_cost_help"),
         ),
         "tags": st.column_config.TextColumn(
-            "Tags",
-            help="Comma-separated groups, e.g. `semis, EM` — the ticker "
-            "picker search matches them",
+            tr("profile.col_tags"),
+            help=tr("profile.col_tags_help"),
         ),
     },
 )
 
-if st.button("Save watchlist", type="primary", icon=":material/save:"):
+if st.button(tr("profile.save_watchlist"), type="primary", icon=":material/save:"):
     entries = [
         {
             "ticker": row.get("ticker"),
@@ -135,4 +147,4 @@ if st.button("Save watchlist", type="primary", icon=":material/save:"):
     ]
     auth.save_watchlist_entries(entries, paths.watchlist)
     saved = load_watchlist(paths.watchlist)
-    st.success(f"Saved — watchlist now has {len(saved)} entries.")
+    st.success(tr("profile.saved", n=len(saved)))

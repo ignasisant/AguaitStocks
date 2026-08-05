@@ -1,0 +1,14 @@
+{
+  "nav.home": "Home",
+  "nav.ticker": "Ticker",
+  "nav.portfolio": "Portfolio",
+  "nav.screener": "Screener",
+  "nav.earnings": "Earnings",
+  "nav.import": "Import",
+  "nav.chat": "Chat",
+  "nav.profile": "Profile",
+  "common.sign_in_google": "Sign in with Google",
+  "common.log_out": "Log out",
+  "common.save": "Save",
+  "common.loading": "Loading…"
+}
