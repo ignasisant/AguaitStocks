@@ -1,7 +1,8 @@
 """Home page — the daily glance: what's new plus the key portfolio metrics.
 
-One metrics row with a 30-day sparkline and today's movers (a slim cut of the
-Portfolio page), then "What's new" cards (watchlist big moves, earnings,
+The Portfolio page's headline metrics (cost basis, market value, unrealised &
+realised P/L, then today / 1 week / 1 month deltas) with a 30-day sparkline and
+today's movers, then "What's new" cards (watchlist big moves, earnings,
 recent transactions, 52-week extremes), then the watchlist groups collapsed
 into expanders. Every ticker cell links to the Ticker page; the full ledger
 analytics stay on Portfolio.
@@ -9,32 +10,41 @@ analytics stay on Portfolio.
 
 from __future__ import annotations
 
-from datetime import date
+import html
+from datetime import date, timedelta
 
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
-from stocks.analysis.portfolio import basket_change
+from stocks.analysis.portfolio import basket_change, market_live, us_market_open
 from stocks.config import Holding, load_watchlist
 from stocks.data.crypto import is_crypto
-from stocks.data.earnings import upcoming
+from stocks.data.earnings import calendar_events
 from stocks.portfolio.ledger import all_transactions
 from stocks.web import auth
+from stocks.web.earnings_ui import calendar_component, render_result_body
 from stocks.web.i18n import t as tr
 from stocks.web.portfolio_data import (
     basket_history,
     enriched_positions,
     eur_spot,
+    last_session_moves,
     ledger_history,
     ledger_state,
     positions_table,
 )
 from stocks.web.widgets import (
     HOVERLABEL,
+    INFO_COLOR,
     LOSS_COLOR,
     PROFIT_COLOR,
+    TEXT_MUTED,
+    company_name,
     db_mtime,
+    is_mobile,
+    logo,
+    metric_cells,
     recent_closes,
     ticker_table_html,
 )
@@ -95,11 +105,21 @@ _first_run_banner()
 # Daily-glance cut of the Portfolio page: value / today / unrealised P/L plus
 # a 30-day sparkline, then today's top movers. The full positions table, risk,
 # tax and dividends stay on the Portfolio page.
-MOVER_FMT = {"day_pct": "{:+.2%}"}
-MOVER_LABELS = {"ticker": tr("home.col_ticker"), "day_pct": tr("home.col_day_pct")}
+# Movers table: ticker, live market value (display currency), portfolio weight,
+# day %. The value/weight columns come from enriched_positions (tbl) reindexed
+# to each list's tickers; fmt for the value column is built at render since it
+# needs the display-currency symbol.
+MOVER_FMT = {"weight": "{:.1%}", "day_pct": "{:+.2%}"}
+MOVER_LABELS = {
+    "ticker": tr("home.col_ticker"),
+    "value": tr("home.col_value"),
+    "weight": tr("home.col_weight"),
+    "day_pct": tr("home.col_day_pct"),
+}
 
 txs: list = []
 positions: list = []  # guests hold nothing; the refresh button below checks it
+held_moves: dict[str, float] = {}  # {ticker: day_pct}, feeds the Big-moves card
 _spark_slot = None  # reserved in the glance row, filled at the bottom
 if auth.is_logged_in():
     DB = str(auth.db_path())
@@ -107,7 +127,7 @@ if auth.is_logged_in():
     # realized non-empty proves ledger activity even with every position
     # closed; both empty = brand-new user, already covered by the banner.
     if positions or realized:
-        st.subheader(tr("nav.portfolio"))
+        st.subheader(tr("home.portfolio_title"))
     if positions:
         tbl = enriched_positions(DB, db_mtime(DB))
         if tbl.empty:
@@ -123,63 +143,133 @@ if auth.is_logged_in():
                 ccy, fx = "EUR", 1.0
             sym = auth.CURRENCY_SYMBOL[ccy]
             hist = basket_history(DB, db_mtime(DB))
-            day = basket_change(hist, 1)
             gain_pct = (value / cost - 1) if cost else None
+            realized_gain = sum(s.gain_eur for s in realized)
+            realized_cost = sum(s.cost_eur for s in realized)
 
-            # Glance row: three metrics + the 30-day sparkline. Market value
-            # stays delta-free — its % return already shows on "Unrealised
-            # P/L", printing it twice reads as two numbers. Plain st.columns
-            # (not metric_cells): the sparkline needs the width, and on phones
-            # the cells stack naturally.
-            c1, c2, c3, c4 = st.columns([1, 1, 1, 2], vertical_alignment="center")
-            c1.metric(tr("home.market_value"), f"{sym}{value * fx:,.0f}")
-            c2.metric(
-                tr("home.today"),
-                f"{sym}{day[0] * fx:+,.0f}" if day else tr("home.na"),
-                f"{day[1]:+.2%}" if day else None,
-            )
-            c3.metric(
-                tr("home.unrealised_pl"),
-                f"{sym}{(value - cost) * fx:+,.0f}",
-                f"{gain_pct:+.1%}" if gain_pct is not None else None,
-            )
-            # 30-day value-vs-injected chart. Container only: ledger_history's
-            # cold build fetches the ledger's full price span, so the fill
-            # happens at the bottom of the script (deferred-slot pattern) and
-            # never blocks this row's paint. basket_history would be wrong
-            # here — fixed basket, not flow-adjusted, so it diverges from
-            # injected capital around buys/sells.
-            _spark_slot = c4.container()
+            # KPIs + sparkline live in a bordered card, matching the "What's
+            # new" cards below. The card is `with`-scoped so bare st.* calls
+            # (metric_cells, st.columns) land inside it.
+            with st.container(border=True):
+                # Layout: desktop splits the glance into a 70%-wide KPI column
+                # and a 30%-wide sparkline column spanning both KPI rows — the
+                # chart no longer floats against the delta row alone. Mobile
+                # keeps the metric_cells wrap (tiles flow side by side instead
+                # of stacking below 640px) and drops the sparkline to a slot
+                # below.
+                if is_mobile():
+                    b1, b2, b3, b4 = metric_cells(4)
+                    d1, d2, d3 = metric_cells(3)
+                    _spark_slot = st.container()
+                else:
+                    kcol, ccol = st.columns([7, 3], vertical_alignment="center")
+                    _spark_slot = ccol.container()
+                    b1, b2, b3, b4 = kcol.columns(4)
+                    d1, d2, d3 = kcol.columns(3)
+
+                # Balance row — the same four headline figures as the Portfolio
+                # page: cost basis, market value, unrealised & realised P/L.
+                # Market value stays delta-free (its % return already shows on
+                # Unrealised P/L; printing it twice reads as two numbers).
+                b1.metric(tr("home.cost_basis"), f"{sym}{cost * fx:,.0f}")
+                b2.metric(tr("home.market_value"), f"{sym}{value * fx:,.0f}")
+                b3.metric(
+                    tr("home.unrealised_pl"),
+                    f"{sym}{(value - cost) * fx:+,.0f}",
+                    f"{gain_pct:+.1%}" if gain_pct is not None else None,
+                )
+                b4.metric(
+                    tr("home.realised_pl"),
+                    f"{sym}{realized_gain * fx:+,.0f}",
+                    f"{realized_gain / realized_cost:+.1%}" if realized_cost else None,
+                    help=tr("home.realised_pl_help"),
+                )
+
+                # Delta row — Today / 1 week / 1 month, mirroring the Portfolio
+                # page's second metric row. Cells (d1-d3) were carved above so
+                # they sit in the KPI column beside the sparkline.
+                # Market closed → "Today" is the last completed session's move
+                # (per-row day_eur, overridden to the last close), not the
+                # basket's flat premarket 0%; grey its delta ("off") too.
+                mkt_open = us_market_open()
+                today_closed = None
+                if not mkt_open:
+                    d_eur = tbl["day_eur"].dropna().sum()
+                    base = value - d_eur
+                    today_closed = (d_eur, d_eur / base if base else 0.0)
+                for col, label, days in (
+                    (d1, tr("home.today"), 1),
+                    (d2, tr("home.one_week"), 7),
+                    (d3, tr("home.one_month"), 30),
+                ):
+                    chg = (
+                        today_closed
+                        if days == 1 and today_closed
+                        else basket_change(hist, days)
+                    )
+                    if chg is None:
+                        col.metric(label, tr("home.na"))
+                    else:
+                        col.metric(
+                            label,
+                            f"{sym}{chg[0] * fx:+,.0f}",
+                            f"{chg[1]:+.2%}",
+                            delta_color=(
+                                "off" if days == 1 and not mkt_open else "normal"
+                            ),
+                        )
+                if not mkt_open:
+                    st.caption(tr("home.market_closed_note"))
+                # The sparkline slot (assigned above) is filled at the bottom of
+                # the script — ledger_history's cold build fetches the ledger's
+                # full price span, so the deferred-slot pattern keeps it off
+                # this row's paint. basket_history would be wrong here — fixed
+                # basket, not flow-adjusted, so it diverges from injected
+                # capital around buys/sells.
 
             # Movers today: biggest day moves among open positions — the full
             # table lives on the Portfolio page. Positive/negative split, so a
-            # ticker lands in at most one list.
+            # ticker lands in at most one list. Own card, matching the glance
+            # card above.
             movers = tbl["day_pct"].dropna()
+            held_moves = movers.to_dict()  # fed to the Big-moves card below
             gainers = movers[movers > 0].nlargest(3)
             losers = movers[movers < 0].nsmallest(3)
             if not gainers.empty or not losers.empty:
-                st.markdown(tr("home.movers_today"))
-                gcol, lcol = st.columns(2)
+                with st.container(border=True):
+                    st.markdown(tr("home.movers_today"))
+                    gcol, lcol = st.columns(2)
 
-                def _mover_table(box, series: pd.Series, label: str) -> None:
-                    box.caption(label)
-                    if series.empty:
-                        box.caption(tr("home.none_today"))
-                        return
-                    box.html(
-                        ticker_table_html(
-                            pd.DataFrame(
-                                {"ticker": series.index, "day_pct": series.values}
-                            ),
-                            fmt=MOVER_FMT,
-                            signed=("day_pct",),
-                            labels=MOVER_LABELS,
-                            names=False,
+                    def _mover_table(box, series: pd.Series, label: str) -> None:
+                        box.caption(label)
+                        if series.empty:
+                            box.caption(tr("home.none_today"))
+                            return
+                        idx = series.index
+                        box.html(
+                            ticker_table_html(
+                                pd.DataFrame(
+                                    {
+                                        "ticker": idx,
+                                        "value": tbl["value_eur"].reindex(idx).values
+                                        * fx,
+                                        "weight": tbl["weight"].reindex(idx).values,
+                                        "day_pct": series.values,
+                                    }
+                                ),
+                                fmt={**MOVER_FMT, "value": f"{sym}{{:,.0f}}"},
+                                signed=("day_pct",),
+                                labels=MOVER_LABELS,
+                                names=False,
+                                muted={t for t in idx if not market_live(t)},
+                                muted_cols=("day_pct",),
+                                mobile={"value": "value", "delta": "day_pct",
+                                        "sub": ("weight",)},
+                            )
                         )
-                    )
 
-                _mover_table(gcol, gainers, tr("home.gainers"))
-                _mover_table(lcol, losers, tr("home.losers"))
+                    _mover_table(gcol, gainers, tr("home.gainers"))
+                    _mover_table(lcol, losers, tr("home.losers"))
     elif realized:
         # Ledger has history but every position is closed.
         st.info(
@@ -208,34 +298,16 @@ closes = recent_closes(tuple(h.ticker for h in holdings)) if holdings else {}
 # of the page paints first.
 st.subheader(tr("home.whats_new"))
 
-_r1a, _r1b = st.columns(2)
-with _r1a, st.container(border=True):
-    st.markdown(tr("home.big_moves"))
-    # Watchlist-only: held tickers already appear under Movers today.
-    _big = []
-    for t in dict.fromkeys(h.ticker for h in holdings):
-        if t in _held:
-            continue
-        c = closes.get(t) or []
-        if len(c) >= 2 and c[-2] and abs(chg := c[-1] / c[-2] - 1) >= 0.03:
-            _big.append({"ticker": t, "day_pct": chg})
-    if _big:
-        _big.sort(key=lambda r: -abs(r["day_pct"]))
-        st.html(
-            ticker_table_html(
-                pd.DataFrame(_big),
-                fmt=MOVER_FMT,
-                signed=("day_pct",),
-                labels=MOVER_LABELS,
-            )
-        )
-    else:
-        st.caption(tr("home.no_big_moves"))
-_earn_slot = _r1b.container()
+# Upcoming earnings — a compact 3-week calendar, the full-width centerpiece of
+# this section. Reserve the slot here; its yfinance pass fills it at the bottom
+# of the script so the rest of the page paints first (deferred-slot pattern).
+_earn_slot = st.container()
 
-_r2a, _r2b = st.columns(2)
+# Ledger/price cards below, bordered and two per row on desktop (st.columns
+# stack full-width on phones).
+_r1a, _r1b = st.columns(2)
 if txs:
-    with _r2a, st.container(border=True):
+    with _r1a, st.container(border=True, height="stretch"):
         st.markdown(tr("home.recent_transactions"))
 
         def _tx_amount_eur(t) -> float:
@@ -277,6 +349,7 @@ if txs:
                     "amount_eur": "EUR",
                 },
                 names=False,
+                mobile={"value": "amount_eur", "sub": ("date", "action")},
             )
         )
         st.page_link(
@@ -284,9 +357,9 @@ if txs:
             label=tr("home.link_import"),
             icon=":material/upload_file:",
         )
-    _xt_slot = _r2b.container()
+    _xt_slot = _r1b.container()
 else:
-    _xt_slot = _r2a.container()
+    _xt_slot = _r1a.container()
 
 
 # Defined above the refresh button so its clear() call can reference it; the
@@ -325,11 +398,16 @@ if not holdings:
 
 def _watch_table(tickers: list[str]) -> None:
     """Ticker | last close | day % for one watchlist group."""
+    # Market closed → the close-to-close day % can be a flat premarket 0%, so
+    # pull the last regular-session move from fast_info for those names.
+    off = tuple(t for t in tickers if not market_live(t))
+    moves = last_session_moves(off) if off else {}
     rows = []
     for t in tickers:
         c = closes.get(t) or []
         last = c[-1] if c else float("nan")
         day = (c[-1] / c[-2] - 1) if len(c) >= 2 and c[-2] else float("nan")
+        day = moves.get(t, day)
         rows.append({"ticker": t, "price": last, "day_pct": day})
     st.html(
         ticker_table_html(
@@ -341,6 +419,9 @@ def _watch_table(tickers: list[str]) -> None:
                 "price": tr("home.col_last_close"),
                 "day_pct": tr("home.col_day_pct"),
             },
+            muted={t for t in tickers if not market_live(t)},
+            muted_cols=("day_pct",),
+            mobile={"value": "price", "delta": "day_pct"},
         )
     )
 
@@ -420,7 +501,7 @@ if _spark_slot is not None:
                 x=_hist.index,
                 y=_hist["injected_eur"],
                 name=tr("home.chart_injected"),
-                line=dict(color="#9aa4b2", width=1.5, shape="hv", dash="dot"),
+                line=dict(color=TEXT_MUTED, width=1.5, shape="hv", dash="dot"),
                 hoverinfo="skip",
             )
         )
@@ -432,13 +513,15 @@ if _spark_slot is not None:
                 x=_hist.index,
                 y=_hist["value_eur"],
                 name=tr("home.chart_value"),
-                line=dict(color="#60A5FA", width=2),
+                line=dict(color=INFO_COLOR, width=2),
                 customdata=_custom,
                 hovertemplate=tr("home.spark_hover_tmpl"),
             )
         )
         fig.update_layout(
-            height=132,
+            # Taller now the chart owns a full-height 30% column beside two KPI
+            # rows (was 132, sized for the old single delta-row slot).
+            height=190 if not is_mobile() else 132,
             margin=dict(l=0, r=0, t=20, b=0),
             hovermode="x",
             legend=dict(
@@ -454,18 +537,119 @@ if _spark_slot is not None:
                 automargin=True,
             ),
             hoverlabel=HOVERLABEL,
+            # Transparent so the sparkline blends into its card surface
+            # (same reason as show_chart), not Streamlit's darker page paper.
+            paper_bgcolor="rgba(0,0,0,0)",
+            plot_bgcolor="rgba(0,0,0,0)",
         )
         _spark_slot.plotly_chart(fig, config={"displayModeBar": False})
 
 
-# --------------------------------------------- earnings next week (slot fill)
+# --------------------------------------------- earnings calendar (slot fill)
 @st.cache_data(ttl=6 * 3600, show_spinner=False)
-def _week_events(tickers: tuple[str, ...]) -> list[tuple[str, str, int]]:
-    """(ticker, ISO date, days_until) for reports due within 7 days — one
-    parallel yfinance pass, keyed by the ticker tuple so watchlist or
-    portfolio edits invalidate it."""
-    events = upcoming([Holding(t) for t in tickers], within_days=7)
-    return [(e.ticker, e.date.isoformat(), e.days_until) for e in events]
+def _cal_data(tickers: tuple[str, ...]):
+    """(upcoming events, past reported results) for the calendar — one parallel
+    yfinance pass, keyed by the ticker tuple so watchlist or portfolio edits
+    invalidate it. Same data the full Earnings page uses; the mini-grid below
+    only draws the days inside its window (over-fetching costs nothing —
+    fetch_earnings pulls every date per ticker regardless)."""
+    return calendar_events([Holding(t) for t in tickers])
+
+
+# A compact 4-week grid: the previous week, this week, and the two following
+# weeks, so recent prints sit beside what's coming. Only the five weekday
+# columns show — equity earnings are weekday events, so a Sat/Sun column would
+# sit permanently empty and just waste width. Upcoming chips are neutral (red
+# when ≤7 days out); past prints are green/red beat/miss chips that open a
+# result overview on click — same behaviour as the full calendar page.
+_MINI_CAL_WEEKS = 4
+_MINI_CAL_CSS = """
+  .mini-cal {width:100%; border-collapse:separate; border-spacing:4px; table-layout:fixed;}
+  .mini-cal th {font-size:0.64rem; text-transform:uppercase; letter-spacing:.06em;
+                color:#827F8C; font-weight:600; padding:0.2rem 0.4rem; text-align:left;}
+  .mini-cal td {border:1px solid #3B3942; border-radius:8px; vertical-align:top;
+                width:20%; height:62px; padding:0.3rem 0.35rem;}
+  .mini-cal td.past {background:rgba(59,57,66,.25);}
+  .mini-cal td.today {background:#301263; border-color:#A98EF7;}
+  .mini-daynum {font-size:0.7rem; color:#696673; font-weight:600; margin-bottom:0.15rem;}
+  .mini-cal td.today .mini-daynum {color:#C6B7FB;}
+  .mini-chip {display:inline-flex; align-items:center; gap:0.25rem;
+              margin:0 0.15rem 0.15rem 0; padding:0.06rem 0.28rem; border-radius:4px;
+              background:#4E2092; font-size:0.66rem; font-weight:600;
+              line-height:1.4; max-width:100%; color:#DED7FD;}
+  .mini-chip.soon {background:rgba(204,64,47,.25); color:#FFD2CB;}
+  .mini-chip.beat {background:rgba(42,130,0,.35); color:#DBFFD2;}
+  .mini-chip.miss {background:rgba(204,64,47,.25); color:#FFD2CB;}
+  .mini-chip.past {cursor:pointer;}
+  .mini-chip.past:hover {background:#6A2EBF; color:#FEFEFF;}
+  .mini-chip img {width:13px; height:13px; border-radius:3px; object-fit:contain;}
+  .mini-chip span {white-space:nowrap; overflow:hidden; text-overflow:ellipsis;}
+"""
+
+# Clickable grid, declared once at module scope (never inside a function — the
+# CCv2 registry keys on the name). Past chips carry data-ticker/data-date and
+# click back to Python; upcoming chips carry neither and stay inert.
+_mini_cal_grid = calendar_component("home_earnings_calendar", _MINI_CAL_CSS)
+
+
+def _mini_chip(ev, names: dict[str, str], logos: dict[str, str | None]) -> str:
+    """An upcoming-earnings chip — logo + symbol, inert (matching the full
+    calendar, where only past prints are clickable). Red when ≤7 days out."""
+    src = logos.get(ev.ticker)
+    img = f'<img src="{html.escape(src, quote=True)}">' if src else ""
+    soon = " soon" if ev.days_until is not None and ev.days_until <= 7 else ""
+    title = html.escape(f"{ev.ticker} — {names.get(ev.ticker) or ev.ticker}")
+    return (
+        f'<div class="mini-chip{soon}" title="{title}">'
+        f'{img}<span>{html.escape(ev.ticker)}</span></div>'
+    )
+
+
+def _mini_result_chip(r, names: dict[str, str], logos: dict[str, str | None]) -> str:
+    """A past-print chip — green beat / red miss with a ▲/▼ arrow, carrying the
+    data attributes the component wires to the result dialog on click."""
+    src = logos.get(r.ticker)
+    img = f'<img src="{html.escape(src, quote=True)}">' if src else ""
+    verdict = "" if r.beat is None else (" beat" if r.beat else " miss")
+    arrow = "" if r.beat is None else (" ▲" if r.beat else " ▼")
+    bits = [f"{r.ticker} — {names.get(r.ticker) or r.ticker}"]
+    if r.reported_eps is not None:
+        est = (
+            tr("earnings.chip_vs_est", est=f"{r.eps_estimate:.2f}")
+            if r.eps_estimate is not None
+            else ""
+        )
+        bits.append(f"EPS {r.reported_eps:.2f}{est}")
+    if r.surprise_pct is not None:
+        bits.append(f"{r.surprise_pct:+.1f}%")
+    title = html.escape(" · ".join(bits) + tr("earnings.chip_click_details"))
+    return (
+        f'<div class="mini-chip past{verdict}" title="{title}"'
+        f' data-ticker="{html.escape(r.ticker)}" data-date="{r.date.isoformat()}">'
+        f'{img}<span>{html.escape(r.ticker)}{arrow}</span></div>'
+    )
+
+
+def _mini_calendar_html(start: date, by_date: dict[date, list], res_by_date: dict[date, list],
+                        ref: date, names: dict[str, str], logos: dict[str, str | None]) -> str:
+    """`_MINI_CAL_WEEKS` × 5 weekdays as an HTML table. `start` is a Monday; each
+    cell holds that day's past-result chips then upcoming chips, with today
+    highlighted and past days dimmed."""
+    head = "<tr>" + "".join(f"<th>{tr(f'home.wd_{i}')}</th>" for i in range(5)) + "</tr>"
+    rows = []
+    for week in range(_MINI_CAL_WEEKS):
+        cells = []
+        for wd in range(5):
+            day = start + timedelta(days=week * 7 + wd)
+            cls = "today" if day == ref else ("past" if day < ref else "")
+            cls_attr = f' class="{cls}"' if cls else ""
+            chips = "".join(_mini_result_chip(r, names, logos) for r in res_by_date.get(day, []))
+            chips += "".join(_mini_chip(e, names, logos) for e in by_date.get(day, []))
+            cells.append(
+                f'<td{cls_attr}><div class="mini-daynum">{day.day}</div>{chips}</td>'
+            )
+        rows.append("<tr>" + "".join(cells) + "</tr>")
+    return f'<table class="mini-cal">{head}{"".join(rows)}</table>'
 
 
 # Portfolio + favorites + tagged tickers; crypto has no earnings.
@@ -475,37 +659,46 @@ _earn_tickers = tuple(
 )
 
 if _earn_tickers:
-    with _earn_slot.container(border=True):
-        st.markdown(tr("home.earnings_next_week"))
-        _events = _week_events(_earn_tickers)
-        if _events:
+    with _earn_slot.container(border=True, height="stretch"):
+        st.markdown(tr("home.earnings_upcoming"))
+        _events, _results = _cal_data(_earn_tickers)
+        _today = date.today()
+        # Window: the previous week's Monday through the last shown Friday.
+        _cal_start = _today - timedelta(days=_today.weekday() + 7)
+        _cal_end = _cal_start + timedelta(days=_MINI_CAL_WEEKS * 7 - 1)
+        # Upcoming (one next-date per ticker) and past prints, grouped by day —
+        # weekdays only (the grid drops Sat/Sun; equity prints never land there).
+        _by_date: dict[date, list] = {}
+        for _e in _events:
+            if _e.date and _cal_start <= _e.date <= _cal_end and _e.date.weekday() < 5:
+                _by_date.setdefault(_e.date, []).append(_e)
+        _res_by_date: dict[date, list] = {}
+        for _r in _results:
+            if _cal_start <= _r.date <= _cal_end and _r.date.weekday() < 5:
+                _res_by_date.setdefault(_r.date, []).append(_r)
+        _syms = {x.ticker for row in _by_date.values() for x in row} | {
+            x.ticker for row in _res_by_date.values() for x in row
+        }
+        if _syms:
+            _names = {t: (company_name(t) or t) for t in _syms}
+            _logos = {t: logo(t) for t in _syms}
 
-            def _when(iso: str, days: int) -> str:
-                d = date.fromisoformat(iso)
-                if days == 0:
-                    label = tr("home.rel_today")
-                elif days == 1:
-                    label = tr("home.rel_tomorrow")
-                else:
-                    label = tr(f"home.weekday_{d.weekday()}")
-                return f"{d.day:02d} {tr(f'home.month_{d.month}')} · {label}"
+            @st.dialog(tr("earnings.dialog_title"))
+            def _mini_result_dialog(ticker: str, iso: str) -> None:
+                render_result_body(ticker, iso, _results, _names, _logos)
 
-            st.html(
-                ticker_table_html(
-                    pd.DataFrame(
-                        [
-                            {"ticker": t, "reports": _when(iso, days)}
-                            for t, iso, days in _events
-                        ]
-                    ),
-                    labels={
-                        "ticker": tr("home.col_ticker"),
-                        "reports": tr("home.col_reports"),
-                    },
-                )
+            _grid = _mini_cal_grid(
+                data={"html": _mini_calendar_html(
+                    _cal_start, _by_date, _res_by_date, _today, _names, _logos
+                )},
+                key="home_earn_cal",
+                on_pick_change=lambda: None,
             )
+            if _grid.pick:
+                _mini_result_dialog(_grid.pick["ticker"], _grid.pick["date"])
+            st.caption(tr("home.earnings_3w_caption"))
         else:
-            st.caption(tr("home.no_reports"))
+            st.caption(tr("home.no_reports_3w"))
         st.page_link(
             "app_pages/earnings.py",
             label=tr("home.link_earnings_calendar"),
@@ -550,6 +743,7 @@ if _xt_tickers:
                         "price": tr("home.col_last_close"),
                         "where": tr("home.col_52week"),
                     },
+                    mobile={"value": "price", "sub": ("where",)},
                 )
             )
         else:

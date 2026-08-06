@@ -26,9 +26,9 @@ from stocks.data.earnings import (
     calendar_events,
     group_by_date,
     month_weeks,
-    price_reaction,
 )
 from stocks.web import auth
+from stocks.web.earnings_ui import calendar_component, render_result_body
 from stocks.web.i18n import t as tr
 from stocks.web.widgets import db_mtime, held_tickers, is_mobile, ticker_table_html
 from stocks.web.widgets import logo as _logo
@@ -77,11 +77,6 @@ def _calendar_data(sig: tuple):
     return calendar_events(holdings)
 
 
-@st.cache_data(ttl=6 * 3600, show_spinner=False)
-def _reaction(ticker: str, iso: str) -> float | None:
-    return price_reaction(ticker, date.fromisoformat(iso))
-
-
 events, results = _calendar_data(tuple(tickers))
 if not events and not results:
     st.info(tr("earnings.no_dates"))
@@ -95,52 +90,34 @@ if imminent:
 
 # ────────────────────────────────────────────────────────────── calendar view
 CAL_CSS = """
-  .earn-cal {width:100%; border-collapse:collapse; table-layout:fixed;}
-  .earn-cal th {font-size:0.72rem; text-transform:uppercase; letter-spacing:.04em;
-                color:#9aa0aa; font-weight:600; padding:0.3rem 0.4rem; text-align:left;}
-  .earn-cal td {border:1px solid rgba(140,140,140,.18); vertical-align:top;
+  .earn-cal {width:100%; border-collapse:separate; border-spacing:4px; table-layout:fixed;}
+  .earn-cal th {font-size:0.72rem; text-transform:uppercase; letter-spacing:.06em;
+                color:#827F8C; font-weight:600; padding:0.3rem 0.4rem; text-align:left;}
+  .earn-cal td {border:1px solid #3B3942; border-radius:8px; vertical-align:top;
                 height:96px; padding:0.3rem 0.35rem; width:14.28%;}
-  .earn-cal td.dim {background:rgba(140,140,140,.05);}
-  .earn-cal td.today {background:rgba(56,132,255,.12); border-color:rgba(56,132,255,.55);}
-  .earn-daynum {font-size:0.78rem; color:#8b9099; font-weight:600; margin-bottom:0.2rem;}
-  .earn-cal td.today .earn-daynum {color:#3884ff;}
+  .earn-cal td.dim {background:rgba(59,57,66,.25);}
+  .earn-cal td.today {background:#301263; border-color:#A98EF7;}
+  .earn-daynum {font-size:0.78rem; color:#696673; font-weight:600; margin-bottom:0.2rem;}
+  .earn-cal td.today .earn-daynum {color:#C6B7FB;}
   .earn-chip {display:flex; align-items:center; gap:0.3rem; margin:0.12rem 0;
-              padding:0.1rem 0.28rem; border-radius:6px; background:rgba(140,140,140,.12);
+              padding:0.1rem 0.28rem; border-radius:4px; background:#4E2092;
               font-size:0.72rem; font-weight:600; line-height:1.3;
-              color:var(--st-text-color, inherit);
+              color:#DED7FD;
               font-family:var(--st-font, inherit);}
-  .earn-chip.soon {background:rgba(255,86,86,.16); color:#ff7a7a;}
+  .earn-chip.soon {background:rgba(204,64,47,.25); color:#FFD2CB;}
   .earn-chip img {width:16px; height:16px; border-radius:3px; object-fit:contain;}
   .earn-chip span {white-space:nowrap; overflow:hidden; text-overflow:ellipsis;}
   .earn-chip.past {cursor:pointer;}
-  .earn-chip.past:hover {filter:brightness(1.3);}
-  .earn-chip.beat {background:rgba(61,213,109,.16); color:#41c96b;}
-  .earn-chip.miss {background:rgba(255,86,86,.16); color:#ff7a7a;}
+  .earn-chip.past:hover {background:#6A2EBF; color:#FEFEFF;}
+  .earn-chip.beat {background:rgba(42,130,0,.35); color:#DBFFD2;}
+  .earn-chip.miss {background:rgba(204,64,47,.25); color:#FFD2CB;}
 """
 
-# Clickable grid: Python hands the finished table HTML over as data, JS wires
-# each past chip to a trigger carrying {ticker, date}. Re-runs on every data
-# change, so handlers re-attach when the month pages.
-_CAL_JS = """
-export default function (component) {
-  const { data, parentElement, setTriggerValue } = component
-  const root = parentElement.querySelector("#root")
-  if (!root) return
-  root.innerHTML = (data && data.html) || ""
-  for (const el of root.querySelectorAll(".earn-chip.past")) {
-    el.onclick = () => {
-      setTriggerValue("pick", { ticker: el.dataset.ticker, date: el.dataset.date })
-    }
-  }
-}
-"""
-
-_calendar_grid = st.components.v2.component(
-    "earnings_calendar",
-    html='<div id="root"></div>',
-    js=_CAL_JS,
-    css=CAL_CSS,
-)
+# Clickable grid: Python hands the finished table HTML over as data, the shared
+# component wires each past chip (data-ticker/data-date) to a {ticker, date}
+# trigger. Re-runs on every data change, so handlers re-attach when the month
+# pages.
+_calendar_grid = calendar_component("earnings_calendar", CAL_CSS)
 
 
 def _chip(ev) -> str:
@@ -179,69 +156,7 @@ def _result_chip(r) -> str:
 
 @st.dialog(tr("earnings.dialog_title"))
 def _result_dialog(ticker: str, iso: str) -> None:
-    d = date.fromisoformat(iso)
-    r = next((x for x in results if x.ticker == ticker and x.date == d), None)
-
-    head_logo, head_txt = st.columns([1, 6], vertical_alignment="center")
-    if src := logos.get(ticker):
-        head_logo.image(src, width=40)
-    reported = f"{tr(f'earnings.mon_{d.month}')} {d.day:02d}, {d.year}"
-    head_txt.markdown(
-        f"**{ticker}** — {names.get(ticker, ticker)}  \n"
-        + tr("earnings.reported_on", date=reported)
-    )
-
-    if r is None:
-        st.info(tr("earnings.no_figures"))
-        return
-
-    move = _reaction(ticker, iso)
-    m1, m2, m3 = st.columns(3)
-    m1.metric(
-        tr("earnings.reported_eps"),
-        f"{r.reported_eps:.2f}" if r.reported_eps is not None else "—",
-        delta=tr("earnings.surprise_vs_est", pct=f"{r.surprise_pct:+.2f}")
-        if r.surprise_pct is not None
-        else None,
-    )
-    m2.metric(
-        tr("earnings.eps_estimate"),
-        f"{r.eps_estimate:.2f}" if r.eps_estimate is not None else "—",
-    )
-    m3.metric(
-        tr("earnings.price_reaction"),
-        f"{move:+.2f}%" if move is not None else "—",
-        delta=f"{move:+.2f}%" if move is not None else None,
-    )
-    st.caption(tr("earnings.price_reaction_caption"))
-
-    history = [x for x in results if x.ticker == ticker]
-    if len(history) > 1:
-        st.markdown(tr("earnings.recent_quarters"))
-        frame = pd.DataFrame(
-            {
-                "Date": [x.date for x in history],
-                "EPS est": [x.eps_estimate for x in history],
-                "Reported": [x.reported_eps for x in history],
-                "Surprise": [x.surprise_pct for x in history],
-            }
-        )
-        st.dataframe(
-            frame,
-            hide_index=True,
-            column_config={
-                "Date": st.column_config.DateColumn(tr("earnings.col_date")),
-                "EPS est": st.column_config.NumberColumn(
-                    tr("earnings.col_eps_est"), format="%.2f"
-                ),
-                "Reported": st.column_config.NumberColumn(
-                    tr("earnings.col_reported"), format="%.2f"
-                ),
-                "Surprise": st.column_config.NumberColumn(
-                    tr("earnings.col_surprise"), format="%+.1f%%"
-                ),
-            },
-        )
+    render_result_body(ticker, iso, results, names, logos)
 
 
 def _render_calendar(offset: int, events, results) -> None:
@@ -351,6 +266,7 @@ def _views() -> None:
                         "date": tr("earnings.list_col_date"),
                         "days out": tr("earnings.list_col_days_out"),
                     },
+                    mobile={"value": "days out", "delta": "date"},
                 )
             )
         if f_results:
@@ -380,6 +296,12 @@ def _views() -> None:
                         "eps est": tr("earnings.list_col_eps_est"),
                         "reported": tr("earnings.list_col_reported"),
                         "surprise": tr("earnings.list_col_surprise"),
+                    },
+                    mobile={
+                        "value": "reported",
+                        "delta": "surprise",
+                        "sub": ("date", "eps est"),
+                        "sub_labels": {"eps est": tr("earnings.list_col_eps_est")},
                     },
                 )
             )

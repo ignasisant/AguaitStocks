@@ -114,7 +114,17 @@ st.caption(tr("screener.pass_caption", n=len(view), total=len(df)))
 # pre-formatted strings; sorting stays with the Rank-by control above.
 disp = format_frame(view).rename(columns=label)
 disp.insert(0, "ticker", disp.index)
-st.html(ticker_table_html(disp))
+# Phones: dense rows — every metric as a "label value" pair in the wrapped
+# dim line (values are pre-formatted strings; column names are the labels).
+_metric_cols = [c for c in disp.columns if c != "ticker"]
+st.html(ticker_table_html(
+    disp,
+    mobile={
+        "sub": tuple(_metric_cols),
+        "sub_labels": {c: c for c in _metric_cols},
+        "wrap": True,
+    },
+))
 st.download_button(
     tr("screener.download_csv"), df.to_csv().encode(), "screen.csv", "text/csv",
     icon=":material/download:",

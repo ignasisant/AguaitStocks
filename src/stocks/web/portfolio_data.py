@@ -19,8 +19,10 @@ from stocks.analysis.portfolio import (
     flow_series,
     injected_vs_value,
     load_closes,
+    market_live,
     position_values_history,
     positions_frame_eur,
+    session_moves,
     time_weighted_returns,
 )
 from stocks.portfolio.ledger import all_transactions
@@ -53,6 +55,17 @@ def basket_history(db: str, mtime: float) -> pd.DataFrame:
     return position_values_history(ledger_state(db, mtime)[1], period="3mo")
 
 
+@st.cache_data(ttl=300, show_spinner=False)
+def last_session_moves(tickers: tuple[str, ...]) -> dict[str, float]:
+    """Cached last regular-session % move per ticker (fast_info burst).
+
+    Only fetched for off-session names — when the market's closed the daily
+    close-to-close basket can collapse to ~0% (a stale/flat premarket bar), so
+    the day-change cells read from this instead. Keyed by the ticker tuple; ttl
+    refreshes it around the next open."""
+    return session_moves(list(tickers))
+
+
 def enriched_positions(db: str, mtime: float) -> pd.DataFrame:
     """positions_table plus weight / day-change columns, sorted by weight.
 
@@ -72,6 +85,22 @@ def enriched_positions(db: str, mtime: float) -> pd.DataFrame:
         tbl["day_pct"] = (last / prev - 1).reindex(tbl.index)
     else:
         tbl["day_eur"] = tbl["day_pct"] = float("nan")
+    # Market closed → the close-to-close basket can be a flat premarket 0%.
+    # Override those rows with fast_info's last regular-session move (native)
+    # so the (dimmed) day cell shows the real last close; day_eur re-derives
+    # from the EUR value. Crypto is 24/7 so it never overrides.
+    off = tuple(t for t in tbl.index if not market_live(t))
+    if off:
+        moves = last_session_moves(off)
+        for t, pct in moves.items():
+            if t in tbl.index:
+                tbl.at[t, "day_pct"] = pct
+                val = tbl.at[t, "value_eur"]
+                tbl.at[t, "day_eur"] = (
+                    val * pct / (1 + pct)
+                    if pd.notna(val) and pct != -1
+                    else float("nan")
+                )
     return tbl.sort_values("weight", ascending=False, na_position="last")
 
 

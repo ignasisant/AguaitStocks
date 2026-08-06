@@ -12,7 +12,15 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Callable
 
-from stocks.portfolio import generic, revolut, revolut_crypto, revolut_pdf
+from stocks.portfolio import (
+    degiro,
+    generic,
+    ibkr,
+    revolut,
+    revolut_crypto,
+    revolut_pdf,
+    trading212,
+)
 from stocks.portfolio.revolut import ParseResult
 
 
@@ -23,6 +31,7 @@ class Platform:
     file_types: tuple[str, ...]  # extensions st.file_uploader accepts
     hint: str  # one-liner: where to find the export on that platform
     parse: Callable[[str, bytes], ParseResult]  # (filename, raw bytes)
+    domain: str | None = None  # brand website, for the selector logo
 
 
 def _parse_revolut(filename: str, data: bytes) -> ParseResult:
@@ -45,6 +54,7 @@ PLATFORMS: tuple[Platform, ...] = (
             "is extracted from the transactions table and validated the same way."
         ),
         parse=_parse_revolut,
+        domain="revolut.com",
     ),
     Platform(
         key="revolut_crypto",
@@ -58,6 +68,53 @@ PLATFORMS: tuple[Platform, ...] = (
         parse=lambda filename, data: revolut_crypto.parse_csv(
             data.decode("utf-8-sig")
         ),
+        domain="revolut.com",
+    ),
+    Platform(
+        key="trading212",
+        label="Trading 212",
+        file_types=("csv",),
+        hint=(
+            "Export from Trading 212 → History → Export (CSV). The file is "
+            "only imported if it has the exact Trading 212 columns; trades "
+            "record in the instrument currency, dividends carry withholding "
+            "as the fee when reported in that currency."
+        ),
+        parse=lambda filename, data: trading212.parse_csv(
+            data.decode("utf-8-sig")
+        ),
+        domain="trading212.com",
+    ),
+    Platform(
+        key="degiro",
+        label="DEGIRO",
+        file_types=("csv",),
+        hint=(
+            "Export from DEGIRO → Activity → Transactions → Export (CSV). "
+            "Only imported if it has the exact DEGIRO columns (EN/ES). Rows "
+            "import with the ISIN as ticker — map each ISIN to a Yahoo "
+            "symbol under `aliases:` in watchlist.yaml. Dividends are in the "
+            "Account statement, not this file; add them separately."
+        ),
+        parse=lambda filename, data: degiro.parse_csv(
+            data.decode("utf-8-sig")
+        ),
+        domain="degiro.com",
+    ),
+    Platform(
+        key="ibkr",
+        label="Interactive Brokers",
+        file_types=("csv",),
+        hint=(
+            "Export from IBKR → Performance & Reports → Statements → "
+            "Activity (CSV). Only imported if the Trades/Dividends sections "
+            "have the exact IBKR columns; stock orders and dividends import, "
+            "withholding-tax rows are listed for manual review."
+        ),
+        parse=lambda filename, data: ibkr.parse_csv(
+            data.decode("utf-8-sig")
+        ),
+        domain="interactivebrokers.com",
     ),
     Platform(
         key="generic",

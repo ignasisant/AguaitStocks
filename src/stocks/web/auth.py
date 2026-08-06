@@ -1,7 +1,8 @@
 """Login gate and per-user data resolution for the web app.
 
 Authentication is Streamlit-native OIDC (st.login / st.user) configured in
-.streamlit/secrets.toml under [auth] — see .streamlit/secrets.example.toml.
+.streamlit/secrets.toml under [auth] — see the README "Login (web app)"
+section for the required keys.
 
 Browsing is public: app.py calls resolve_user() before building the
 navigation, which maps anonymous visitors to a shared read-only guest dir
@@ -39,7 +40,13 @@ GUEST_DIR = USERS_DIR / "_guest"
 
 CURRENCIES = ("EUR", "USD", "GBP", "CHF")
 CURRENCY_SYMBOL = {"EUR": "€", "USD": "$", "GBP": "£", "CHF": "CHF "}
-DEFAULT_PREFS = {"currency": "EUR", "language": None}  # language None = auto (browser)
+RECENT_SEARCHES_MAX = 5
+DEFAULT_PREFS = {  # language None = auto (browser); picker_sort_by None = default order
+    "currency": "EUR",
+    "language": None,
+    "picker_sort_by": None,
+    "recent_searches": [],  # tickers clicked from the top-bar search, newest first
+}
 
 STARTER_WATCHLIST = """\
 # Personal watchlist — managed from the Profile page.
@@ -65,6 +72,7 @@ class UserPaths:
     db: Path
     last_import: Path
     prefs: Path
+    chat: Path
 
 
 def slug(email: str) -> str:
@@ -102,6 +110,7 @@ def paths_for(
             db=DATA_DIR / "portfolio.db",
             last_import=DATA_DIR / "last_import.json",
             prefs=DATA_DIR / "prefs.json",
+            chat=DATA_DIR / "chat.json",
         )
     d = users_dir / slug(email)
     return UserPaths(
@@ -110,6 +119,7 @@ def paths_for(
         db=d / "portfolio.db",
         last_import=d / "last_import.json",
         prefs=d / "prefs.json",
+        chat=d / "chat.json",
     )
 
 
@@ -126,10 +136,13 @@ def guest_paths() -> UserPaths:
         db=GUEST_DIR / "portfolio.db",
         last_import=GUEST_DIR / "last_import.json",
         prefs=GUEST_DIR / "prefs.json",
+        chat=GUEST_DIR / "chat.json",
     )
 
 
-_USER_FILES = ("watchlist.yaml", "portfolio.db", "last_import.json", "prefs.json")
+_USER_FILES = (
+    "watchlist.yaml", "portfolio.db", "last_import.json", "prefs.json", "chat.json",
+)
 
 
 def _migrate_legacy(paths: UserPaths, legacy_root: Path) -> None:
@@ -168,7 +181,8 @@ def ensure_user_data(paths: UserPaths, legacy_root: Path | None = None) -> None:
         _migrate_legacy(paths, legacy_root)
     paths.root.mkdir(parents=True, exist_ok=True)
     storage.restore_once(
-        paths.root, (paths.watchlist, paths.db, paths.last_import, paths.prefs)
+        paths.root,
+        (paths.watchlist, paths.db, paths.last_import, paths.prefs, paths.chat),
     )
     if not paths.watchlist.exists():
         paths.watchlist.write_text(STARTER_WATCHLIST)
@@ -176,11 +190,18 @@ def ensure_user_data(paths: UserPaths, legacy_root: Path | None = None) -> None:
 
 
 def is_logged_in() -> bool:
-    """True when an authenticated identity with an email is present."""
+    """True when an authenticated identity with a verified email is present.
+
+    All personal data is keyed to the email claim, so an unverified address
+    must never resolve to a data dir — an IdP that skips verification would
+    otherwise let anyone claim someone else's account. Google always sends
+    email_verified=true for its accounts.
+    """
     return (
         "auth" in st.secrets
         and st.user.is_logged_in
         and bool(str(getattr(st.user, "email", "") or "").strip())
+        and bool(getattr(st.user, "email_verified", False))
     )
 
 
@@ -229,31 +250,40 @@ def require_login() -> UserPaths:
         st.button(tr("common.log_out"), icon=":material/logout:", on_click=st.logout)
         st.stop()
 
+    # Must mirror is_logged_in(): without this branch an unverified identity
+    # would silently fall through resolve_user() onto the guest paths.
+    if not bool(getattr(st.user, "email_verified", False)):
+        st.error(tr("auth.email_unverified"))
+        st.button(tr("common.log_out"), icon=":material/logout:", on_click=st.logout)
+        st.stop()
+
     return resolve_user()
 
 
 # Google's "G" mark isn't in Material Symbols, so it's drawn onto the sign-in
 # button as a CSS ::before tile (white rounded square, brand-guideline style).
+# Angle brackets are %-encoded: the URI is interpolated into _LOGIN_CSS, and
+# DOMPurify silently drops a whole style block whose text contains a raw "<".
 _GOOGLE_G_SVG = (
     "data:image/svg+xml,"
-    "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 48 48'>"
-    "<path fill='%234285F4' d='M46.98 24.55c0-1.57-.15-3.09-.38-4.55H24v9.02h12.94"
-    "c-.58 2.96-2.26 5.48-4.78 7.18l7.73 6c4.51-4.18 7.09-10.36 7.09-17.65z'/>"
-    "<path fill='%2334A853' d='M24 48c6.48 0 11.93-2.13 15.89-5.81l-7.73-6"
+    "%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 48 48'%3E"
+    "%3Cpath fill='%234285F4' d='M46.98 24.55c0-1.57-.15-3.09-.38-4.55H24v9.02h12.94"
+    "c-.58 2.96-2.26 5.48-4.78 7.18l7.73 6c4.51-4.18 7.09-10.36 7.09-17.65z'/%3E"
+    "%3Cpath fill='%2334A853' d='M24 48c6.48 0 11.93-2.13 15.89-5.81l-7.73-6"
     "c-2.15 1.45-4.92 2.3-8.16 2.3-6.26 0-11.57-4.22-13.47-9.91l-7.98 6.19"
-    "C6.51 42.62 14.62 48 24 48z'/>"
-    "<path fill='%23FBBC05' d='M10.53 28.59c-.48-1.45-.76-2.99-.76-4.59"
+    "C6.51 42.62 14.62 48 24 48z'/%3E"
+    "%3Cpath fill='%23FBBC05' d='M10.53 28.59c-.48-1.45-.76-2.99-.76-4.59"
     "s.27-3.14.76-4.59l-7.98-6.19C.92 16.46 0 20.12 0 24c0 3.88.92 7.54 2.56 10.78"
-    "l7.97-6.19z'/>"
-    "<path fill='%23EA4335' d='M24 9.5c3.54 0 6.71 1.22 9.21 3.6l6.85-6.85"
+    "l7.97-6.19z'/%3E"
+    "%3Cpath fill='%23EA4335' d='M24 9.5c3.54 0 6.71 1.22 9.21 3.6l6.85-6.85"
     "C35.9 2.38 30.47 0 24 0 14.62 0 6.51 5.38 2.56 13.22l7.98 6.19"
-    "C12.43 13.72 17.74 9.5 24 9.5z'/>"
-    "</svg>"
+    "C12.43 13.72 17.74 9.5 24 9.5z'/%3E"
+    "%3C/svg%3E"
 )
 
 _LOGIN_CSS = f"""\
 <style>
-.st-key-google_signin button::before {{
+[class*="st-key-google_signin"] button::before {{
     content: "";
     flex: 0 0 auto;
     width: 1.25rem;
@@ -303,6 +333,47 @@ def _login_screen() -> None:
             st.space("xsmall")
 
 
+def maybe_prompt_login() -> None:
+    """First load only: pop a dismissible modal inviting Google sign-in.
+
+    Fires once per session and only for anonymous visitors while [auth] is
+    configured. Any exit — the skip button, the X, ESC or a click outside —
+    leaves them on the public guest view; the sidebar sign-in entry stays for
+    later. The seen-flag is set before the dialog opens so it never re-pops on
+    the fragment reruns the modal itself triggers.
+    """
+    if "auth" not in st.secrets or is_logged_in():
+        return
+    if st.session_state.get("_login_prompt_seen"):
+        return
+    st.session_state["_login_prompt_seen"] = True
+    # Build the dialog at call time (not via @st.dialog) so the title resolves
+    # in the run's active language rather than freezing at import.
+    st.dialog(tr("auth.welcome_title"))(_login_dialog_body)()
+
+
+def _login_dialog_body() -> None:
+    st.html(_LOGIN_CSS)
+    st.image(
+        str(Path(__file__).parent / "assets" / "aguait-logo.svg"),
+        width=180,
+    )
+    st.markdown(tr("auth.signin_prompt"))
+    # Distinct key: on a first anonymous visit to a require_login page, this
+    # modal and _login_screen render in the same run — a shared key crashes
+    # with StreamlitDuplicateElementKey. The Google-G CSS matches both keys.
+    st.button(
+        tr("common.sign_in_google"),
+        type="primary",
+        key="google_signin_modal",
+        on_click=st.login,
+        width="stretch",
+    )
+    if st.button(tr("auth.continue_guest"), key="login_skip", width="stretch"):
+        st.rerun()  # close the modal; the seen-flag keeps it from re-opening
+    st.caption(tr("auth.browsing_public"))
+
+
 # ---------------------------------------------------------------- accessors
 # Set by resolve_user() in app.py (guest paths when anonymous); pages run
 # after it via st.navigation.
@@ -324,6 +395,10 @@ def last_import_path() -> Path:
     return user_paths().last_import
 
 
+def chat_path() -> Path:
+    return user_paths().chat
+
+
 # ------------------------------------------------------------- preferences
 
 
@@ -338,6 +413,180 @@ def load_prefs(path: Path | None = None) -> dict:
 def save_prefs(prefs: dict, path: Path | None = None) -> None:
     p = path or user_paths().prefs
     p.write_text(json.dumps(prefs, indent=2))
+    storage.persist(p)
+
+
+# ------------------------------------------------------- recent searches
+# The top-bar search remembers the last few tickers the user clicked to
+# explore, so refocusing the empty field can offer them again (survives
+# reload — stored in prefs like every other per-user setting).
+
+
+def load_recent_searches(prefs: dict | None = None) -> list[str]:
+    p = prefs if prefs is not None else load_prefs()
+    val = p.get("recent_searches", [])
+    if not isinstance(val, list):
+        return []
+    return [str(t) for t in val][:RECENT_SEARCHES_MAX]
+
+
+def push_recent_search(ticker: str) -> None:
+    """Move `ticker` to the front of the recent list, deduped, capped."""
+    t = ticker.strip().upper()
+    if not t:
+        return
+    prefs = load_prefs()
+    rest = [x for x in load_recent_searches(prefs) if x != t]
+    prefs["recent_searches"] = [t, *rest][:RECENT_SEARCHES_MAX]
+    save_prefs(prefs)
+
+
+# ------------------------------------------------------- investor profile
+# Who the assistant is advising, stated by the user (not hard-coded). Stored
+# under prefs["investor_profile"] as stable enum keys (locale-independent, so
+# the English system prompt stays stable whatever the UI language) plus a free
+# notes field. chat_core reads it to build the assistant persona; empty ->
+# chat_core falls back to its historical default line.
+
+PROFILE_RISK = ("aggressive", "very_aggressive", "balanced", "conservative")
+PROFILE_HORIZON = ("5y_plus", "3_5y", "1_3y", "under_1y")
+PROFILE_FOCUS = ("tech", "em", "crypto", "dividends_value")
+PROFILE_CONSTRAINTS = ("spain_tax", "eur", "no_leverage", "esg")
+
+_PROFILE_DEFAULTS = {
+    "risk": "aggressive",
+    "horizon": "5y_plus",
+    "focus": [],
+    "constraints": [],
+    "notes": "",
+}
+
+
+def load_profile(prefs: dict | None = None) -> dict:
+    """The account's investor profile, defaults filled in for missing fields.
+
+    `set` is True once the user has saved the form at least once; callers use
+    it to tell a real (possibly minimal) profile from the mere defaults.
+    """
+    prefs = prefs if prefs is not None else load_prefs()
+    stored = prefs.get("investor_profile") or {}
+    return {**_PROFILE_DEFAULTS, **stored, "set": bool(stored.get("set"))}
+
+
+def profile_is_set(prefs: dict | None = None) -> bool:
+    prefs = prefs if prefs is not None else load_prefs()
+    return bool((prefs.get("investor_profile") or {}).get("set"))
+
+
+def save_profile(profile: dict) -> None:
+    prefs = load_prefs()
+    prefs["investor_profile"] = {**profile, "set": True}
+    save_prefs(prefs)
+
+
+def render_profile_form(key_prefix: str) -> dict:
+    """Draw the investor-profile widgets and return the collected values.
+
+    Shared by the Profile page and the first-login dialog; the caller renders
+    its own Save button and calls save_profile(). Does not persist on its own.
+    """
+    cur = load_profile()
+    risk = st.radio(
+        tr("profile.iv_risk"),
+        PROFILE_RISK,
+        index=PROFILE_RISK.index(cur["risk"]) if cur["risk"] in PROFILE_RISK else 0,
+        format_func=lambda k: tr(f"profile.iv_risk_{k}"),
+        horizontal=True,
+        key=f"{key_prefix}_risk",
+    )
+    horizon = st.radio(
+        tr("profile.iv_horizon"),
+        PROFILE_HORIZON,
+        index=PROFILE_HORIZON.index(cur["horizon"])
+        if cur["horizon"] in PROFILE_HORIZON
+        else 0,
+        format_func=lambda k: tr(f"profile.iv_horizon_{k}"),
+        horizontal=True,
+        key=f"{key_prefix}_horizon",
+    )
+    focus = st.multiselect(
+        tr("profile.iv_focus"),
+        PROFILE_FOCUS,
+        default=[f for f in cur["focus"] if f in PROFILE_FOCUS],
+        format_func=lambda k: tr(f"profile.iv_focus_{k}"),
+        key=f"{key_prefix}_focus",
+    )
+    constraints = st.multiselect(
+        tr("profile.iv_constraints"),
+        PROFILE_CONSTRAINTS,
+        default=[c for c in cur["constraints"] if c in PROFILE_CONSTRAINTS],
+        format_func=lambda k: tr(f"profile.iv_constraints_{k}"),
+        key=f"{key_prefix}_constraints",
+    )
+    notes = st.text_area(
+        tr("profile.iv_notes"),
+        value=cur["notes"],
+        placeholder=tr("profile.iv_notes_ph"),
+        key=f"{key_prefix}_notes",
+    )
+    return {
+        "risk": risk,
+        "horizon": horizon,
+        "focus": focus,
+        "constraints": constraints,
+        "notes": notes.strip(),
+    }
+
+
+def maybe_prompt_profile() -> None:
+    """First load per session: pop the investor-profile setup dialog.
+
+    Fires once per session for a signed-in account that hasn't saved a profile
+    yet; "Skip for now" just closes it (the session flag stops it re-popping),
+    so it nudges again next session until the profile is filled or the user
+    completes it from the Profile page. No-op otherwise.
+    """
+    if "auth" not in st.secrets or not is_logged_in():
+        return
+    if profile_is_set() or st.session_state.get("_profile_prompt_seen"):
+        return
+    st.session_state["_profile_prompt_seen"] = True
+    # Built at call time (not @st.dialog) so the title resolves in the run's
+    # active language rather than freezing at import — same as the login modal.
+    st.dialog(tr("profile.iv_dialog_title"))(_profile_dialog_body)()
+
+
+def _profile_dialog_body() -> None:
+    st.markdown(tr("profile.iv_dialog_intro"))
+    profile = render_profile_form("iv_dialog")
+    save_col, skip_col = st.columns(2)
+    if save_col.button(
+        tr("profile.iv_save"), type="primary", key="iv_dialog_save", width="stretch"
+    ):
+        save_profile(profile)
+        st.rerun()  # close the modal; profile_is_set() now True -> never re-pops
+    if skip_col.button(tr("profile.iv_skip"), key="iv_dialog_skip", width="stretch"):
+        st.rerun()  # close; the seen-flag keeps it shut for the rest of the session
+
+
+# ---------------------------------------------------------------- chat thread
+# The assistant conversation is persisted per account (like prefs) so it
+# survives a reload, a new session, or an ephemeral redeploy — and is mirrored
+# to the bucket. One thread per account, stored as a list of {role, content}.
+
+
+def load_chat(path: Path | None = None) -> list[dict]:
+    p = path or user_paths().chat
+    try:
+        data = json.loads(p.read_text())
+        return data if isinstance(data, list) else []
+    except (OSError, ValueError, TypeError):
+        return []
+
+
+def save_chat(history: list[dict], path: Path | None = None) -> None:
+    p = path or user_paths().chat
+    p.write_text(json.dumps(history, indent=2))
     storage.persist(p)
 
 

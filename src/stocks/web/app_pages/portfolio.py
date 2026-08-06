@@ -27,9 +27,11 @@ from stocks.analysis.portfolio import (
     cumulative_returns,
     effective_positions,
     holdings_from_positions,
+    market_live,
     market_value_weights_eur,
     portfolio_returns,
     top_n_weight,
+    us_market_open,
 )
 from stocks.portfolio import dividends
 from stocks.portfolio.tax_es import fiscal_year, modelo_720_flag
@@ -46,6 +48,7 @@ from stocks.web.portfolio_data import (
 from stocks.web.widgets import (
     LOSS_COLOR,
     PROFIT_COLOR,
+    TEXT_MUTED,
     chart_layout,
     db_mtime,
     is_mobile,
@@ -123,17 +126,34 @@ def _positions_section() -> None:
             st.caption(tr("portfolio.headline_converted", ccy=ccy))
 
         vals = basket_history(DB, db_mtime(DB))
+        # Market closed → "Today" is the last completed session's move. Sum the
+        # per-row day_eur (already overridden to the last-session move) instead
+        # of the basket's close-to-close, which can be a flat premarket 0%; grey
+        # its delta ("off") to flag it isn't live.
+        mkt_open = us_market_open()
+        today_closed = None
+        if not mkt_open:
+            d_eur = tbl["day_eur"].dropna().sum()
+            base = value - d_eur
+            today_closed = (d_eur, d_eur / base if base else 0.0)
         d1, d2, d3 = metric_cells(3)
         for col, label, days in (
             (d1, tr("portfolio.today"), 1),
             (d2, tr("portfolio.one_week"), 7),
             (d3, tr("portfolio.one_month"), 30),
         ):
-            chg = basket_change(vals, days)
+            chg = today_closed if days == 1 and today_closed else basket_change(vals, days)
             if chg is None:
                 col.metric(label, tr("portfolio.na"))
             else:
-                col.metric(label, f"{sym}{chg[0] * fx:+,.0f}", f"{chg[1]:+.2%}")
+                col.metric(
+                    label,
+                    f"{sym}{chg[0] * fx:+,.0f}",
+                    f"{chg[1]:+.2%}",
+                    delta_color="off" if days == 1 and not mkt_open else "normal",
+                )
+        if not mkt_open:
+            st.caption(tr("portfolio.market_closed_note"))
 
         # Shared Positions-style HTML table (logo+name cells, semantic P/L
         # colors — see widgets.ticker_table_html). Rows come pre-sorted by
@@ -155,17 +175,26 @@ def _positions_section() -> None:
             "pnl_pct": "{:+.1%}",
         }
         pnl_cols = ("day_eur", "day_pct", "pnl_eur", "pnl_pct")
+        # Off-session rows: dim only the day columns (last-close move, not live);
+        # total P/L stays full color. Crypto is 24/7 so it never dims.
+        muted = {t for t in tbl["ticker"] if not market_live(t)}
+        day_cols = ("day_eur", "day_pct")
 
         if _MOBILE:
-            # Slim view — value, weight, day and total P/L% are what a
-            # phone glance needs; horizontal panning inside the table is
-            # clunky on touch. Full table one expander below.
-            slim = tbl[["ticker", "value_eur", "weight", "day_pct", "pnl_pct"]]
-            st.html(ticker_table_html(slim, fmt=fmt, signed=pnl_cols))
+            # Dense Revolut-style rows — value + day% on the right, weight and
+            # total P/L in the dim second line; nothing pans horizontally.
+            # Full table one expander below.
+            st.html(ticker_table_html(
+                tbl, fmt=fmt, signed=pnl_cols, muted=muted, muted_cols=day_cols,
+                mobile={"value": "value_eur", "delta": "day_pct",
+                        "sub": ("weight", "pnl_pct"),
+                        "sub_labels": {"pnl_pct": "P/L"}}))
             with st.expander(tr("portfolio.all_columns")):
-                st.html(ticker_table_html(tbl, fmt=fmt, signed=pnl_cols))
+                st.html(ticker_table_html(
+                    tbl, fmt=fmt, signed=pnl_cols, muted=muted, muted_cols=day_cols))
         else:
-            st.html(ticker_table_html(tbl, fmt=fmt, signed=pnl_cols))
+            st.html(ticker_table_html(
+                tbl, fmt=fmt, signed=pnl_cols, muted=muted, muted_cols=day_cols))
         st.caption(tr("portfolio.positions_caption"))
 
 
@@ -214,13 +243,13 @@ def _history_section() -> None:
         gain = hist["value_eur"] >= hist["injected_eur"]
         up = hist["value_eur"].where(gain | gain.shift(1, fill_value=False))
         down = hist["value_eur"].where(~gain | (~gain).shift(1, fill_value=False))
-        GREEN_FILL, RED_FILL = "rgba(9,171,59,0.18)", "rgba(255,75,75,0.18)"
+        GREEN_FILL, RED_FILL = "rgba(42,199,126,0.18)", "rgba(240,82,106,0.18)"
 
         fig = go.Figure()
         fig.add_trace(
             go.Scatter(
                 x=hist.index, y=hist["injected_eur"], name=tr("portfolio.series_injected"),
-                line=dict(color="#9aa4b2", width=2, shape="hv"),
+                line=dict(color=TEXT_MUTED, width=2, shape="hv"),
                 hoverinfo="skip",
             )
         )

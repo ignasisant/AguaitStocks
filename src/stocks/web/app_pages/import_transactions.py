@@ -32,7 +32,7 @@ from stocks.portfolio.ledger import add_many, all_transactions, clear, delete_ma
 from stocks.portfolio.validate import known_tickers, validate
 from stocks.web import auth
 from stocks.web.i18n import t as tr
-from stocks.web.widgets import ticker_table_html
+from stocks.web.widgets import brand_logo, ticker_table_html
 
 # Imports write the personal ledger — no anonymous access.
 auth.require_login()
@@ -92,6 +92,14 @@ def _tx_table(frame: pd.DataFrame, *, rich: bool = True) -> None:
     )
 
 
+def _platform_option_md(key: str) -> str:
+    """Segmented-control label: brand logo (markdown image) + name."""
+    p = platforms.by_key(key)
+    src = brand_logo(p.key, p.domain)
+    img = f"![{p.label}]({src}) " if src else ""
+    return f"{img}{p.label}"
+
+
 # Options are keys, not Platform objects: Streamlit's default-value check
 # converts a dataclass default via its dataframe logic (exploding it into
 # field values), which raises "default not part of the options".
@@ -99,7 +107,7 @@ platform = platforms.by_key(
     st.segmented_control(
         tr("import.importing_from"),
         [p.key for p in platforms.PLATFORMS],
-        format_func=lambda k: platforms.by_key(k).label,
+        format_func=_platform_option_md,
         default=platforms.PLATFORMS[0].key,
         required=True,  # clicking the active segment must not deselect it
     )

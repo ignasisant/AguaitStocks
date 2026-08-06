@@ -30,7 +30,7 @@ def test_clean_batch_is_importable():
 
 def test_future_and_ancient_dates_rejected():
     v = validate(
-        _result([_buy(day="2026-12-31"), _buy(day="2015-01-01", ticker="GOOG")]),
+        _result([_buy(day="2026-12-31"), _buy(day="1985-01-01", ticker="GOOG")]),
         [],
         known=KNOWN,
         today=TODAY,

@@ -588,6 +588,132 @@ def basket_change(values: pd.DataFrame, days: int) -> tuple[float, float] | None
     return v1 - v0, v1 / v0 - 1
 
 
+# --------------------------------------------------------------- market clock
+# The day-change columns come from daily closes, so outside a live regular
+# session they show the LAST completed session's move, not a live tick. These
+# helpers flag that state so the UI can render those cells muted ("market
+# closed — last close") instead of implying they're moving right now.
+#
+# Regular-session hours per exchange, keyed by the Yahoo symbol suffix
+# (resolve() gives it — e.g. RCF -> TEP.PA -> "PA"). (IANA tz, open, close) in
+# exchange-local time; continuous session (HK/Tokyo lunch breaks ignored — a
+# soft cue, not a trading gate). No suffix / unknown = US.
+_EXCHANGE_HOURS: dict[str, tuple[str, tuple[int, int], tuple[int, int]]] = {
+    # Euronext + Southern Europe (CET)
+    "PA": ("Europe/Paris", (9, 0), (17, 30)),
+    "AS": ("Europe/Amsterdam", (9, 0), (17, 30)),
+    "BR": ("Europe/Brussels", (9, 0), (17, 30)),
+    "LS": ("Europe/Lisbon", (8, 0), (16, 30)),
+    "MI": ("Europe/Rome", (9, 0), (17, 30)),
+    "MC": ("Europe/Madrid", (9, 0), (17, 30)),
+    "VI": ("Europe/Vienna", (9, 0), (17, 30)),
+    # Germany (Xetra + Frankfurt floor)
+    "DE": ("Europe/Berlin", (9, 0), (17, 30)),
+    "F": ("Europe/Berlin", (8, 0), (20, 0)),
+    # UK / Ireland
+    "L": ("Europe/London", (8, 0), (16, 30)),
+    "IR": ("Europe/Dublin", (8, 0), (16, 30)),
+    # Switzerland + Nordics
+    "SW": ("Europe/Zurich", (9, 0), (17, 30)),
+    "ST": ("Europe/Stockholm", (9, 0), (17, 30)),
+    "HE": ("Europe/Helsinki", (10, 0), (18, 30)),
+    "CO": ("Europe/Copenhagen", (9, 0), (17, 0)),
+    "OL": ("Europe/Oslo", (9, 0), (16, 30)),
+    # Asia-Pacific
+    "HK": ("Asia/Hong_Kong", (9, 30), (16, 0)),
+    "T": ("Asia/Tokyo", (9, 0), (15, 0)),
+    "SS": ("Asia/Shanghai", (9, 30), (15, 0)),
+    "SZ": ("Asia/Shanghai", (9, 30), (15, 0)),
+    "KS": ("Asia/Seoul", (9, 0), (15, 30)),
+    "TW": ("Asia/Taipei", (9, 0), (13, 30)),
+    "NS": ("Asia/Kolkata", (9, 15), (15, 30)),
+    "BO": ("Asia/Kolkata", (9, 15), (15, 30)),
+    "AX": ("Australia/Sydney", (10, 0), (16, 0)),
+    # Other Americas
+    "TO": ("America/Toronto", (9, 30), (16, 0)),
+    "SA": ("America/Sao_Paulo", (10, 0), (17, 0)),
+}
+
+
+def _session_open(
+    tz_name: str,
+    open_hm: tuple[int, int],
+    close_hm: tuple[int, int],
+    now_utc: "datetime | None" = None,
+) -> bool:
+    """Whether `now` is inside a Mon–Fri open→close window in `tz_name`.
+
+    Time-based only — ignores exchange holidays (a holiday reads as "open"),
+    fine for a soft display cue. `now_utc` is injectable for tests."""
+    from datetime import datetime, time, timezone
+    from zoneinfo import ZoneInfo
+
+    now = (now_utc or datetime.now(timezone.utc)).astimezone(ZoneInfo(tz_name))
+    if now.weekday() >= 5:  # Sat/Sun
+        return False
+    return time(*open_hm) <= now.time() < time(*close_hm)
+
+
+def us_market_open(now_utc: "datetime | None" = None) -> bool:
+    """Whether the US equity regular session (Mon–Fri, 09:30–16:00 America/
+    New_York) is open right now. See `_session_open` for the holiday caveat."""
+    return _session_open("America/New_York", (9, 30), (16, 0), now_utc)
+
+
+def market_live(ticker: str, now_utc: "datetime | None" = None) -> bool:
+    """Whether `ticker` is in a live regular session on its own exchange now.
+
+    Crypto trades 24/7 (always live). Equities key off the Yahoo symbol suffix
+    (`_EXCHANGE_HOURS`) so a Paris/London/HK name follows its local hours; an
+    unsuffixed or unknown symbol falls back to US hours. Exchange-local, so a
+    European stock reads open during CET hours even while US premarket is closed.
+    """
+    from stocks.data.crypto import is_crypto
+    from stocks.data.fetch import resolve
+
+    if is_crypto(ticker):
+        return True
+    symbol = resolve(ticker)
+    suffix = symbol.rsplit(".", 1)[1].upper() if "." in symbol else ""
+    hours = _EXCHANGE_HOURS.get(suffix)
+    return _session_open(*hours, now_utc) if hours else us_market_open(now_utc)
+
+
+def _session_move(ticker: str) -> float | None:
+    """Last regular-session % move (native) for `ticker` via fast_info:
+    lastPrice / regularMarketPreviousClose - 1.
+
+    Robust when the market's closed — regularMarketPreviousClose is always the
+    prior regular close, so this reads the last completed session's move even
+    while a stale/flat premarket daily bar makes the close-to-close basket
+    collapse to ~0%. None when either quote is missing."""
+    import yfinance as yf
+
+    from stocks.data.fetch import resolve
+
+    try:
+        fi = yf.Ticker(resolve(ticker)).fast_info
+        last, prev = fi["lastPrice"], fi["regularMarketPreviousClose"]
+        if last and prev:
+            return float(last) / float(prev) - 1
+    except Exception:
+        pass
+    return None
+
+
+def session_moves(tickers: list[str], max_workers: int = 8) -> dict[str, float]:
+    """Last regular-session % move per ticker (native), fetched concurrently.
+
+    Feeds the "market closed → last completed session" day-change cells so they
+    show the real move instead of a flat premarket 0%. Tickers whose quote is
+    unavailable are absent (caller falls back to the basket value)."""
+    if not tickers:
+        return {}
+    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+        pairs = pool.map(lambda t: (t, _session_move(t)), tickers)
+    return {t: v for t, v in pairs if v is not None}
+
+
 def analyze(
     period: str = "1y",
     benchmarks: tuple[str, ...] = DEFAULT_BENCHMARKS,

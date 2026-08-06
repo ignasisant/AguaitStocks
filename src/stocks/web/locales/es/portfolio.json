@@ -17,6 +17,7 @@
   "portfolio.one_week": "1 semana",
   "portfolio.one_month": "1 mes",
   "portfolio.na": "n/d",
+  "portfolio.market_closed_note": "Mercado cerrado — la variación del día muestra el movimiento de la última sesión completada (atenuada hasta que el mercado reabra).",
   "portfolio.all_columns": "Todas las columnas (acciones, coste, día €, P/L €)",
   "portfolio.positions_caption": "Precios en vivo vía yfinance, convertidos al tipo al contado del BCE. Hoy/semana/mes valoran las posiciones actuales a cierres diarios × FX diario del BCE (cesta fija — las compras/ventas dentro de la ventana no se ajustan por flujos; la variación diaria por valor incluye el movimiento de FX). n/d = precio/FX no disponible.",
   "portfolio.injected_vs_value": "Capital inyectado vs valor de mercado",

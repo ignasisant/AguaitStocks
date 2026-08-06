@@ -78,6 +78,20 @@ st.caption(tr("profile.currency_caption"))
 
 st.divider()
 
+# --------------------------------------------------------- investor profile
+# What the AI assistant is told about the user. Same form as the first-login
+# dialog (auth.render_profile_form); chat_core reads it to build the persona.
+st.subheader(tr("profile.iv_section"))
+st.caption(tr("profile.iv_caption"))
+_profile = auth.render_profile_form("iv_page")
+if st.button(
+    tr("profile.iv_save"), type="primary", icon=":material/save:", key="iv_page_save"
+):
+    auth.save_profile(_profile)
+    st.toast(tr("profile.iv_saved"), icon=":material/check:")
+
+st.divider()
+
 # ---------------------------------------------------------------- watchlist
 st.subheader(tr("profile.watchlist"))
 st.caption(tr("profile.watchlist_caption"))

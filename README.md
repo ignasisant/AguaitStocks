@@ -1,18 +1,17 @@
 # Aguait Stocks
 
-<img src="src/stocks/web/assets/aguait-logo.svg" alt="Aguait Stocks logo" width="310">
+<img src="src/stocks/web/assets/aguait-logo.svg" alt="Aguait Stocks logo" width="270">
 
-**Aguait** (Catalan, from *estar a l'aguait* — to be on the lookout) —
-personal stock tracking toolkit:
-fetch prices, compute indicators, run price alerts, and browse a visual
-dashboard.
+**Aguait Stocks** is a personal equity tracking toolkit: fetch market
+prices, compute technical indicators, run price alerts, and browse a visual
+analytics dashboard.
 
 ## Quickstart — first 10 minutes
 
 ```bash
 uv sync                                        # 1. install (creates .venv)
-cp .streamlit/secrets.example.toml .streamlit/secrets.toml
-#    2. fill in the Google OAuth client — see "Login (web app)" below
+#    2. create .streamlit/secrets.toml with the Google OAuth client
+#       — see "Login (web app)" below
 uv run stocks dashboard                        # 3. opens the app in the browser
 ```
 
@@ -40,6 +39,8 @@ under [Usage](#usage).
 - **yfinance** — price data (no API key needed)
 - **pandas** — data wrangling
 - **Streamlit + Plotly** — the dashboard / "website"
+- **BYOK LLMs** (Claude / ChatGPT / Gemini SDKs, optional) — the portfolio-aware
+  chat assistant; see [AI assistant](#ai-assistant--chat-with-your-portfolio)
 - **pytest + ruff** — tests and linting
 
 ## Setup
@@ -68,8 +69,8 @@ Configure:
 1. Create a Google OAuth client (Web application) at
    <https://console.cloud.google.com/apis/credentials> with redirect URI
    `http://localhost:8501/oauth2callback`.
-2. `cp .streamlit/secrets.example.toml .streamlit/secrets.toml` and fill in
-   `client_id`, `client_secret` and a random `cookie_secret`
+2. Create `.streamlit/secrets.toml` with an `[auth]` section holding
+   `client_id`, `client_secret`, `redirect_uri` and a random `cookie_secret`
    (`python -c "import secrets; print(secrets.token_hex(32))"`).
 3. `uv run stocks dashboard` — the portfolio pages show the sign-in screen
    until the secrets are in place; the market pages work regardless.
@@ -84,8 +85,7 @@ Hosts like Streamlit Community Cloud and most containers have an
 **ephemeral filesystem**: `data/users/` and every imported ledger vanish on
 restart or redeploy. To keep them, point the app at any S3-compatible
 bucket (Cloudflare R2 free tier is plenty) via the `[storage]` section of
-`secrets.toml` — see `.streamlit/secrets.example.toml` — or the equivalent
-`STOCKS_STORAGE_*` env vars.
+`secrets.toml` or the equivalent `STOCKS_STORAGE_*` env vars.
 
 With a bucket configured, every write (watchlist edits, statement imports,
 prefs) is mirrored to it immediately, and each account's files are pulled
@@ -94,6 +94,13 @@ paths (`data/users/<slug>/portfolio.db`, plus the owner's repo-root
 `watchlist.yaml` / `data/portfolio.db`). Unconfigured — the default for
 local dev — everything stays plain files, no bucket or boto3 credentials
 needed.
+
+The bucket holds **every** account's ledgers and watchlists, so scope its
+credentials tightly: use an API token limited to that one bucket with
+object read/write only (on R2: *Object Read & Write* on the specific
+bucket), never an account-level key. Keep the bucket private (no public
+access / dev URL) and enable object versioning so a bad write can be
+rolled back.
 
 ## Usage
 
@@ -132,6 +139,96 @@ uv run stocks dividends --year 2025  # dividend income + foreign withholding (EU
 Edit the tickers you follow in `watchlist.yaml` (copy
 [`watchlist.example.yaml`](watchlist.example.yaml) to create it — the real
 file is git-ignored because it carries your positions).
+
+## AI assistant — chat with your portfolio
+
+A slide-in assistant panel is reachable from every page (the ✨ launcher pinned
+top-right, signed-in users only). It's not a generic chatbot bolted on: **every
+message carries a live snapshot of your real book and your current view**, so
+you can ask "am I too concentrated in tech?", "which position is dragging me
+today?", or "does NVDA still fit my thesis at this weight?" and get an answer
+grounded in *your* numbers, not generic advice.
+
+What the model sees on each turn (assembled in
+[`chat_core.py`](src/stocks/web/chat_core.py) `_system_prompt`):
+
+- **Your live holdings** — the same frame the Portfolio page shows: shares,
+  EUR value, cost, unrealised P/L (% and EUR), portfolio weight and today's
+  move per name, plus the total book value and P/L. Sourced from the imported
+  FIFO ledger valued at live prices (cached per account); falls back to the
+  watchlist's `shares`/`cost` when no ledger exists yet.
+- **Your watchlist** — tickers you follow but don't hold, so it can reason
+  about candidates too.
+- **Your current view** — which page you're on and the ticker in focus, so a
+  question like "is this one expensive?" resolves to what's on screen.
+- **A fixed persona** — a concise investing assistant briefed that you're an
+  aggressive long-term (5y+) investor; it gives analysis and trade-offs, flags
+  what needs your own judgement, and does **not** pose as a licensed advisor.
+
+Only the signed-in account's own data is read (`auth.db_path` /
+`auth.watchlist_path`); nothing crosses between users.
+
+### Bring your own key (multi-provider)
+
+The assistant is **BYOK** — you supply your own API key and pay your own
+provider bill; the app ships no keys and makes no calls on its own account
+(unless the deploy opts into the free chain below). Three BYOK providers ship
+in the registry ([`llm.py`](src/stocks/web/llm.py)), each with a model picker:
+
+| Provider | Models | Get a key |
+|---|---|---|
+| **Claude** (default) | Opus 4.8, Sonnet 5, Haiku 4.5 | [console.anthropic.com](https://console.anthropic.com/settings/keys) |
+| **ChatGPT** | GPT-5, GPT-4o, GPT-4o-mini | [platform.openai.com](https://platform.openai.com/api-keys) |
+| **Gemini** | Flash / Pro (rolling `-latest`) | [aistudio.google.com](https://aistudio.google.com/apikey) |
+
+Each provider's SDK is imported lazily, so a provider only appears when its
+package is installed — a missing optional dependency disables that one entry
+instead of breaking the panel. Answers **stream** token-by-token; SDK errors
+are classified into friendly messages (invalid key / no credits / API error)
+in your language.
+
+### Free assistant, no user key (`[free_llm]`)
+
+Optionally, the deploy can offer a keyless **Aguait AI** provider: a chain of
+free-tier backends billed to *operator* keys in `secrets.toml`. Users get chat
+with zero setup; when a backend answers with a rate-limit (or any error before
+its first token), the chain hops to the next one, and only errors out once
+every configured backend is exhausted.
+
+```toml
+[free_llm]
+# Configure any subset; fallback order is groq -> cerebras -> openrouter.
+groq = "gsk_..."          # console.groq.com/keys
+cerebras = "csk-..."      # cloud.cerebras.ai
+openrouter = "sk-or-..."  # openrouter.ai/settings/keys (:free models)
+# Optional per-backend model override (a retired free model is a config fix):
+# groq_model = "llama-3.3-70b-versatile"
+# Per-account daily message allowance (default 30):
+# daily_cap = 30
+```
+
+When configured, Aguait AI is listed first and becomes the default for
+accounts that never picked a provider; the BYOK entries stay available in the
+same selector. Each account gets a **daily message cap** (`daily_cap`, counted
+in its prefs) so one user can't drain the shared quota. Mind the fine print:
+free tiers route your prompts — including the portfolio snapshot — through the
+chosen vendors; check each vendor's data policy, or leave `[free_llm]` unset
+to stay strictly BYOK.
+
+### Key storage & privacy
+
+- Your key stays in session by default. Tick **Remember** and it's encrypted
+  (Fernet) and persisted for **15 days**, then auto-expires. Rotating the
+  server's `[chat].enc_key` invalidates every stored key on the spot.
+- Key storage is **account-scoped** (prefs `<pid>_key_enc`), so multiple users
+  never share a key. **Forget** wipes it from session and prefs immediately.
+- **Chat history persists per account** (one thread per watchlist, mirrored to
+  disk / your S3 bucket) so it survives reloads, new sessions, and ephemeral
+  redeploys — see [Persistent user data](#persistent-user-data-deploys).
+- Enabling encrypted "Remember" needs `[chat].enc_key` in `secrets.toml`
+  (`python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"`).
+  Without it the assistant still works — keys just aren't remembered across
+  sessions.
 
 ### Upload your Revolut transactions (dashboard)
 
@@ -273,6 +370,8 @@ src/stocks/
   notify/deliver.py    push alerts to Telegram / email (env-gated, console fallback)
   web/app.py           Streamlit entry point (st.navigation + page config/CSS + global ticker picker)
   web/auth.py          Google OIDC login gate + per-account data paths/prefs
+  web/chat_core.py     portfolio-aware assistant panel: context + BYOK key + conversation
+  web/llm.py           multi-provider LLM registry (Claude/ChatGPT/Gemini), streaming + error map
   web/app_pages/       pages: Home, Ticker, Portfolio, Screener, Earnings, Valuation, Import, Profile
   cli.py               `stocks` command
 scripts/update_prices.py   standalone refresh (cron-friendly)
@@ -297,6 +396,7 @@ uv run ruff format # format
 - [x] Watchlist screener (rank/filter by KPIs)
 - [x] Earnings calendar + reminders
 - [x] Alert upgrades (%move, drawdown, RSI, SMA cross, 52w) + Telegram/email delivery
+- [x] Portfolio-aware AI assistant (BYOK Claude/ChatGPT/Gemini, live-book context)
 - [ ] Desktop / push (mobile) notifications on alert hits
 - [ ] Scheduled daily fetch (cron / launchd)
 - [ ] More indicators (MACD, Bollinger)

@@ -12,6 +12,7 @@
   "widgets.analyze": "Analizar **{q}**",
   "widgets.no_tickers": "Sin valores.",
   "widgets.crypto": "Cripto",
+  "widgets.recent": "Recientes",
   "widgets.from_sec_search": "De la búsqueda de símbolos de la SEC",
   "widgets.sign_in_favorite": "Inicia sesión para marcar favoritos y etiquetar",
   "widgets.toast_fav_added": "{ticker} añadido a favoritos",

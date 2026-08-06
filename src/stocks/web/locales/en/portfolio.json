@@ -17,6 +17,7 @@
   "portfolio.one_week": "1 week",
   "portfolio.one_month": "1 month",
   "portfolio.na": "n/a",
+  "portfolio.market_closed_note": "Market closed — the day change shows the last completed session's move (dimmed until the market reopens).",
   "portfolio.all_columns": "All columns (shares, cost, day €, P/L €)",
   "portfolio.positions_caption": "Live prices via yfinance, converted at the ECB spot rate. Today/week/month mark today's holdings at daily closes × daily ECB FX (fixed basket — buys/sells inside the window aren't flow-adjusted; per-ticker day change includes the FX move). n/a = price/FX unavailable.",
   "portfolio.injected_vs_value": "Injected capital vs market value",

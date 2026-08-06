@@ -12,6 +12,9 @@ wheels/
 # Secrets
 .env
 
+# Mirrored company logos (generated at runtime, served same-origin)
+/src/stocks/web/static/logos/
+
 # Cached price data (keep the folder, ignore its contents)
 /data/*.csv
 /data/statements/
@@ -30,6 +33,7 @@ wheels/
 # Per-account data (watchlists, ledgers, prefs — private)
 /data/users/
 /data/prefs.json
+/data/chat.json
 
 # Notebooks
 .ipynb_checkpoints/

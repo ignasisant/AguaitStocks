@@ -36,11 +36,16 @@ from stocks.portfolio.revolut import ParseResult
 
 EDGAR_TICKER_CACHE = DATA_DIR / "edgar_tickers.json"
 
-# Bare US-style symbol or one with an exchange suffix (RMS.PA, BRK-B).
-_TICKER_RE = re.compile(r"^[A-Z0-9]{1,6}([.\-][A-Z0-9]{1,4})?$")
+# Bare US-style symbol or one with an exchange suffix (RMS.PA, BRK-B), or an
+# ISIN (DEGIRO exports carry no ticker; rows import under the ISIN until the
+# user maps it in watchlist.yaml `aliases:`).
+_TICKER_RE = re.compile(
+    r"^([A-Z0-9]{1,6}([.\-][A-Z0-9]{1,4})?|[A-Z]{2}[A-Z0-9]{9}[0-9])$"
+)
 
-# Earliest plausible trade date: Revolut launched stock trading in 2019.
-_MIN_DATE = "2018-01-01"
+# Earliest plausible trade date — old enough for IBKR/DEGIRO history, recent
+# enough to catch corrupt dates (a mangled year like 0203 or 1023).
+_MIN_DATE = "1990-01-01"
 
 # Snap targets for derived split ratios: forward N:1 and the common 3:2.
 _SPLIT_RATIOS = [1.5] + [float(n) for n in range(2, 51)]
@@ -240,7 +245,7 @@ def _check_date(c: Checked, today: date) -> None:
         c.issues.append(Issue("error", "date", f"date {d} is in the future"))
     elif d < _MIN_DATE:
         c.issues.append(
-            Issue("error", "date", f"date {d} predates Revolut stock trading")
+            Issue("error", "date", f"date {d} predates plausible trading history")
         )
 
 

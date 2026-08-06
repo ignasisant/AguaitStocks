@@ -22,6 +22,16 @@ def get_json(url: str, *, user_agent: str = DEFAULT_UA, timeout: float = 30) -> 
     return json.loads(get_bytes(url, user_agent=user_agent, timeout=timeout))
 
 
+def get_bytes_and_type(
+    url: str, *, user_agent: str = DEFAULT_UA, timeout: float = 30
+) -> tuple[bytes, str]:
+    """GET returning (body, content type) — for callers that store the body
+    under a type-derived file extension (e.g. the logo mirror)."""
+    req = urllib.request.Request(url, headers={"User-Agent": user_agent})
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return resp.read(), resp.headers.get("Content-Type", "")
+
+
 def url_is_image(url: str, *, user_agent: str = DEFAULT_UA, timeout: float = 6) -> bool:
     """True if url returns a 200 with an image content type."""
     try:

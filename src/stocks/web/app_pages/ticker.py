@@ -8,6 +8,8 @@ fundamentals, insiders and comparables below it.
 
 from __future__ import annotations
 
+import html
+import re
 from datetime import date
 
 import pandas as pd
@@ -26,6 +28,7 @@ from stocks.analysis.fundamentals import (
 )
 from stocks.analysis.indicators import add_indicators
 from stocks.analysis.moat import MoatScore, PILLAR_WEIGHTS, moat_score
+from stocks.analysis.pe_history import pe_vs_history, window_stats
 from stocks.config import load_watchlist
 from stocks.data.crypto import is_crypto, split_pair
 from stocks.data.estimates import (
@@ -50,8 +53,19 @@ from stocks.web import auth
 from stocks.web.i18n import t as tr
 from stocks.web.kpi_text import kpi_desc, sources_table
 from stocks.web.widgets import (
+    BRAND_ACCENT,
+    CANDLE_DOWN,
+    CANDLE_UP,
+    DOWN_COLOR,
+    EVENT_LINE,
+    SMA_FAST,
+    SMA_SLOW,
+    TEXT_MUTED,
+    UP_COLOR,
+    WARN_COLOR,
     chart_layout,
     company_name,
+    hover_wrap,
     is_mobile,
     metric_cells,
     show_chart,
@@ -167,8 +181,8 @@ def _ledger(db: str):
 
 # Corporate-event verticals on the price chart: letter tag, line/marker color.
 _EVENT_KINDS = {
-    "d": (tr("ticker.ev_dividends"), "#f59e0b"),
-    "r": (tr("ticker.ev_results"), "#3b82f6"),
+    "d": (tr("ticker.ev_dividends"), WARN_COLOR),
+    "r": (tr("ticker.ev_results"), SMA_SLOW),
 }
 
 
@@ -223,7 +237,7 @@ def _event_markers(
             if r.eps_estimate is not None:
                 line += tr("ticker.hover_vs_est", est=f"{r.eps_estimate:.2f}")
             if r.surprise_pct is not None:
-                color = "#26a69a" if r.surprise_pct >= 0 else "#ef5350"
+                color = UP_COLOR if r.surprise_pct >= 0 else DOWN_COLOR
                 line += (
                     f" · <span style='color:{color}'>"
                     f"<b>{r.surprise_pct:+.1f}%</b></span> " + tr("ticker.hover_surprise")
@@ -289,7 +303,7 @@ def _projection(t: str, last_fy: int) -> pd.DataFrame:
 
 
 # Divider between reported and forecast regions of a chart.
-_FORECAST_DIVIDER = dict(line_dash="dot", line_color="rgba(148,163,184,0.6)")
+_FORECAST_DIVIDER = dict(line_dash="dot", line_color="rgba(154,165,181,0.6)")
 
 
 _fmt_money = compact_money  # shared compact currency label, e.g. $394.3B
@@ -306,6 +320,110 @@ def _legend(label: str, s: pd.Series) -> str:
         cagr = ((last / first) ** (1 / (n - 1)) - 1) * 100
         parts.append(tr("ticker.legend_cagr", pct=f"{cagr:+.0f}"))
     return " · ".join(parts)
+
+
+# --- phone price summary (the design's "Valor (móvil)" frame) --------------
+# On phones the seven-tile desktop KPI strip reads as a wall; the design shows
+# a big price hero (32px Epilogue + day pill + range change) over a 2×2 grid
+# of position tiles, with RSI folded into a tile caption. Rendered as one
+# st.html block — metric_cells' fixed-width wrap can't produce this shape.
+
+
+def _pill_html(pct: float, *, small: bool = False) -> str:
+    """Filled day-change pill, same pair as the stMetricDelta CSS in app.py."""
+    up = pct >= 0
+    return (
+        '<span style="display:inline-flex;align-items:center;gap:3px;'
+        f"background:{'#2A8200' if up else '#CC402F'};"
+        f"color:{'#DBFFD2' if up else '#FEFEFF'};"
+        f"font-size:{'11px' if small else '12px'};font-weight:600;"
+        f'border-radius:9999px;padding:{"1px 7px" if small else "2px 8px"}">'
+        f"{'↑' if up else '↓'} {pct:+.2f}%</span>"
+    )
+
+
+def _muted(txt: str) -> str:
+    return f'<span style="font-size:11px;color:#827F8C">{html.escape(txt)}</span>'
+
+
+def _tile(label: str, value_html: str, note_html: str = "") -> str:
+    """One grid tile: muted label over a 16px value, optional caption line.
+    Page-tone fill so the tile reads inset inside the section card."""
+    return (
+        '<div style="background:#18161C;border:1px solid #3B3942;border-radius:12px;'
+        'padding:12px;display:flex;flex-direction:column;gap:4px;align-items:flex-start">'
+        '<span style="font-size:11px;font-weight:500;color:#B3AFBD">'
+        f"{html.escape(label)}</span>"
+        '<span style="font-size:16px;font-weight:600;line-height:1.2">'
+        f"{value_html}</span>"
+        + note_html
+        + "</div>"
+    )
+
+
+def _plain(md: str) -> str:
+    """Markdown verdict → plain text for HTML captions (:color[**x**] → x)."""
+    return re.sub(r":\w+\[(.*?)\]", r"\1", md).replace("**", "")
+
+
+def _mobile_summary_html(df: pd.DataFrame, sel: str, my_pos, db: str) -> str:
+    last = float(df["Close"].iloc[-1])
+    prev = float(df["Close"].iloc[-2])
+    first = float(df["Close"].iloc[0])
+    period_pct = (last - first) / first * 100
+    rsi_val = float(df["RSI14"].iloc[-1])
+    sma20 = float(df["SMA20"].iloc[-1])
+    rsi_txt = f"RSI {rsi_val:.1f} · {_plain(verdict_md('rsi', rsi_val))}"
+
+    parts = [
+        '<div style="display:flex;align-items:flex-end;gap:10px;flex-wrap:wrap">'
+        "<span style=\"font-family:'Epilogue','Instrument Sans',sans-serif;"
+        f'font-weight:700;font-size:32px;line-height:1">{last:,.2f}</span>'
+        + _pill_html((last - prev) / prev * 100)
+        + f'<span style="font-size:12px;padding-bottom:2px;'
+        f'color:{UP_COLOR if period_pct >= 0 else DOWN_COLOR}">'
+        + html.escape(tr("ticker.period_change", pct=f"{period_pct:+.2f}%", period=sel))
+        + "</span></div>"
+    ]
+    if my_pos:
+        values_eur = _position_values_eur(db)
+        total_eur = sum(values_eur.values())
+        value_eur = values_eur.get(my_pos.ticker)
+        value_native = my_pos.quantity * last
+        pnl_native = value_native - my_pos.cost_native
+        pnl_pct = (
+            (last / my_pos.avg_cost_native - 1) * 100 if my_pos.avg_cost_native else 0.0
+        )
+        weight = f"{value_eur / total_eur * 100:.1f}%" if value_eur and total_eur else "—"
+        parts.append(
+            '<div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">'
+            + _tile(
+                tr("ticker.position_value"),
+                f"{value_native:,.2f} {my_pos.currency}",
+                _muted(f"≈ €{value_eur:,.2f}") if value_eur else "",
+            )
+            + _tile(
+                tr("ticker.unrealised_pl"),
+                f'<span style="color:{UP_COLOR if pnl_native >= 0 else DOWN_COLOR}">'
+                f"{pnl_native:+,.2f} {my_pos.currency}</span>",
+                _pill_html(pnl_pct, small=True),
+            )
+            + _tile(tr("ticker.pct_portfolio"), weight, _muted(rsi_txt))
+            + _tile(
+                tr("ticker.avg_buy_price"),
+                f"{my_pos.avg_cost_native:,.2f} {my_pos.currency}",
+                _muted(tr("ticker.n_shares", n=f"{my_pos.quantity:,.4f}")),
+            )
+            + "</div>"
+        )
+    else:
+        trend = tr("ticker.price_above") if last >= sma20 else tr("ticker.price_below")
+        parts.append(_muted(f"{rsi_txt} · SMA20 {sma20:,.2f} · {trend}"))
+    return (
+        '<div style="display:flex;flex-direction:column;gap:14px">'
+        + "".join(parts)
+        + "</div>"
+    )
 
 
 def _position_metrics(cols, pos, last: float) -> None:
@@ -352,28 +470,38 @@ def _price_section(ticker: str) -> None:
     period_opts = (
         [p for p in PERIODS if p not in ("6m", "2y")] if _MOBILE else list(PERIODS)
     )
-    sel = st.segmented_control(
-        tr("ticker.period"),
-        period_opts,
-        default="1y",
-        key="period_sel",
-        label_visibility="collapsed",
-    )
-    sel = sel or "1y"  # segmented_control returns None if the user clears it.
-
-    # Candlesticks pack ~250 bars into a ~390px phone canvas — the bodies
-    # collapse to sub-pixel mush. Default phones to a Close line (readable),
-    # desktop to candles (OHLC useful); either way the toggle lets you flip.
+    # Desktop: period pills and the candles/line toggle share one full-width
+    # row — "distribute" pins the pills left and the toggle to the right edge.
+    # Phones stack them (each pill set already fills a 360px viewport alone).
     default_chart = "line" if _MOBILE else "candles"
-    chart_type = st.segmented_control(
-        tr("ticker.chart_type"),
-        ["candles", "line"],
-        default=default_chart,
-        format_func=lambda o: tr(f"ticker.chart_{o}"),
-        key="chart_type_sel",
-        label_visibility="collapsed",
+    row = st.container(
+        horizontal=not _MOBILE,
+        horizontal_alignment="distribute",
+        vertical_alignment="center",
     )
-    chart_type = chart_type or default_chart
+
+    with row:
+        sel = st.segmented_control(
+            tr("ticker.period"),
+            period_opts,
+            default="1y",
+            key="period_sel",
+            label_visibility="collapsed",
+        )
+        sel = sel or "1y"  # segmented_control returns None if the user clears it.
+
+        # Candlesticks pack ~250 bars into a ~390px phone canvas — the bodies
+        # collapse to sub-pixel mush. Default phones to a Close line (readable),
+        # desktop to candles (OHLC useful); either way the toggle lets you flip.
+        chart_type = st.segmented_control(
+            tr("ticker.chart_type"),
+            ["candles", "line"],
+            default=default_chart,
+            format_func=lambda o: tr(f"ticker.chart_{o}"),
+            key="chart_type_sel",
+            label_visibility="collapsed",
+        )
+        chart_type = chart_type or default_chart
 
     df = _history(ticker, sel)
     db = str(auth.db_path())
@@ -385,38 +513,54 @@ def _price_section(ticker: str) -> None:
 
     last = float(df["Close"].iloc[-1])
     prev = float(df["Close"].iloc[-2])
-    with metrics_slot:
-        # One row: price/RSI/SMA plus the position block when the ticker is
-        # held. metric_cells wraps 2-3 per row on phones instead of stacking.
-        cols = metric_cells(7 if my_pos else 3)
-        c1, c2, c3 = cols[:3]
-        c1.metric(tr("ticker.price"), f"{last:,.2f}", f"{(last - prev) / prev * 100:+.2f}%")
+    if _MOBILE:
+        # Phone summary per the design: price hero + 2×2 position tiles.
+        metrics_slot.html(_mobile_summary_html(df, sel, my_pos, db))
+    else:
+        with metrics_slot:
+            # One row: price/RSI/SMA plus the position block when the ticker
+            # is held.
+            cols = metric_cells(7 if my_pos else 3)
+            c1, c2, c3 = cols[:3]
+            c1.metric(
+                tr("ticker.price"),
+                f"{last:,.2f}",
+                f"{(last - prev) / prev * 100:+.2f}%",
+            )
+            # Change over the selected range: df is already trimmed to the
+            # display window, so the first Close is the period's start.
+            first = float(df["Close"].iloc[0])
+            period_pct = (last - first) / first * 100
+            pct_md = f":{'green' if period_pct >= 0 else 'red'}[**{period_pct:+.2f}%**]"
+            c1.caption(tr("ticker.period_change", pct=pct_md, period=sel))
 
-        rsi_val = float(df["RSI14"].iloc[-1])
-        c2.metric(tr("ticker.rsi_label"), f"{rsi_val:.1f}", help=tr("ticker.rsi_help"))
-        c2.caption(verdict_md("rsi", rsi_val))
+            rsi_val = float(df["RSI14"].iloc[-1])
+            c2.metric(
+                tr("ticker.rsi_label"), f"{rsi_val:.1f}", help=tr("ticker.rsi_help")
+            )
+            c2.caption(verdict_md("rsi", rsi_val))
 
-        sma20 = float(df["SMA20"].iloc[-1])
-        c3.metric(tr("ticker.sma20_label"), f"{sma20:,.2f}", help=tr("ticker.sma20_help"))
-        # Price vs its 20-day average: a quick trend read alongside the level.
-        c3.caption(
-            f":green[{tr('ticker.price_above')}]"
-            if last >= sma20
-            else f":red[{tr('ticker.price_below')}]"
-        )
+            sma20 = float(df["SMA20"].iloc[-1])
+            c3.metric(
+                tr("ticker.sma20_label"), f"{sma20:,.2f}", help=tr("ticker.sma20_help")
+            )
+            # Price vs its 20-day average: a quick trend read beside the level.
+            c3.caption(
+                f":green[{tr('ticker.price_above')}]"
+                if last >= sma20
+                else f":red[{tr('ticker.price_below')}]"
+            )
 
-        if my_pos:
-            _position_metrics(cols[3:], my_pos, last)
+            if my_pos:
+                _position_metrics(cols[3:], my_pos, last)
 
     fig = go.Figure()
     if chart_type == "line":
-        # Explicit colour so the price line doesn't consume a colorway slot and
-        # shift SMA20/SMA50 off their established orange/green.
         fig.add_trace(
             go.Scatter(
                 x=df.index, y=df["Close"], name=tr("ticker.price"),
                 mode="lines",
-                line=dict(color="#4c9be8", width=1.6),
+                line=dict(color=BRAND_ACCENT, width=2.2),
                 hovertemplate=tr("ticker.price") + "  <b>%{y:,.2f}</b><extra></extra>",
             )
         )
@@ -429,17 +573,23 @@ def _price_section(ticker: str) -> None:
                 low=df["Low"],
                 close=df["Close"],
                 name=tr("ticker.price"),
+                increasing_line_color=CANDLE_UP,
+                increasing_fillcolor=CANDLE_UP,
+                decreasing_line_color=CANDLE_DOWN,
+                decreasing_fillcolor=CANDLE_DOWN,
             )
         )
     fig.add_trace(
         go.Scatter(
             x=df.index, y=df["SMA20"], name="SMA20",
+            line=dict(color=SMA_FAST, width=2),
             hovertemplate="SMA20  <b>%{y:,.2f}</b><extra></extra>",
         )
     )
     fig.add_trace(
         go.Scatter(
             x=df.index, y=df["SMA50"], name="SMA50",
+            line=dict(color=SMA_SLOW, width=2),
             hovertemplate="SMA50  <b>%{y:,.2f}</b><extra></extra>",
         )
     )
@@ -452,9 +602,11 @@ def _price_section(ticker: str) -> None:
 
         chart_start = df.index[0]
         avg_cost = my_pos.avg_cost_native if my_pos else 0.0
+        # White triangles with a canvas-dark outline per the design — the
+        # markers must read against candles of either color.
         for action, symbol, color in (
-            ("buy", "triangle-up", "#26a69a"),
-            ("sell", "triangle-down", "#ef5350"),
+            ("buy", "triangle-up", "#F9F9FA"),
+            ("sell", "triangle-down", DOWN_COLOR),
         ):
             pts = [
                 (t, _chart_ts(t.date))
@@ -469,7 +621,7 @@ def _price_section(ticker: str) -> None:
                 hover = []
                 for t, _ in pts:
                     pct = (last / t.price - 1) * 100 if t.price else 0.0
-                    pct_color = "#26a69a" if pct >= 0 else "#ef5350"
+                    pct_color = UP_COLOR if pct >= 0 else DOWN_COLOR
                     text = tr(
                         "ticker.hover_buy",
                         qty=f"{t.quantity:.4f}",
@@ -481,12 +633,12 @@ def _price_section(ticker: str) -> None:
                     )
                     if avg_cost:
                         text += tr("ticker.hover_avg_buy", avg=f"{avg_cost:,.2f}")
-                    hover.append(text)
+                    hover.append(hover_wrap(text))
                 customdata = hover
                 hovertemplate = "%{customdata}<extra></extra>"
             else:
                 customdata = [t.quantity for t, _ in pts]
-                hovertemplate = tr("ticker.hover_sell_tmpl")
+                hovertemplate = hover_wrap(tr("ticker.hover_sell_tmpl"))
             fig.add_trace(
                 go.Scatter(
                     x=[x for _, x in pts],
@@ -495,7 +647,7 @@ def _price_section(ticker: str) -> None:
                     name=tr("ticker.my_buys") if action == "buy" else tr("ticker.my_sells"),
                     marker=dict(
                         symbol=symbol, size=12, color=color,
-                        line=dict(width=1.5, color="white"),
+                        line=dict(width=1.5, color="#18161C"),
                     ),
                     customdata=customdata,
                     hovertemplate=hovertemplate,
@@ -511,12 +663,14 @@ def _price_section(ticker: str) -> None:
         if not pts:
             continue
         for ts, _ in pts:
+            # Neutral dashed vertical, colored letter tag on top (the design
+            # keeps the guide line quiet and lets the tag carry the meaning).
             fig.add_vline(
                 x=ts,
                 line_dash="dot",
                 line_width=1,
-                line_color=color,
-                opacity=0.55,
+                line_color=EVENT_LINE,
+                opacity=0.8,
                 annotation_text=kind,
                 annotation_position="top",
                 annotation_font=dict(size=11, color=color),
@@ -529,9 +683,9 @@ def _price_section(ticker: str) -> None:
                 name=name,
                 marker=dict(
                     symbol="diamond", size=7, color=color,
-                    line=dict(width=1, color="white"),
+                    line=dict(width=1, color="#18161C"),
                 ),
-                customdata=[txt for _, txt in pts],
+                customdata=[hover_wrap(txt) for _, txt in pts],
                 hovertemplate="%{customdata}<extra></extra>",
             )
         )
@@ -547,32 +701,114 @@ def _price_section(ticker: str) -> None:
     fig.update_xaxes(rangebreaks=_rangebreaks(df, PERIODS[sel][1]))
     show_chart(fig)
 
+    # Card footer per the design: the most recent buy at a glance — size @
+    # price · date · return to the current price (· blended average cost).
+    buys = [t for t in my_trades if t.action == "buy" and t.price]
+    if buys:
+        last_buy = max(buys, key=lambda t: t.date)
+        pct = (last / last_buy.price - 1) * 100
+        if _MOBILE:
+            pct_md = (
+                f'<span style="color:{UP_COLOR if pct >= 0 else DOWN_COLOR};'
+                f'font-weight:600">{pct:+.2f}%</span>'
+            )
+        else:
+            pct_md = f":{'green' if pct >= 0 else 'red'}[**{pct:+.2f}%**]"
+        line = tr(
+            "ticker.last_buy",
+            qty=f"{last_buy.quantity:.4f}",
+            price=f"{last_buy.price:,.2f}",
+            date=last_buy.date,
+            pct=pct_md,
+            last=f"{last:,.2f}",
+        )
+        if my_pos and my_pos.avg_cost_native:
+            line += tr("ticker.last_buy_avg", avg=f"{my_pos.avg_cost_native:,.2f}")
+        if _MOBILE:
+            # The design's phone frame boxes this line in its own inset tile.
+            line = re.sub(
+                r"\*\*(.+?)\*\*", r'<strong style="color:#F9F9FA">\1</strong>', line
+            )
+            st.html(
+                '<div style="display:flex;align-items:flex-start;gap:8px;'
+                "background:#18161C;border:1px solid #3B3942;border-radius:12px;"
+                'padding:12px;font-size:12px;color:#B3AFBD;line-height:1.45">'
+                '<span style="flex-shrink:0">▲</span><span>' + line + "</span></div>"
+            )
+        else:
+            st.divider()
+            st.caption(f"▲ {line}")
+
 
 # Header + favorite/tag actions. Outside the price fragment on purpose:
 # toggling the star or editing tags then reruns the whole app, so the
 # sidebar list (favorites-first order, ⭐ marks, tag search) stays in sync.
 # Off-watchlist symbols (SEC search / held-only) fall back to the map name.
+# One flex row per the design: logo chip · bold symbol · muted name ·
+# "in portfolio" badge, with the actions pinned to the right edge.
 label = labels.get(ticker) or company_name(ticker) or ticker
 src = _logo(ticker)
-if _MOBILE:
-    # Phones: columns stack full-width, so the star + tags controls would drop
-    # into two full-width rows under the title. Keep title + a single compact
-    # actions menu on one flex row instead (logo stays above, full-size).
-    if src:
-        st.image(src, width=44)
-    row = st.container(horizontal=True, vertical_alignment="center")
-    row.container(width="stretch").header(f"{ticker} — {label}")
-    ticker_actions(ticker, container=row, key="page")
-else:
-    if src:
-        h1, h2, h3 = st.columns([1, 10, 4], vertical_alignment="center")
-        h1.image(src, width=44)
-    else:
-        h2, h3 = st.columns([11, 4], vertical_alignment="center")
-    h2.header(f"{ticker} — {label}")
-    ticker_actions(ticker, container=h3, key="page")
 
-_price_section(ticker)
+
+def _header_html() -> str:
+    logo_px = 30 if _MOBILE else 36
+    parts = []
+    if src:
+        parts.append(
+            f'<img src="{html.escape(src)}" alt="" style="width:{logo_px}px;'
+            f"height:{logo_px}px;border-radius:8px;background:#FEFEFF;"
+            "border:1px solid #3B3942;box-sizing:border-box;"
+            f'padding:{4 if _MOBILE else 5}px;object-fit:contain">'
+        )
+    show_name = label.upper() != ticker
+    if _MOBILE:
+        # Phones stack symbol over the name (the design's compact app bar);
+        # min-width:0 + ellipsis keep long names from pushing the badge off.
+        name_line = (
+            '<span style="font-size:12px;color:#827F8C;overflow:hidden;'
+            f'text-overflow:ellipsis;white-space:nowrap">{html.escape(label)}</span>'
+            if show_name
+            else ""
+        )
+        parts.append(
+            '<div style="display:flex;flex-direction:column;min-width:0">'
+            f'<span style="font-size:16px;font-weight:600">{html.escape(ticker)}</span>'
+            + name_line
+            + "</div>"
+        )
+    else:
+        parts.append(
+            '<h1 style="font-size:28px;font-weight:600;line-height:1.21;'
+            f'padding:0;margin:0">{html.escape(ticker)}</h1>'
+        )
+        if show_name:
+            parts.append(
+                f'<span style="font-size:14px;color:#827F8C">{html.escape(label)}</span>'
+            )
+    if ticker in _held(str(auth.db_path())):
+        # Purple-800 fill / purple-300 text — the DS brand badge pair on dark.
+        parts.append(
+            '<span style="background:#4E2092;color:#DED7FD;font-size:11px;'
+            "font-weight:600;border-radius:4px;padding:2px 8px;white-space:nowrap;"
+            f'{"margin-left:auto" if _MOBILE else ""}">'
+            f'{html.escape(tr("ticker.in_portfolio"))}</span>'
+        )
+    return (
+        '<div style="display:flex;align-items:center;gap:'
+        + ("10px" if _MOBILE else "12px")
+        + (";flex-wrap:wrap" if not _MOBILE else "")
+        + '">'
+        + "".join(parts)
+        + "</div>"
+    )
+
+
+row = st.container(horizontal=True, vertical_alignment="center")
+row.container(width="stretch").html(_header_html())
+ticker_actions(ticker, container=row, key="page")
+
+with st.container(border=True):
+    _price_section(ticker)
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
@@ -617,7 +853,8 @@ def _crypto_section(t: str) -> None:
 # Crypto pairs stop after price + stats: statements, Form 4 filings and
 # comparables below are meaningless for a coin (and each costs a fetch).
 if is_crypto(ticker):
-    _crypto_section(ticker)
+    with st.container(border=True):
+        _crypto_section(ticker)
     st.stop()
 
 
@@ -683,7 +920,7 @@ def _annual_combined_chart(fin: pd.DataFrame, proj: pd.DataFrame) -> None:
                 # [kind, yoy-string] per bar; "—" when no prior year to compare.
                 customdata=list(zip(kind, [t or "—" for t in text], strict=True)),
                 marker=dict(pattern=dict(shape=pattern), opacity=opacity),
-                hovertemplate=(
+                hovertemplate=hover_wrap(
                     f"{label}  <b>%{{y:$.3s}}</b>"
                     " · YoY %{customdata[1]} · %{customdata[0]}<extra></extra>"
                 ),
@@ -694,7 +931,7 @@ def _annual_combined_chart(fin: pd.DataFrame, proj: pd.DataFrame) -> None:
     # flatline on the bar scale. One hue for all EPS traces, distinct from
     # the bar colors (color follows the series, not the trace slot).
     eps_axis = "y2" if has_bars else "y"
-    violet = "#A78BFA"
+    violet = BRAND_ACCENT
     if not eps.empty:
         eps_years = [str(y) for y in eps.index]
         if not eps_est.empty:
@@ -722,7 +959,7 @@ def _annual_combined_chart(fin: pd.DataFrame, proj: pd.DataFrame) -> None:
                         mode="lines",
                         line=dict(width=0),
                         fill="tonexty",
-                        fillcolor="rgba(167, 139, 250, 0.15)",
+                        fillcolor="rgba(201, 166, 218, 0.15)",
                         hoverinfo="skip",
                         showlegend=False,
                     )
@@ -736,7 +973,7 @@ def _annual_combined_chart(fin: pd.DataFrame, proj: pd.DataFrame) -> None:
                 mode="lines+markers",
                 line=dict(color=violet, width=2),
                 marker=dict(size=7),
-                hovertemplate=tr("ticker.eps_hover_reported"),
+                hovertemplate=hover_wrap(tr("ticker.eps_hover_reported")),
             )
         )
         if not eps_est.empty:
@@ -762,7 +999,9 @@ def _annual_combined_chart(fin: pd.DataFrame, proj: pd.DataFrame) -> None:
                         opacity=[0.0] + [1.0] * len(eps_est),
                     ),
                     customdata=[tr("ticker.k_reported")] + kind,
-                    hovertemplate="EPS  <b>%{y:.2f}</b> · %{customdata}<extra></extra>",
+                    hovertemplate=hover_wrap(
+                        "EPS  <b>%{y:.2f}</b> · %{customdata}<extra></extra>"
+                    ),
                 )
             )
 
@@ -857,8 +1096,9 @@ def _financials_section(ticker: str, fin: pd.DataFrame, proj: pd.DataFrame) -> N
 # Annual revenue / profit / EPS trend, straight under the price chart.
 fin = annual_financials(_raw(ticker))
 if not fin.empty:
-    proj = _projection(ticker, int(fin.index[-1]))
-    _financials_section(ticker, fin, proj)
+    with st.container(border=True):
+        proj = _projection(ticker, int(fin.index[-1]))
+        _financials_section(ticker, fin, proj)
 
 
 # ---------------------------------------------------------------- fundamentals
@@ -872,13 +1112,6 @@ def _fx_usd_eur() -> tuple[float, str]:
     return usd_eur()
 
 
-st.subheader(tr("ticker.fundamentals"))
-with st.spinner(tr("ticker.loading_fundamentals", ticker=ticker)):
-    mets = _metrics(ticker)
-
-st.caption(tr("ticker.verdict_tags"))
-
-
 def _kpi(col, label: str, key: str, help: str | None = None) -> None:
     """Metric + colored rule-of-thumb verdict caption beneath it.
 
@@ -890,34 +1123,147 @@ def _kpi(col, label: str, key: str, help: str | None = None) -> None:
     col.caption(verdict_md(key, mets[key]))
 
 
-# Single dense KPI row — one metric height for the whole fundamentals block.
-# On phones the 9 tiles wrap 3 per row instead of stacking full-width.
-kpi_cols = metric_cells(9)
-_kpi(kpi_cols[0], tr("ticker.kpi_pe_ttm"), "pe_ttm")
-_kpi(kpi_cols[1], tr("ticker.kpi_pe_fwd"), "pe_fwd")
-_kpi(kpi_cols[2], tr("ticker.kpi_peg"), "peg", help=tr("ticker.kpi_peg_help"))
-_kpi(kpi_cols[3], tr("ticker.kpi_ev_ebitda"), "ev_ebitda")
-_kpi(kpi_cols[4], tr("ticker.kpi_ev_sales"), "ev_sales")
-_kpi(kpi_cols[5], tr("ticker.kpi_roic"), "roic")
-_kpi(kpi_cols[6], tr("ticker.kpi_fcf_yield"), "fcf_yield")
-_kpi(kpi_cols[7], tr("ticker.kpi_net_debt_ebitda"), "net_debt_ebitda")
-_kpi(kpi_cols[8], tr("ticker.kpi_dilution"), "share_dilution")
+with st.container(border=True):
+    st.subheader(tr("ticker.fundamentals"))
+    with st.spinner(tr("ticker.loading_fundamentals", ticker=ticker)):
+        mets = _metrics(ticker)
 
-if mets.get("market_cap") and mets.get("currency") == "USD":
-    try:
-        rate, as_of = _fx_usd_eur()
-        cap_eur = float(mets["market_cap"]) * rate
-        st.caption(
-            tr(
-                "ticker.market_cap_fx",
-                usd=format_value("market_cap", mets["market_cap"]),
-                eur=format_value("market_cap", cap_eur),
-                rate=f"{rate:.4f}",
-                as_of=as_of,
+    st.caption(tr("ticker.verdict_tags"))
+
+    # Single dense KPI row — one metric height for the whole fundamentals block.
+    # On phones the 9 tiles wrap 3 per row instead of stacking full-width.
+    kpi_cols = metric_cells(9)
+    _kpi(kpi_cols[0], tr("ticker.kpi_pe_ttm"), "pe_ttm")
+    _kpi(kpi_cols[1], tr("ticker.kpi_pe_fwd"), "pe_fwd")
+    _kpi(kpi_cols[2], tr("ticker.kpi_peg"), "peg", help=tr("ticker.kpi_peg_help"))
+    _kpi(kpi_cols[3], tr("ticker.kpi_ev_ebitda"), "ev_ebitda")
+    _kpi(kpi_cols[4], tr("ticker.kpi_ev_sales"), "ev_sales")
+    _kpi(kpi_cols[5], tr("ticker.kpi_roic"), "roic")
+    _kpi(kpi_cols[6], tr("ticker.kpi_fcf_yield"), "fcf_yield")
+    _kpi(kpi_cols[7], tr("ticker.kpi_net_debt_ebitda"), "net_debt_ebitda")
+    _kpi(kpi_cols[8], tr("ticker.kpi_dilution"), "share_dilution")
+
+    if mets.get("market_cap") and mets.get("currency") == "USD":
+        try:
+            rate, as_of = _fx_usd_eur()
+            cap_eur = float(mets["market_cap"]) * rate
+            st.caption(
+                tr(
+                    "ticker.market_cap_fx",
+                    usd=format_value("market_cap", mets["market_cap"]),
+                    eur=format_value("market_cap", cap_eur),
+                    rate=f"{rate:.4f}",
+                    as_of=as_of,
+                )
             )
-        )
+        except Exception:
+            st.caption(tr("ticker.fx_unavailable"))
+
+
+# ------------------------------------------------------- valuation history
+# Display window per range label, in calendar days (window_stats convention).
+_PE_RANGES = {"1y": 365, "3y": 1095, "5y": 1825, "10y": 3650}
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def _pe_history(t: str) -> tuple[str | None, pd.Series]:
+    """(source, daily P/E series) over up to 10y, via analysis.pe_history:
+    split-adjusted close over the TTM diluted EPS known each day, rebuilt
+    from quarterly filings (SEC EDGAR primary, FMP fallback). Empty series
+    when no filings source covers the ticker or the fetch fails."""
+    try:
+        close = fetch_history(t, period="10y", interval="1d")["Close"]
+        out = pe_vs_history(t, close=close)
+        return out["source"], out["pe"]
     except Exception:
-        st.caption(tr("ticker.fx_unavailable"))
+        return None, pd.Series(dtype=float)
+
+
+@st.fragment
+def _valuation_section(ticker: str) -> None:
+    """Historic P/E chart with its own range selector, plus current / average
+    / premium-vs-average KPIs recomputed for the selected range. A fragment:
+    flipping the range redraws only this block."""
+    st.subheader(tr("ticker.valuation_history"))
+    with st.spinner(tr("ticker.loading_pe", ticker=ticker)):
+        source, pe = _pe_history(ticker)
+    if pe.empty:
+        st.caption(tr("ticker.pe_insufficient"))
+        return
+
+    rng = (
+        st.segmented_control(
+            tr("ticker.pe_range"),
+            list(_PE_RANGES),
+            default="5y",
+            key="pe_range_sel",
+            label_visibility="collapsed",
+        )
+        or "5y"
+    )
+    row = window_stats(pe, windows={rng: _PE_RANGES[rng]}).loc[rng]
+    view = pe[pe.index >= pe.index.max() - pd.Timedelta(days=_PE_RANGES[rng])]
+    cur, avg = float(row["current"]), float(row["mean"])
+    prem, pctl = row["premium"] * 100, float(row["percentile"])
+
+    c1, c2, c3 = metric_cells(3)
+    c1.metric(
+        tr("ticker.kpi_pe_current"),
+        f"{cur:.1f}",
+        help=tr("ticker.kpi_pe_current_help"),
+    )
+    c1.caption(verdict_md("pe_ttm", cur))
+    c2.metric(
+        tr("ticker.kpi_pe_avg", rng=rng),
+        f"{avg:.1f}",
+        help=tr("ticker.kpi_pe_avg_help"),
+    )
+    c3.metric(
+        tr("ticker.kpi_pe_premium"),
+        f"{prem:+.1f}%",
+        help=tr("ticker.kpi_pe_premium_help"),
+    )
+    # Own-history read off the percentile (same 80/20 bands as
+    # pe_history.interpret, but localized).
+    pctl_txt = tr("ticker.pe_percentile", p=f"{pctl:.0f}")
+    if pctl >= 80:
+        c3.caption(f":red[{tr('ticker.pe_above_avg')}] · {pctl_txt}")
+    elif pctl <= 20:
+        c3.caption(f":green[{tr('ticker.pe_below_avg')}] · {pctl_txt}")
+    else:
+        c3.caption(f":gray[{tr('ticker.pe_inline_avg')}] · {pctl_txt}")
+
+    fig = go.Figure()
+    fig.add_trace(
+        go.Scatter(
+            x=view.index,
+            y=view.values,
+            name="P/E",
+            mode="lines",
+            line=dict(color=BRAND_ACCENT, width=1.8),
+            hovertemplate="P/E  <b>%{y:.1f}</b><extra></extra>",
+        )
+    )
+    fig.add_hline(
+        y=avg,
+        line_dash="dash",
+        line_width=1,
+        line_color=TEXT_MUTED,
+        annotation_text=tr("ticker.pe_avg_line", avg=f"{avg:.1f}"),
+        annotation_position="top left",
+        annotation_font=dict(size=11, color=TEXT_MUTED),
+    )
+    fig.update_layout(
+        **chart_layout(title=tr("ticker.chart_pe_title"), height=260),
+        hovermode="x unified",
+        yaxis=dict(fixedrange=True),
+    )
+    show_chart(fig)
+    st.caption(tr("ticker.pe_caption", source=source))
+
+
+with st.container(border=True):
+    _valuation_section(ticker)
 
 
 # ------------------------------------------------------------------ moat
@@ -926,27 +1272,28 @@ def _moat(t: str) -> MoatScore:
     return moat_score(_raw(t))
 
 
-st.subheader(tr("ticker.moat"))
-moat = _moat(ticker)
-if moat.score is None:
-    st.caption(tr("ticker.moat_insufficient"))
-else:
-    moat_cols = metric_cells(len(moat.pillars) + 1)
-    moat_cols[0].metric(
-        tr("ticker.moat_score"),
-        format_value("moat", moat.score),
-        help=kpi_desc("moat"),
-    )
-    moat_cols[0].caption(verdict_md("moat", moat.score))
-    for col, pillar in zip(moat_cols[1:], moat.pillars):
-        col.metric(
-            pillar.label,
-            tr("ticker.na") if pillar.score is None else f"{pillar.score:.0f}",
-            help=pillar.detail,
+with st.container(border=True):
+    st.subheader(tr("ticker.moat"))
+    moat = _moat(ticker)
+    if moat.score is None:
+        st.caption(tr("ticker.moat_insufficient"))
+    else:
+        moat_cols = metric_cells(len(moat.pillars) + 1)
+        moat_cols[0].metric(
+            tr("ticker.moat_score"),
+            format_value("moat", moat.score),
+            help=kpi_desc("moat"),
         )
-        if pillar.score is not None:
-            col.caption(tr("ticker.weight", pct=f"{PILLAR_WEIGHTS[pillar.key]:.0%}"))
-    st.caption(tr("ticker.moat_caption", years=moat.years))
+        moat_cols[0].caption(verdict_md("moat", moat.score))
+        for col, pillar in zip(moat_cols[1:], moat.pillars):
+            col.metric(
+                pillar.label,
+                tr("ticker.na") if pillar.score is None else f"{pillar.score:.0f}",
+                help=pillar.detail,
+            )
+            if pillar.score is not None:
+                col.caption(tr("ticker.weight", pct=f"{PILLAR_WEIGHTS[pillar.key]:.0%}"))
+        st.caption(tr("ticker.moat_caption", years=moat.years))
 
 # ---------------------------------------------------------- insider activity
 @st.cache_data(ttl=3600, show_spinner=False)
@@ -954,85 +1301,86 @@ def _insiders(t: str):
     return insider_transactions(t)
 
 
-st.subheader(tr("ticker.insider_activity"))
-st.caption(tr("ticker.insider_caption"))
-with st.spinner(tr("ticker.loading_form4", ticker=ticker)):
-    txs = _insiders(ticker)
+with st.container(border=True):
+    st.subheader(tr("ticker.insider_activity"))
+    st.caption(tr("ticker.insider_caption"))
+    with st.spinner(tr("ticker.loading_form4", ticker=ticker)):
+        txs = _insiders(ticker)
 
-if not txs:
-    st.caption(tr("ticker.no_form4"))
-else:
-    summ = summarize(txs, ref=date.today())
-    i1, i2, i3, i4 = metric_cells(4)
-    i1.metric(
-        tr("ticker.buys_open_market"),
-        str(summ.buy_count),
-        delta=f"+{_fmt_money(summ.buy_value)}" if summ.buy_value else None,
-    )
-    i2.metric(
-        tr("ticker.sells_open_market"),
-        str(summ.sell_count),
-        delta=f"-{_fmt_money(summ.sell_value)}" if summ.sell_value else None,
-    )
-    i3.metric(tr("ticker.net_window", days=summ.window_days), _fmt_money(summ.net_value))
-    i4.metric(tr("ticker.distinct_buyers_sellers"), f"{summ.buyers} / {summ.sellers}")
-
-    if summ.cluster_buy:
-        st.success(tr("ticker.cluster_buying"), icon=":material/trending_up:")
-    elif summ.sell_value > summ.buy_value * 3 and summ.sell_count:
-        st.warning(tr("ticker.selling_dominates"), icon=":material/trending_down:")
-
-    # Monthly open-market buy vs sell value — the buy/sell balance over time.
-    om = [t for t in txs if t.is_open_market and t.date and t.value]
-    if om:
-        flow = pd.DataFrame(
-            {
-                "month": [pd.Timestamp(t.date).to_period("M").to_timestamp() for t in om],
-                "side": ["Buy" if t.code == BUY_CODE else "Sell" for t in om],
-                "value": [t.value for t in om],
-            }
+    if not txs:
+        st.caption(tr("ticker.no_form4"))
+    else:
+        summ = summarize(txs, ref=date.today())
+        i1, i2, i3, i4 = metric_cells(4)
+        i1.metric(
+            tr("ticker.buys_open_market"),
+            str(summ.buy_count),
+            delta=f"+{_fmt_money(summ.buy_value)}" if summ.buy_value else None,
         )
-        pivot = (
-            flow.groupby(["month", "side"])["value"].sum().unstack(fill_value=0)
+        i2.metric(
+            tr("ticker.sells_open_market"),
+            str(summ.sell_count),
+            delta=f"-{_fmt_money(summ.sell_value)}" if summ.sell_value else None,
         )
-        bar = go.Figure()
-        # Keep "Buy"/"Sell" as the pivot data keys; only the display name is
-        # localized (translated labels would break the pivot column lookup).
-        side_labels = {"Buy": tr("ticker.buy"), "Sell": tr("ticker.sell")}
-        for side, color in (("Buy", "#26a69a"), ("Sell", "#ef5350")):
-            if side in pivot.columns:
-                bar.add_trace(
-                    go.Bar(
-                        x=pivot.index, y=pivot[side], name=side_labels[side],
-                        marker_color=color,
-                        hovertemplate=f"{side_labels[side]}  <b>$%{{y:.3s}}</b><extra></extra>",
+        i3.metric(tr("ticker.net_window", days=summ.window_days), _fmt_money(summ.net_value))
+        i4.metric(tr("ticker.distinct_buyers_sellers"), f"{summ.buyers} / {summ.sellers}")
+
+        if summ.cluster_buy:
+            st.success(tr("ticker.cluster_buying"), icon=":material/trending_up:")
+        elif summ.sell_value > summ.buy_value * 3 and summ.sell_count:
+            st.warning(tr("ticker.selling_dominates"), icon=":material/trending_down:")
+
+        # Monthly open-market buy vs sell value — the buy/sell balance over time.
+        om = [t for t in txs if t.is_open_market and t.date and t.value]
+        if om:
+            flow = pd.DataFrame(
+                {
+                    "month": [pd.Timestamp(t.date).to_period("M").to_timestamp() for t in om],
+                    "side": ["Buy" if t.code == BUY_CODE else "Sell" for t in om],
+                    "value": [t.value for t in om],
+                }
+            )
+            pivot = (
+                flow.groupby(["month", "side"])["value"].sum().unstack(fill_value=0)
+            )
+            bar = go.Figure()
+            # Keep "Buy"/"Sell" as the pivot data keys; only the display name is
+            # localized (translated labels would break the pivot column lookup).
+            side_labels = {"Buy": tr("ticker.buy"), "Sell": tr("ticker.sell")}
+            for side, color in (("Buy", UP_COLOR), ("Sell", DOWN_COLOR)):
+                if side in pivot.columns:
+                    bar.add_trace(
+                        go.Bar(
+                            x=pivot.index, y=pivot[side], name=side_labels[side],
+                            marker_color=color,
+                            hovertemplate=f"{side_labels[side]}  <b>$%{{y:.3s}}</b><extra></extra>",
+                        )
                     )
-                )
-        bar.update_layout(
-            **chart_layout(
-                title=tr("ticker.chart_insider_title"),
-                top_legend=True,
-                height=220,
-            ),
-            barmode="group",
-            hovermode="x unified",
-            xaxis=dict(hoverformat="%b %Y"),
-            yaxis=dict(fixedrange=True, tickformat="~s"),
-        )
-        show_chart(bar)
+            bar.update_layout(
+                **chart_layout(
+                    title=tr("ticker.chart_insider_title"),
+                    top_legend=True,
+                    height=220,
+                ),
+                barmode="group",
+                hovermode="x unified",
+                xaxis=dict(hoverformat="%b %Y"),
+                yaxis=dict(fixedrange=True, tickformat="~s"),
+            )
+            show_chart(bar)
 
-    st.dataframe(
-        transactions_frame(txs).head(30),
-        hide_index=True,
-        height=280,
-        column_config={
-            "Date": st.column_config.DateColumn(tr("ticker.col_date"), format="YYYY-MM-DD"),
-            "Shares": st.column_config.NumberColumn(tr("ticker.col_shares"), format="%d"),
-            "Price": st.column_config.NumberColumn(tr("ticker.col_price"), format="$%.2f"),
-            "Value": st.column_config.NumberColumn(tr("ticker.col_value"), format="$%.0f"),
-        },
-    )
-    st.caption(tr("ticker.signed_caption"))
+        st.dataframe(
+            transactions_frame(txs).head(30),
+            hide_index=True,
+            height=280,
+            column_config={
+                "Date": st.column_config.DateColumn(tr("ticker.col_date"), format="YYYY-MM-DD"),
+                "Shares": st.column_config.NumberColumn(tr("ticker.col_shares"), format="%d"),
+                "Price": st.column_config.NumberColumn(tr("ticker.col_price"), format="$%.2f"),
+                "Value": st.column_config.NumberColumn(tr("ticker.col_value"), format="$%.0f"),
+            },
+        )
+        st.caption(tr("ticker.signed_caption"))
 
 # Comparables: framework wants 2-3 direct competitors side by side.
 @st.cache_data(ttl=86400, show_spinner=False)
@@ -1042,62 +1390,62 @@ def _related(t: str) -> list[str]:
     return related_tickers(t)
 
 
-st.subheader(tr("ticker.comparables"))
-# Related tickers stay pills (Markdown labels render logo + symbol + name) for
-# fast one-tap comparison. The full watchlist is too long to dump as a pill
-# wall, so it lives in a searchable, collapsed multiselect instead — options
-# are stable per viewed ticker, so a selected value never drops out mid-rerun.
-# Crypto pairs never belong in a stock comps table.
-peer_pool = [t for t in tickers if t != ticker and not is_crypto(t)]
-
-
 def _peer_label(t: str) -> str:
     name = company_name(t)
     return f"{t} — {name}" if name and name.upper() != t.upper() else t
 
 
-peers = list(
-    st.multiselect(
-        tr("ticker.peers_watchlist"),
-        peer_pool,
-        format_func=_peer_label,
-        key=f"peers_{ticker}",
-        placeholder=tr("ticker.peers_search"),
+with st.container(border=True):
+    st.subheader(tr("ticker.comparables"))
+    # Related tickers stay pills (Markdown labels render logo + symbol + name)
+    # for fast one-tap comparison. The full watchlist is too long to dump as a
+    # pill wall, so it lives in a searchable, collapsed multiselect instead —
+    # options are stable per viewed ticker, so a selected value never drops out
+    # mid-rerun. Crypto pairs never belong in a stock comps table.
+    peer_pool = [t for t in tickers if t != ticker and not is_crypto(t)]
+
+    peers = list(
+        st.multiselect(
+            tr("ticker.peers_watchlist"),
+            peer_pool,
+            format_func=_peer_label,
+            key=f"peers_{ticker}",
+            placeholder=tr("ticker.peers_search"),
+        )
     )
-)
-suggested = [s for s in _related(ticker) if s not in peer_pool]
-picked = (
-    st.pills(
-        tr("ticker.related_tickers"),
-        suggested,
-        selection_mode="multi",
-        format_func=ticker_pill_md,
-        key=f"related_{ticker}",
-        help=tr("ticker.related_help"),
+    suggested = [s for s in _related(ticker) if s not in peer_pool]
+    picked = (
+        st.pills(
+            tr("ticker.related_tickers"),
+            suggested,
+            selection_mode="multi",
+            format_func=ticker_pill_md,
+            key=f"related_{ticker}",
+            help=tr("ticker.related_help"),
+        )
+        if suggested
+        else []
     )
-    if suggested
-    else []
-)
-extra = st.text_input(tr("ticker.extra_peers"), "")
-peers += [p for p in picked if p not in peers]
-peers += [p.strip().upper() for p in extra.split(",") if p.strip() and p.strip().upper() not in peers]
-if peers:
-    with st.spinner(tr("ticker.loading_peers")):
-        rows = [mets] + [_metrics(p) for p in peers]
-    # Tickers run across the columns here, so the logo+symbol cell goes in
-    # the header (no company name — comps stay compact); KPI labels keep the
-    # index column. Medals mark the best composite cross-sectional ranks.
-    medals = comp_medals(rows)
-    comp = comparables_table(rows)
-    comp.columns = [
-        (f"{medals[t]}&nbsp;" if t in medals else "") + ticker_cell(t, name=False)
-        for t in comp.columns
-    ]
-    st.html(ticker_table_html(comp, ticker_col=None, show_index=True))
-    if medals:
-        st.caption(tr("ticker.medals_caption"))
-else:
-    st.caption(tr("ticker.pick_peers"))
+    extra = st.text_input(tr("ticker.extra_peers"), "")
+    peers += [p for p in picked if p not in peers]
+    peers += [p.strip().upper() for p in extra.split(",") if p.strip() and p.strip().upper() not in peers]
+    if peers:
+        with st.spinner(tr("ticker.loading_peers")):
+            rows = [mets] + [_metrics(p) for p in peers]
+        # Tickers run across the columns here, so the logo+symbol cell goes in
+        # the header (no company name — comps stay compact); KPI labels keep the
+        # index column. Medals mark the best composite cross-sectional ranks.
+        medals = comp_medals(rows)
+        comp = comparables_table(rows)
+        comp.columns = [
+            (f"{medals[t]}&nbsp;" if t in medals else "") + ticker_cell(t, name=False)
+            for t in comp.columns
+        ]
+        st.html(ticker_table_html(comp, ticker_col=None, show_index=True))
+        if medals:
+            st.caption(tr("ticker.medals_caption"))
+    else:
+        st.caption(tr("ticker.pick_peers"))
 
 with st.expander(tr("ticker.kpi_sources_title")):
     st.dataframe(sources_table(), hide_index=True)

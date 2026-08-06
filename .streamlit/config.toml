@@ -1,5 +1,9 @@
-# Professional Financial Dashboard Theme (Dark)
-# Conservative, trustworthy palette with clear data visualization
+# Aguait Stocks — dark theme, Amphora Web Design System tokens.
+# Palette source: claude.ai/design "Aguait Inicio Dark" + amphora-web-design-system
+# colors_and_type.css (--ds-* custom properties). Purple-tinted neutral surfaces
+# (neutral-950/900/800), brand purple 600 CTAs, purple 500 links/accents.
+# Type: Instrument Sans (body + headings), Epilogue (display numbers, loaded in
+# app.py CSS), Martian Mono (mono/code).
 
 [client]
 # Don't render tracebacks or exception messages in the browser: deployed
@@ -7,80 +11,102 @@
 # Full details still print to the server console. When debugging locally:
 #   STREAMLIT_CLIENT_SHOW_ERROR_DETAILS=full uv run stocks dashboard
 showErrorDetails = "type"
-# Hide the "Deploy" button (a developer toolbar item) — it overlapped the chat
-# FAB launcher (chat_core.py .st-key-chatfab). "viewer" keeps the ⋮ app menu.
-toolbarMode = "viewer"
+# Hide the whole top toolbar in production — Deploy button (dev), plus the
+# "Share" button and ⋮ app menu (viewer chrome we don't want exposed).
+# "minimal" hides the bar entirely (shows only when the script is running or
+# errors, or if set_page_config(menu_items=...) is set). Also fixes the old
+# Deploy-button overlap with the chat FAB (chat_core.py .st-key-chatfab).
+toolbarMode = "minimal"
+
+[server]
+# Serve src/stocks/web/static/ at /app/static — company logos are mirrored
+# there and loaded same-origin, so logo hosts (FMP/Clearbit/Google) never see
+# which tickers a viewer displays (see widgets.logo / data.logo.mirror_logo).
+enableStaticServing = true
+
+[browser]
+# No usage telemetry to Streamlit from an app that handles financial data.
+gatherUsageStats = false
 
 [theme]
 base = "dark"
-primaryColor = "#60A5FA"             # Bright blue for dark mode
-backgroundColor = "#0F172A"          # Deep slate
-secondaryBackgroundColor = "#1E293B" # Slightly lighter slate
-codeBackgroundColor = "#1E293B"
-textColor = "#F1F5F9"                # Light text
-linkColor = "#60A5FA"
-borderColor = "#334155"
-codeTextColor = "#CBD5E1"
+primaryColor = "#7F3FE8"             # brand purple 600 — CTAs, active widgets
+backgroundColor = "#18161C"          # neutral-950 — app background
+secondaryBackgroundColor = "#28262D" # neutral-900 — elevated surface (cards, inputs)
+codeBackgroundColor = "#28262D"      # neutral-900 — code blocks
+textColor = "#F9F9FA"                # neutral-50 — primary text
+linkColor = "#A98EF7"                # purple 500 — links on dark
+borderColor = "#3B3942"              # neutral-800 — widget borders
+codeTextColor = "#DED7FD"            # purple 300 — mono/code
 showWidgetBorder = true
 showSidebarBorder = true
-baseRadius = "6px"                   # Subtle rounding - professional, not playful
-buttonRadius = "6px"
+baseRadius = "8px"                   # DS radius-md — inputs/buttons (cards go 16px via CSS)
+buttonRadius = "8px"
 
-# Typography - Clean, professional fonts
-font = "'Inter':https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap"
-headingFont = "'Inter':https://fonts.googleapis.com/css2?family=Inter:wght@600;700&display=swap"
-codeFont = "'JetBrains Mono':https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&display=swap"
+# Typography — Instrument Sans (body + headings), Martian Mono (code).
+# Epilogue (display/KPI numbers) is loaded via CSS in app.py — the theme only
+# takes one body/heading/code font each.
+font = "'Instrument Sans':https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400;500;600;700&display=swap"
+headingFont = "'Instrument Sans':https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@600;700&display=swap"
+codeFont = "'Martian Mono':https://fonts.googleapis.com/css2?family=Martian+Mono:wght@400;500&display=swap"
 baseFontSize = 14
 baseFontWeight = 400
 codeFontSize = "13px"
 headingFontSizes = ["28px", "22px", "18px", "16px", "14px", "12px"]
-headingFontWeights = [700, 600, 600, 600, 500, 500]
+headingFontWeights = [600, 600, 600, 600, 500, 500]
 linkUnderline = false
 
-# Semantic colors for financial indicators
-greenColor = "#34D399"  # Positive/gains - bright green
-redColor = "#F87171"    # Negative/losses - bright red
-yellowColor = "#FBBF24" # Warnings/caution
-orangeColor = "#FB923C" # Alerts
-blueColor = "#60A5FA"   # Informational
-violetColor = "#A78BFA" # Accent/highlights
-grayColor = "#94A3B8"   # Neutral/secondary text
+# Semantic colors — DS type tokens. On dark, text variants use the light fills
+# (success #DBFFD2 / critical #FFD2CB) and badges use the highlight pairs
+# (green badge = #2A8200 fill + #DBFFD2 text, like the design's P/L pills).
+greenColor = "#2A8200"            # success highlight fill
+greenBackgroundColor = "#2A8200"
+greenTextColor = "#DBFFD2"        # success fill — gains text on dark
+redColor = "#CC402F"              # critical stroke
+redBackgroundColor = "#CC402F"
+redTextColor = "#FFD2CB"          # critical fill — losses text on dark
+yellowColor = "#F4C600"           # caution highlight
+orangeColor = "#EF752E"           # warning
+blueColor = "#7290F0"             # brand blue 500 — info
+violetColor = "#A98EF7"           # brand purple 500 — accents
+grayColor = "#827F8C"             # neutral 500 — secondary text
 
-# Chart colors - Distinguishable palette for financial data
+# Chart colors — brand purple/blue first, then the DS semantic accents.
 chartCategoricalColors = [
-    "#60A5FA",
-    "#34D399",
-    "#A78BFA",
-    "#F87171",
-    "#FBBF24",
-    "#38BDF8",
-    "#94A3B8",
-    "#FB923C",
+    "#A98EF7",
+    "#7290F0",
+    "#C54EA4",
+    "#F4C600",
+    "#EF752E",
+    "#4667D0",
+    "#DED7FD",
+    "#827F8C",
 ]
 
-# Sequential colors for heatmaps (blue gradient)
+# Sequential colors for heatmaps — brand purple ramp (dark to light).
 chartSequentialColors = [
-    "#0C4A6E",
-    "#075985",
-    "#0369A1",
-    "#0284C7",
-    "#0EA5E9",
-    "#38BDF8",
-    "#7DD3FC",
-    "#BAE6FD",
-    "#E0F2FE",
-    "#F0F9FF",
+    "#301263",
+    "#4E2092",
+    "#5D25B2",
+    "#6A2EBF",
+    "#7F3FE8",
+    "#A98EF7",
+    "#C6B7FB",
+    "#DED7FD",
+    "#EDEAFD",
+    "#F5F3FF",
 ]
 
 # Dataframe styling
-dataframeBorderColor = "#334155"
-dataframeHeaderBackgroundColor = "#1E293B"
+dataframeBorderColor = "#3B3942"
+dataframeHeaderBackgroundColor = "#28262D"
 
-# Sidebar
+# Sidebar — same neutral-950 as the page (the design's left menu is flat on
+# the background, separated by the neutral-800 border).
 [theme.sidebar]
-backgroundColor = "#0F172A"
-secondaryBackgroundColor = "#1E293B"
-codeBackgroundColor = "#1E293B"
-textColor = "#F1F5F9"
-borderColor = "#334155"
-primaryColor = "#60A5FA"
+backgroundColor = "#18161C"
+secondaryBackgroundColor = "#28262D"
+codeBackgroundColor = "#28262D"
+textColor = "#F9F9FA"
+borderColor = "#3B3942"
+primaryColor = "#7F3FE8"

@@ -16,12 +16,14 @@ old low-res favicon entries upgrade themselves instead of sticking around.
 from __future__ import annotations
 
 import json
+import re
+from pathlib import Path
 from urllib.parse import urlparse
 
 import yfinance as yf
 
 from stocks.config import DATA_DIR
-from stocks.data.http import url_is_image
+from stocks.data.http import get_bytes_and_type, url_is_image
 
 LOGO_CACHE = DATA_DIR / "logos.json"
 FMP_LOGO_URL = "https://financialmodelingprep.com/image-stock/{ticker}.png"
@@ -107,3 +109,75 @@ def logo_url(ticker: str) -> str | None:
     cache[ticker] = resolved
     _save_cache(cache)
     return resolved or None
+
+
+def brand_logo_url(domain: str) -> str | None:
+    """Working logo URL for a brand *domain* (broker/platform, no ticker).
+
+    Clearbit first, Google favicon as the always-something fallback. Cached
+    in logos.json under a `brand:` prefix so brand keys can never collide
+    with ticker symbols.
+    """
+    cache = _load_cache()
+    key = f"brand:{domain.lower()}"
+    if key in cache:
+        return cache[key] or None
+    clearbit = CLEARBIT_URL.format(domain=domain)
+    resolved = clearbit if _url_ok(clearbit) else ""
+    if not resolved:
+        favicon = FAVICON_URL.format(domain=domain)
+        resolved = favicon if _url_ok(favicon) else ""
+    cache[key] = resolved
+    _save_cache(cache)
+    return resolved or None
+
+
+_EXT_BY_TYPE = {
+    "image/png": "png",
+    "image/jpeg": "jpg",
+    "image/svg+xml": "svg",
+    "image/webp": "webp",
+    "image/gif": "gif",
+    "image/x-icon": "ico",
+    "image/vnd.microsoft.icon": "ico",
+}
+
+
+def _mirror(stem: str, resolve_url, static_dir: Path) -> str | None:
+    """Mirror one image into `static_dir` as `stem.<ext>`; returns the file
+    name. An already-mirrored file short-circuits before any network call;
+    `resolve_url` is only invoked on a cache miss."""
+    if static_dir.is_dir():
+        for existing in static_dir.glob(f"{stem}.*"):
+            return existing.name
+    url = resolve_url()
+    if not url:
+        return None
+    try:
+        data, ctype = get_bytes_and_type(url)
+    except Exception:
+        return None  # network hiccup — caller falls back to the external URL
+    ext = _EXT_BY_TYPE.get(ctype.partition(";")[0].strip().lower(), "png")
+    static_dir.mkdir(parents=True, exist_ok=True)
+    out = static_dir / f"{stem}.{ext}"
+    out.write_bytes(data)
+    return out.name
+
+
+def mirror_logo(ticker: str, static_dir: Path) -> str | None:
+    """Mirror a ticker's logo into `static_dir`; returns the file name.
+
+    The dashboard serves logos same-origin (Streamlit static serving) so the
+    logo hosts (FMP, Clearbit, Google) never learn which tickers a viewer
+    looks at — only the server fetches each image, once per ticker. Returns
+    e.g. "AAPL.png", or None when no source resolved or the download failed.
+    """
+    safe = re.sub(r"[^A-Za-z0-9._-]", "_", ticker.upper())
+    return _mirror(safe, lambda: logo_url(ticker), static_dir)
+
+
+def mirror_brand(key: str, domain: str, static_dir: Path) -> str | None:
+    """Mirror a brand-domain logo as `brand-<key>.<ext>`; same contract as
+    mirror_logo. The `brand-` stem keeps platform keys clear of tickers."""
+    safe = re.sub(r"[^A-Za-z0-9._-]", "_", key.lower())
+    return _mirror(f"brand-{safe}", lambda: brand_logo_url(domain), static_dir)

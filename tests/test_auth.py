@@ -40,6 +40,7 @@ def test_paths_for_regular_user(tmp_path):
     assert p.db == p.root / "portfolio.db"
     assert p.last_import == p.root / "last_import.json"
     assert p.prefs == p.root / "prefs.json"
+    assert p.chat == p.root / "chat.json"
 
 
 def test_paths_for_owner_maps_to_root_files(tmp_path):
