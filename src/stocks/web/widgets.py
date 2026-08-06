@@ -183,8 +183,9 @@ def logo(ticker: str) -> str | None:
 
     Images are mirrored into static/logos/ and served by this app, so the
     logo hosts never see per-viewer requests revealing which tickers someone
-    displays. The external URL is only a fallback for a failed mirror
-    download; None when no source knows the ticker.
+    displays. The external URL is the fallback when this host can't validate
+    or download the image (logo CDNs block datacenter IPs — the browser gets
+    a chance instead); None when no source knows the ticker.
     """
     if name := mirror_logo(ticker, _STATIC_LOGO_DIR):
         base = (st.get_option("server.baseUrlPath") or "").strip("/")
@@ -197,8 +198,8 @@ def brand_logo(key: str, domain: str | None) -> str | None:
     """Same-origin logo URL for a brand/platform (broker selector, …).
 
     Mirrored into static/logos/ like ticker logos — same privacy rationale;
-    the external URL is only a fallback for a failed mirror download. None
-    when the platform declares no domain (e.g. the generic CSV)."""
+    the external URL is the fallback when this host can't fetch the image.
+    None when the platform declares no domain (e.g. the generic CSV)."""
     if not domain:
         return None
     if name := mirror_brand(key, domain, _STATIC_LOGO_DIR):

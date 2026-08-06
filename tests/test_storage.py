@@ -41,6 +41,18 @@ class FakeClient:
         self.calls.append(("delete", Key))
         self.objects.pop(Key, None)
 
+    def get_paginator(self, name):
+        assert name == "list_objects_v2"
+        client = self
+
+        class Paginator:
+            def paginate(self, Bucket, Prefix):
+                client.calls.append(("list", Prefix))
+                keys = sorted(k for k in client.objects if k.startswith(Prefix))
+                yield {"Contents": [{"Key": k} for k in keys]} if keys else {}
+
+        return Paginator()
+
 
 @pytest.fixture
 def bucket(monkeypatch, tmp_path):
@@ -142,6 +154,56 @@ def test_restore_once_retries_after_failure(bucket, tmp_path, monkeypatch):
     state["fail"] = False  # group must not be cached as restored by the failed try
     storage.restore_once(group, (group / "a.txt",))
     assert (group / "a.txt").read_bytes() == b"a"
+
+
+def test_restore_dir_pulls_flat_pool_once(bucket, tmp_path):
+    d = tmp_path / "src/stocks/web/static/logos"
+    bucket.objects["src/stocks/web/static/logos/AAPL.png"] = b"a"
+    bucket.objects["src/stocks/web/static/logos/brand-groq.png"] = b"g"
+    bucket.objects["src/stocks/web/static/logos/nested/x.png"] = b"n"  # skipped
+    storage.restore_dir(d)
+    assert (d / "AAPL.png").read_bytes() == b"a"
+    assert (d / "brand-groq.png").read_bytes() == b"g"
+    assert not (d / "nested").exists()
+    calls_after_first = list(bucket.calls)
+    storage.restore_dir(d)  # second touch: no bucket round-trip
+    assert bucket.calls == calls_after_first
+
+
+def test_restore_dir_local_wins(bucket, tmp_path):
+    d = tmp_path / "logos"
+    d.mkdir()
+    (d / "AAPL.png").write_bytes(b"fresh")
+    bucket.objects["logos/AAPL.png"] = b"stale"
+    storage.restore_dir(d)
+    assert (d / "AAPL.png").read_bytes() == b"fresh"
+
+
+def test_restore_dir_disabled_is_noop(disabled, tmp_path):
+    storage.restore_dir(tmp_path / "logos")
+    assert not (tmp_path / "logos").exists()
+
+
+def test_mirror_logo_persists_and_restores(bucket, tmp_path, monkeypatch):
+    """One successful mirror survives an 'ephemeral reboot' via the bucket."""
+    import stocks.data.logo as logo_mod
+
+    d = tmp_path / "src/stocks/web/static/logos"
+    monkeypatch.setattr(logo_mod, "logo_url", lambda t: "https://x/AAPL.png")
+    monkeypatch.setattr(
+        logo_mod, "get_bytes_and_type", lambda url, **kw: (b"png", "image/png")
+    )
+    assert logo_mod.mirror_logo("AAPL", d) == "AAPL.png"
+    assert bucket.objects["src/stocks/web/static/logos/AAPL.png"] == b"png"
+
+    # "Reboot": static dir wiped, restore memo reset, source unresolvable —
+    # the bucket copy alone brings the logo back.
+    for f in d.iterdir():
+        f.unlink()
+    monkeypatch.setattr(storage, "_restored", set())
+    monkeypatch.setattr(logo_mod, "logo_url", lambda t: None)
+    assert logo_mod.mirror_logo("AAPL", d) == "AAPL.png"
+    assert (d / "AAPL.png").read_bytes() == b"png"
 
 
 # -------------------------------------------------------------- write hooks

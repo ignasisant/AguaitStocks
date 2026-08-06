@@ -149,6 +149,48 @@ def restore(path: Path) -> bool:
     return True
 
 
+def restore_dir(directory: Path) -> None:
+    """Pull every bucket object directly under `directory` the first time it
+    is touched this process.
+
+    For flat pools of generated files whose names aren't known up front
+    (mirrored logos: the extension depends on what the host served); fixed
+    -name user data uses restore_once. Existing local files win — a running
+    process has fresher mirrors than the bucket. Nested keys are skipped.
+    """
+    if not enabled():
+        return
+    prefix = _key(directory)
+    if prefix is None:
+        return
+    tag = f"dir:{directory.resolve()}"
+    with _lock:
+        if tag in _restored:
+            return
+        _restored.add(tag)
+    cfg = _config() or {}
+    client = _client()
+    try:
+        pages = client.get_paginator("list_objects_v2").paginate(
+            Bucket=cfg["bucket"], Prefix=prefix + "/"
+        )
+        for page in pages:
+            for obj in page.get("Contents", []):
+                name = obj["Key"].removeprefix(prefix + "/")
+                if not name or "/" in name or name in (".", ".."):
+                    continue
+                dest = directory / name
+                if dest.exists():
+                    continue
+                body = client.get_object(Bucket=cfg["bucket"], Key=obj["Key"])["Body"]
+                directory.mkdir(parents=True, exist_ok=True)
+                dest.write_bytes(body.read())
+    except Exception:
+        with _lock:  # let the next touch retry instead of caching a half-restore
+            _restored.discard(tag)
+        raise
+
+
 def restore_once(group: Path, files: tuple[Path, ...]) -> None:
     """Restore a group of files the first time `group` is touched this process.
 
