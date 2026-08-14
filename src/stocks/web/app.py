@@ -150,6 +150,14 @@ st.html(
         padding: 1.1rem 1.2rem;
       }
       [data-testid="stElementToolbar"] {display: none;}
+      /* Community Cloud's "Manage app" pill (owner) / "Hosted with Streamlit"
+         badge (viewers) is fixed bottom-right above our z-stack and covers the
+         chat panel's send button. Park it bottom-LEFT instead — still usable,
+         off the chat input. These are the badge's known stable hooks; its
+         CSS-module class hashes churn per cloud deploy, so the badge-mover
+         script below is the real guarantee. */
+      [data-testid="manage-app-button"],
+      div[class*="viewerBadge"] {left: 0.75rem !important; right: auto !important;}
       /* Chart hover tooltips finish the DS card look. widgets.HOVERLABEL paints
          the neutral-900 surface, neutral-800 border and Instrument Sans text on
          Plotly's SVG box; radius and elevation have no hoverlabel equivalent, so
@@ -275,6 +283,43 @@ st.html(
       };
       new MutationObserver(tag).observe(document.body, {subtree: true, childList: true});
       tag();
+    })();
+    </script>
+    """,
+    unsafe_allow_javascript=True,
+)
+
+# Badge mover for the Community Cloud "Manage app" / "Hosted with Streamlit"
+# pill (see the CSS fallback in the base style block): it sits fixed
+# bottom-right over the chat panel's send button, so park it bottom-left.
+# The cloud host portals it into a body-level div whose class hashes change
+# per deploy, so match by label text instead and re-anchor the outermost
+# fixed-position ancestor. Scoped to portals OUTSIDE the stApp root: BaseWeb
+# portals (dialogs, dropdowns) also live at body level, but none of them
+# carry these exact labels. Injected async by the host, hence the
+# MutationObserver.
+st.html(
+    """
+    <script>
+    (function () {
+      if (window.__aguaitBadgeMover) return;  /* survive reruns — wire once */
+      window.__aguaitBadgeMover = true;
+      const LABELS = ["manage app", "hosted with streamlit", "made with streamlit"];
+      const move = () => {
+        document.querySelectorAll("button, a").forEach((el) => {
+          if (el.closest('[data-testid="stApp"]')) return;
+          if (!LABELS.includes((el.textContent || "").trim().toLowerCase())) return;
+          let fixed = null;
+          for (let n = el; n && n !== document.body; n = n.parentElement) {
+            if (getComputedStyle(n).position === "fixed") fixed = n;
+          }
+          const target = fixed || el.closest("body > div") || el;
+          target.style.setProperty("left", "0.75rem", "important");
+          target.style.setProperty("right", "auto", "important");
+        });
+      };
+      new MutationObserver(move).observe(document.body, {subtree: true, childList: true});
+      move();
     })();
     </script>
     """,
