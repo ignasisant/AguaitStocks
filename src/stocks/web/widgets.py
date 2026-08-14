@@ -18,7 +18,7 @@ import pandas as pd
 import streamlit as st
 from yfinance.exceptions import YFRateLimitError
 
-from stocks.config import load_watchlist
+from stocks.config import Alert, load_watchlist
 from stocks.data.logo import brand_logo_url, logo_url, mirror_brand, mirror_logo
 from stocks.web import auth
 from stocks.web.i18n import t as tr
@@ -1533,6 +1533,7 @@ def ticker_actions(ticker: str, *, container=None, key: str = "ticker") -> None:
     )
     fav = bool(h and h.favorite)
     tags = list(h.tags) if h else []
+    alerts = list(h.alerts) if h else []
     ms_key = f"{key}_tags_{_slug(ticker)}"
 
     def _toggle_fav() -> None:
@@ -1559,6 +1560,101 @@ def ticker_actions(ticker: str, *, container=None, key: str = "ticker") -> None:
             help=tr("widgets.tags_help"),
         )
 
+    # ------------------------------------------------------------- alerts
+    # Rules live per-holding in this account's watchlist.yaml (config.Alert);
+    # the hourly cron (notify/fanout.py) evaluates them and messages the
+    # user's linked Telegram. The editor writes through auth.set_alerts, so a
+    # rule on a not-yet-listed ticker also adds it to the watchlist.
+
+    def _alert_to_dict(a: Alert) -> dict:
+        return {
+            k: v
+            for k, v in (
+                ("type", a.type), ("price", a.price), ("pct", a.pct),
+                ("level", a.level), ("window", a.window),
+            )
+            if v is not None
+        }
+
+    def _alert_summary(a: Alert) -> str:
+        parts = [tr(f"widgets.alert_t_{a.type}")]
+        if a.price is not None:
+            parts.append(f"{a.price:g}")
+        if a.pct is not None:
+            parts.append(f"{a.pct:g}%")
+        if a.level is not None:
+            parts.append(f"{a.level:g}")
+        if a.window:
+            parts.append(f"({a.window}d)")
+        return " ".join(parts)
+
+    _ALERT_TYPE_ORDER = ("above", "below", "pct_move", "drawdown", "rsi_below",
+                         "rsi_above", "sma_cross", "high_52w", "low_52w")
+    _WINDOW_DEFAULTS = {"rsi_below": 14, "rsi_above": 14, "sma_cross": 50,
+                        "high_52w": 252, "low_52w": 252}
+
+    def _alert_editor() -> None:
+        st.caption(tr("widgets.alerts_caption"))
+        if alerts:
+            for i, a in enumerate(alerts):
+                with st.container(horizontal=True, vertical_alignment="center"):
+                    st.markdown(f":small[{_alert_summary(a)}]", width="stretch")
+                    if st.button(
+                        ":material/delete:",
+                        key=f"{key}_al_del_{i}_{_slug(ticker)}",
+                        help=tr("widgets.alert_removed"),
+                    ):
+                        auth.set_alerts(
+                            ticker,
+                            [_alert_to_dict(x) for j, x in enumerate(alerts) if j != i],
+                        )
+                        st.toast(tr("widgets.alert_removed"),
+                                 icon=":material/notifications_off:")
+                        st.rerun()
+        else:
+            st.caption(tr("widgets.alert_none", ticker=ticker))
+
+        atype = st.selectbox(
+            tr("widgets.alert_type"),
+            _ALERT_TYPE_ORDER,
+            format_func=lambda t: tr(f"widgets.alert_t_{t}"),
+            key=f"{key}_al_type_{_slug(ticker)}",
+        )
+        entry: dict = {"type": atype}
+        fk = f"{key}_al_{atype}_{_slug(ticker)}"  # per-type keys: no stale values
+        if atype in ("above", "below"):
+            entry["price"] = st.number_input(
+                tr("widgets.alert_price"), min_value=0.0, key=f"{fk}_price"
+            )
+        elif atype in ("pct_move", "drawdown"):
+            entry["pct"] = st.number_input(
+                tr("widgets.alert_pct"), min_value=0.0, value=5.0, key=f"{fk}_pct"
+            )
+        elif atype in ("rsi_below", "rsi_above"):
+            entry["level"] = st.number_input(
+                tr("widgets.alert_level"), min_value=0.0, max_value=100.0,
+                value=30.0 if atype == "rsi_below" else 70.0, key=f"{fk}_level",
+            )
+        if atype in _WINDOW_DEFAULTS:
+            entry["window"] = int(st.number_input(
+                tr("widgets.alert_window"), min_value=2,
+                value=_WINDOW_DEFAULTS[atype], key=f"{fk}_window",
+            ))
+
+        incomplete = (entry.get("price") == 0.0 and atype in ("above", "below")) or (
+            entry.get("pct") == 0.0 and atype in ("pct_move", "drawdown")
+        )
+        if st.button(
+            tr("widgets.alert_add"),
+            key=f"{fk}_add",
+            icon=":material/notification_add:",
+            disabled=incomplete,
+        ):
+            auth.set_alerts(ticker, [*(_alert_to_dict(a) for a in alerts), entry])
+            st.toast(tr("widgets.alert_added", ticker=ticker),
+                     icon=":material/notifications_active:")
+            st.rerun()
+
     if is_mobile():
         # Phones: both actions fold into one compact kebab menu that sits inline
         # beside the title, instead of two full-width rows under the header. The
@@ -1573,9 +1669,11 @@ def ticker_actions(ticker: str, *, container=None, key: str = "ticker") -> None:
                 width="stretch",
             )
             _tag_editor()
+            st.divider()
+            _alert_editor()
         return
 
-    c1, c2 = box.columns([1, 4], vertical_alignment="center")
+    c1, c2, c3 = box.columns([1, 2, 2], vertical_alignment="center")
     c1.button(
         ":material/star:",
         key=f"{key}_fav_{_slug(ticker)}",
@@ -1588,6 +1686,13 @@ def ticker_actions(ticker: str, *, container=None, key: str = "ticker") -> None:
 
     with c2.popover(f":material/label: {tr('widgets.tags')}", width="stretch"):
         _tag_editor()
+
+    with c3.popover(
+        f":material/notifications: {tr('widgets.alerts')}"
+        + (f" ({len(alerts)})" if alerts else ""),
+        width="stretch",
+    ):
+        _alert_editor()
 
     if tags:
         box.markdown(" ".join(f":gray-badge[{t}]" for t in tags))

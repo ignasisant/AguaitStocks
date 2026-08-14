@@ -22,6 +22,7 @@ from cryptography.fernet import Fernet, InvalidToken
 
 from stocks.config import load_watchlist
 from stocks.config import positions as load_positions
+from stocks.secrets_env import secret
 from stocks.web import auth, chat_skills, llm
 from stocks.web.i18n import t as tr
 from stocks.web.portfolio_data import enriched_positions
@@ -42,7 +43,7 @@ def _sk(pid: str) -> str:
 
 
 def _fernet() -> Fernet | None:
-    k = st.secrets.get("chat", {}).get("enc_key")
+    k = secret("CHAT_ENC_KEY", "chat", "enc_key")
     return Fernet(k) if k else None
 
 

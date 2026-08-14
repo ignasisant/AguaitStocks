@@ -99,6 +99,19 @@ def active_language() -> str:
     return st.session_state.get("active_lang") or DEFAULT_LANG
 
 
+def translate(key: str, lang: str, /, **kwargs) -> str:
+    """t() with an explicit language — no session state, headless-safe.
+
+    Used by the notification cron (digest/alert messages), where the per-user
+    language comes from prefs.json instead of a Streamlit session.
+    """
+    code = supported(lang) or DEFAULT_LANG
+    s = _catalog(code).get(key)
+    if s is None:
+        s = _catalog(DEFAULT_LANG).get(key, key)
+    return s.format(**kwargs) if kwargs else s
+
+
 def t(key: str, /, **kwargs) -> str:
     """Translate a key for the run's active language.
 

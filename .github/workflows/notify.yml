@@ -1,0 +1,67 @@
+# Telegram notifications — daily portfolio digest + hourly price alerts.
+#
+# Both jobs are headless fan-outs over every account that linked Telegram on
+# the Profile page: user data is enumerated and restored from the R2 bucket
+# (STOCKS_STORAGE_*), computed with the pure analytics, and delivered through
+# the shared bot (TELEGRAM_BOT_TOKEN). See src/stocks/notify/.
+#
+# Timing notes:
+# - GitHub cron regularly fires 3-15 min late; nothing here is latency-critical.
+# - Cron is UTC. 21:30 UTC is after the US close in both DST regimes
+#   (20:00 UTC summer / 21:00 UTC winter). The alerts window 07-20 UTC covers
+#   the EU open through most/all of the US session year-round.
+# - Crypto trades 24/7; weekend moves surface in Monday's digest. Accepted v1.
+name: notifications
+
+on:
+  schedule:
+    - cron: "30 21 * * 1-5" # digest — evenings, after US close
+    - cron: "7 7-20 * * 1-5" # alerts — hourly, off the top-of-hour rush
+  workflow_dispatch:
+    inputs:
+      job:
+        description: "Which job to run (digest | alerts)"
+        required: true
+        default: "digest"
+        type: choice
+        options: [digest, alerts]
+
+concurrency:
+  group: notify-${{ github.event.schedule || inputs.job }}
+  cancel-in-progress: false
+
+env:
+  STOCKS_STORAGE_ENDPOINT_URL: ${{ secrets.STOCKS_STORAGE_ENDPOINT_URL }}
+  STOCKS_STORAGE_BUCKET: ${{ secrets.STOCKS_STORAGE_BUCKET }}
+  STOCKS_STORAGE_ACCESS_KEY_ID: ${{ secrets.STOCKS_STORAGE_ACCESS_KEY_ID }}
+  STOCKS_STORAGE_SECRET_ACCESS_KEY: ${{ secrets.STOCKS_STORAGE_SECRET_ACCESS_KEY }}
+  TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+
+jobs:
+  digest:
+    if: github.event.schedule == '30 21 * * 1-5' || inputs.job == 'digest'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      # Same Fernet key as Streamlit's [chat] enc_key — lets the digest use a
+      # user's own (BYOK) LLM key for the highlight line. Optional.
+      CHAT_ENC_KEY: ${{ secrets.CHAT_ENC_KEY }}
+      # Free-chain fallback for the highlight line. Optional.
+      FREE_LLM_GROQ: ${{ secrets.FREE_LLM_GROQ }}
+      FREE_LLM_CEREBRAS: ${{ secrets.FREE_LLM_CEREBRAS }}
+      FREE_LLM_OPENROUTER: ${{ secrets.FREE_LLM_OPENROUTER }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - run: uv sync --frozen --no-dev
+      - run: uv run stocks digest --all-users
+
+  alerts:
+    if: github.event.schedule == '7 7-20 * * 1-5' || inputs.job == 'alerts'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - run: uv sync --frozen --no-dev
+      - run: uv run stocks alerts --all-users

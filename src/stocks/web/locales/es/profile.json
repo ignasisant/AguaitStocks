@@ -48,5 +48,20 @@
   "profile.iv_saved": "Perfil de inversor guardado.",
   "profile.iv_dialog_title": "Configura tu perfil de inversor",
   "profile.iv_dialog_intro": "Unas preguntas rápidas para que el asistente de IA adapte su análisis a ti. Puedes omitirlo y rellenarlo más tarde en la página de Perfil.",
-  "profile.iv_skip": "Omitir por ahora"
+  "profile.iv_skip": "Omitir por ahora",
+  "profile.notifications": "Notificaciones",
+  "profile.notify_caption": "Recibe un resumen diario de tu cartera y alertas de precio en Telegram.",
+  "profile.tg_not_configured": "Las notificaciones de Telegram no están configuradas en este despliegue.",
+  "profile.tg_connect": "Conectar Telegram",
+  "profile.tg_open": "Abre Telegram y pulsa Iniciar",
+  "profile.tg_waiting": "Esperando a que pulses Iniciar en Telegram…",
+  "profile.tg_expired": "El enlace caducó — genera uno nuevo.",
+  "profile.tg_linked_as": "Conectado a Telegram {handle}",
+  "profile.notify_digest": "Resumen diario de cartera (por la tarde)",
+  "profile.notify_alerts": "Alertas de precio (cada hora, en horario de mercado)",
+  "profile.tg_test": "Enviar mensaje de prueba",
+  "profile.tg_test_sent": "Mensaje de prueba enviado — mira Telegram.",
+  "profile.tg_test_failed": "No se pudo enviar el mensaje de prueba: {error}",
+  "profile.tg_unlink": "Desconectar",
+  "profile.tg_unlinked": "Telegram desconectado."
 }

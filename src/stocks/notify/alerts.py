@@ -28,6 +28,7 @@ class AlertHit:
     type: str
     message: str
     value: float | None = None
+    alert: Alert | None = None  # the rule that fired, for dedupe fingerprints
 
     def __str__(self) -> str:
         return f"{self.ticker}: {self.message}"
@@ -48,7 +49,7 @@ def evaluate(ticker: str, alert: Alert, df: pd.DataFrame) -> AlertHit | None:
     t = alert.type
 
     def hit(msg: str, value: float | None = None) -> AlertHit:
-        return AlertHit(ticker, t, msg, value)
+        return AlertHit(ticker, t, msg, value, alert)
 
     if t in ("above", "below"):
         if alert.triggered(last):
@@ -121,11 +122,30 @@ def check_holding(holding: Holding, df: pd.DataFrame | None = None) -> list[Aler
     return [h for h in hits if h is not None]
 
 
-def check_all(max_workers: int = 8) -> list[AlertHit]:
-    holdings = [h for h in load_watchlist() if h.alerts]
+def check_holdings(
+    holdings: list[Holding],
+    frames: dict[str, pd.DataFrame] | None = None,
+    max_workers: int = 8,
+) -> list[AlertHit]:
+    """Evaluate a list of holdings, optionally against pre-fetched frames.
+
+    With `frames` (the multi-user cron path: one fetch per distinct ticker
+    shared across accounts) a holding whose ticker is missing is skipped —
+    its fetch failed upstream. Without, each holding fetches its own history
+    concurrently, like check_all always has.
+    """
+    holdings = [h for h in holdings if h.alerts]
+    if frames is not None:
+        hits: list[AlertHit] = []
+        for h in holdings:
+            df = frames.get(h.ticker)
+            if df is not None:
+                hits.extend(check_holding(h, df))
+        return hits
     with ThreadPoolExecutor(max_workers=max_workers) as pool:
         results = pool.map(check_holding, holdings)
-    hits: list[AlertHit] = []
-    for r in results:
-        hits.extend(r)
-    return hits
+    return [hit for r in results for hit in r]
+
+
+def check_all(max_workers: int = 8) -> list[AlertHit]:
+    return check_holdings(load_watchlist(), max_workers=max_workers)

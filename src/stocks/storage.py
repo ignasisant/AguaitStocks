@@ -191,6 +191,24 @@ def restore_dir(directory: Path) -> None:
         raise
 
 
+def list_keys(prefix: str = "") -> list[str]:
+    """All bucket keys under `prefix` ([] when storage is unconfigured).
+
+    Used by headless jobs to enumerate accounts (data/users/<slug>/...)
+    without a local checkout of the user data.
+    """
+    if not enabled():
+        return []
+    cfg = _config() or {}
+    keys: list[str] = []
+    pages = _client().get_paginator("list_objects_v2").paginate(
+        Bucket=cfg["bucket"], Prefix=prefix
+    )
+    for page in pages:
+        keys.extend(obj["Key"] for obj in page.get("Contents", []))
+    return keys
+
+
 def restore_once(group: Path, files: tuple[Path, ...]) -> None:
     """Restore a group of files the first time `group` is touched this process.
 

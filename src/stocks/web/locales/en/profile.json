@@ -48,5 +48,20 @@
   "profile.iv_saved": "Investor profile saved.",
   "profile.iv_dialog_title": "Set up your investor profile",
   "profile.iv_dialog_intro": "A few quick questions so the AI assistant tailors its analysis to you. You can skip and fill this in later on the Profile page.",
-  "profile.iv_skip": "Skip for now"
+  "profile.iv_skip": "Skip for now",
+  "profile.notifications": "Notifications",
+  "profile.notify_caption": "Get a daily portfolio digest and price alerts on Telegram.",
+  "profile.tg_not_configured": "Telegram notifications aren't configured on this deployment.",
+  "profile.tg_connect": "Connect Telegram",
+  "profile.tg_open": "Open Telegram and press Start",
+  "profile.tg_waiting": "Waiting for you to press Start in Telegram…",
+  "profile.tg_expired": "The link expired — generate a new one.",
+  "profile.tg_linked_as": "Connected to Telegram {handle}",
+  "profile.notify_digest": "Daily portfolio digest (evenings)",
+  "profile.notify_alerts": "Price alerts (hourly, market hours)",
+  "profile.tg_test": "Send test message",
+  "profile.tg_test_sent": "Test message sent — check Telegram.",
+  "profile.tg_test_failed": "Couldn't send the test message: {error}",
+  "profile.tg_unlink": "Disconnect",
+  "profile.tg_unlinked": "Telegram disconnected."
 }

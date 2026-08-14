@@ -241,12 +241,22 @@ class _FreeBackend:
 
 
 def _free_secrets() -> dict:
-    import streamlit as st
-
     try:
-        return dict(st.secrets.get("free_llm", {}))
-    except Exception:  # no secrets.toml at all (bare local run)
-        return {}
+        import streamlit as st
+
+        cfg = dict(st.secrets.get("free_llm", {}))
+    except Exception:  # no secrets.toml at all (bare local run / CI)
+        cfg = {}
+    # Env overlay so headless jobs (GitHub Actions digest) can run the chain
+    # without a secrets.toml: FREE_LLM_GROQ, FREE_LLM_GROQ_MODEL, ...
+    import os
+
+    for bid, _model, _url in _FREE_BACKEND_DEFAULTS:
+        for k in (bid, f"{bid}_model"):
+            env = os.environ.get(f"FREE_LLM_{k.upper()}")
+            if env:
+                cfg[k] = env
+    return cfg
 
 
 def _free_backends() -> list[_FreeBackend]:

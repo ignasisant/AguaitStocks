@@ -25,6 +25,17 @@ def cmd_update(args: argparse.Namespace) -> None:
 
 
 def cmd_alerts(args: argparse.Namespace) -> None:
+    if args.all_users:
+        from stocks.notify.fanout import run_alerts_fanout
+
+        status = run_alerts_fanout()
+        if not status:
+            print("no subscribers with alerts")
+            return
+        for label, result in status.items():
+            print(f"{label}: {result}")
+        return
+
     from stocks.notify.alerts import check_all
 
     lines = [str(h) for h in check_all()]
@@ -47,6 +58,35 @@ def cmd_alerts(args: argparse.Namespace) -> None:
     else:
         for line in lines:
             print(f"ALERT {line}")
+
+
+def cmd_digest(args: argparse.Namespace) -> None:
+    if args.all_users:
+        from stocks.notify.digest import run_digest_fanout
+
+        status = run_digest_fanout(dry_run=args.dry_run)
+        if not status:
+            print("no digest subscribers")
+            return
+        for label, result in status.items():
+            print(f"{label}: {result}")
+        return
+
+    # Single-user smoke path: owner root files, env TELEGRAM_CHAT_ID channel.
+    import os
+
+    from stocks.config import DATA_DIR, WATCHLIST_FILE
+    from stocks.notify.digest import compute_digest_data, render_digest
+
+    data = compute_digest_data(WATCHLIST_FILE, DATA_DIR / "portfolio.db")
+    text = render_digest(data, "en")
+    if args.dry_run or not os.getenv("TELEGRAM_CHAT_ID"):
+        print(text)
+        return
+    from stocks.notify import telegram
+
+    telegram.send_message(text, os.environ["TELEGRAM_CHAT_ID"], parse_mode="HTML")
+    print("digest sent")
 
 
 def _parse_kv(items: list[str] | None) -> list[tuple[str, float]]:
@@ -572,7 +612,24 @@ def build_parser() -> argparse.ArgumentParser:
         "--earnings-days", type=int, default=0, metavar="N",
         help="also remind about earnings within N days",
     )
+    p_alerts.add_argument(
+        "--all-users", action="store_true",
+        help="cron mode: evaluate every Telegram-linked account and message each",
+    )
     p_alerts.set_defaults(func=cmd_alerts)
+
+    p_digest = sub.add_parser(
+        "digest", help="daily portfolio digest (value, moves, earnings) via Telegram"
+    )
+    p_digest.add_argument(
+        "--all-users", action="store_true",
+        help="cron mode: send every Telegram-linked account its own digest",
+    )
+    p_digest.add_argument(
+        "--dry-run", action="store_true",
+        help="print the rendered digest(s) instead of sending",
+    )
+    p_digest.set_defaults(func=cmd_digest)
 
     p_screen = sub.add_parser("screen", help="rank/filter the whole watchlist by KPIs")
     p_screen.add_argument("--sort", help="metric key to rank by, e.g. roic, pe_ttm")

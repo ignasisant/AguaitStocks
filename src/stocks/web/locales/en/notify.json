@@ -1,0 +1,11 @@
+{
+  "notify.digest_title": "Aguait — daily digest",
+  "notify.portfolio": "Portfolio",
+  "notify.day": "Day",
+  "notify.week": "Week",
+  "notify.movers": "Top movers",
+  "notify.earnings_7d": "Earnings, next 7 days",
+  "notify.alerts_subject": "⚠️ Price alerts",
+  "notify.linked_ok": "✅ Telegram linked to Aguait ({email}). You'll receive your digests and alerts here.",
+  "notify.test_message": "👋 Test message from Aguait — notifications are working."
+}

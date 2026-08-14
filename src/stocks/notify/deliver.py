@@ -11,14 +11,11 @@ one up. No secrets live in code.
 
 from __future__ import annotations
 
-import json
 import os
 import smtplib
-import urllib.parse
-import urllib.request
 from email.message import EmailMessage
 
-TELEGRAM_API = "https://api.telegram.org/bot{token}/sendMessage"
+from stocks.notify import telegram
 
 
 def telegram_configured() -> bool:
@@ -41,15 +38,8 @@ def configured_channels() -> list[str]:
 
 
 def _send_telegram(text: str) -> str:
-    token = os.environ["TELEGRAM_BOT_TOKEN"]
-    payload = urllib.parse.urlencode(
-        {"chat_id": os.environ["TELEGRAM_CHAT_ID"], "text": text}
-    ).encode()
-    req = urllib.request.Request(TELEGRAM_API.format(token=token), data=payload)
-    with urllib.request.urlopen(req, timeout=15) as resp:
-        body = json.load(resp)
-    if not body.get("ok"):
-        raise RuntimeError(body.get("description", "telegram send failed"))
+    # Plain text to the global env chat — the historical single-user channel.
+    telegram.send_message(text, chat_id=os.environ["TELEGRAM_CHAT_ID"], parse_mode=None)
     return "sent"
 
 

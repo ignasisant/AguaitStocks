@@ -51,3 +51,4 @@ wheels/
 # Agent tooling: local symlinks into .venv (per-machine, not for the repo)
 /.claude/
 /.agents/
+.notify_secrets.env

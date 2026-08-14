@@ -389,6 +389,42 @@ uv run ruff check  # lint
 uv run ruff format # format
 ```
 
+## Telegram notifications
+
+Every account can self-serve two notification streams, delivered by a shared
+Telegram bot (create one with @BotFather; **never set a webhook on it** — the
+linking flow polls `getUpdates`):
+
+- **Daily digest** (weekday evenings, after the US close): portfolio value,
+  day/week change, top movers, earnings in the next 7 days, and an optional
+  1-2 sentence LLM highlight — written with the user's own saved (BYOK) chat
+  key when present, falling back to the `[free_llm]` chain, else omitted.
+- **Price alerts** (hourly on market days): the per-holding rules from the
+  watchlist (`above`/`below`/`pct_move`/`drawdown`/RSI/SMA/52w), editable in
+  the app from the ticker page's *Alerts* popover. A rule messages once when
+  it fires, then stays quiet until it clears or 24h pass
+  (`data/.../alerts_state.json`).
+
+Users link Telegram from the Profile page (deep-link + `/start` code) and can
+toggle each stream or disconnect there. The cron side is two GitHub Actions
+schedules (`.github/workflows/notify.yml`) running `stocks digest --all-users`
+and `stocks alerts --all-users`: accounts are discovered and restored from the
+`[storage]` bucket, so the ephemeral runner needs no user data in git.
+
+Setup (one-time):
+
+1. @BotFather → `/newbot` → copy the token and the bot's username.
+2. `cp .notify_secrets.env.example .notify_secrets.env`, paste the bot token,
+   username and the four `STOCKS_STORAGE_*` values (same creds the Streamlit
+   deploy uses).
+3. `./scripts/setup_notify_secrets.sh` — pushes every GitHub Actions secret
+   (harvesting `CHAT_ENC_KEY` and the `FREE_LLM_*` keys from your local
+   `.streamlit/secrets.toml`) and prints the `[telegram]` block to paste into
+   Streamlit Cloud's secrets. Needs `gh auth login` once.
+4. Reboot the Streamlit app, link your account on the Profile page, then
+   Actions → notifications → Run workflow → digest to confirm delivery.
+   (Local smoke-test any time: `uv run stocks digest --dry-run`.)
+
 ## Roadmap
 
 - [x] Portfolio positions + P/L tracking (FIFO ledger + Spanish tax)
@@ -396,8 +432,7 @@ uv run ruff format # format
 - [x] Watchlist screener (rank/filter by KPIs)
 - [x] Earnings calendar + reminders
 - [x] Alert upgrades (%move, drawdown, RSI, SMA cross, 52w) + Telegram/email delivery
-- [x] Portfolio-aware AI assistant (BYOK Claude/ChatGPT/Gemini, live-book context)
+- [x] Per-user Telegram notifications: daily digest + hourly price alerts (GitHub Actions cron)
 - [ ] Desktop / push (mobile) notifications on alert hits
-- [ ] Scheduled daily fetch (cron / launchd)
 - [ ] More indicators (MACD, Bollinger)
 - [ ] Backtesting simple strategies

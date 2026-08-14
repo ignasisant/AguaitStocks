@@ -274,3 +274,18 @@ def test_ensure_user_data_migrates_legacy_bucket_objects(bucket, tmp_path):
     assert legacy_key not in bucket.objects  # old key deleted
     new_key = f"data/users/{auth.slug(email)}/portfolio.db"
     assert bucket.objects[new_key] == b"ledgerbytes"
+
+
+def test_list_keys_filters_by_prefix(bucket):
+    bucket.objects["data/users/jane_ab12cd34/prefs.json"] = b"{}"
+    bucket.objects["data/users/bob_ef56ab78/prefs.json"] = b"{}"
+    bucket.objects["data/prefs.json"] = b"{}"
+    keys = storage.list_keys("data/users/")
+    assert keys == [
+        "data/users/bob_ef56ab78/prefs.json",
+        "data/users/jane_ab12cd34/prefs.json",
+    ]
+
+
+def test_list_keys_disabled_returns_empty(disabled):
+    assert storage.list_keys("data/") == []

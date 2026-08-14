@@ -46,6 +46,12 @@ DEFAULT_PREFS = {  # language None = auto (browser); picker_sort_by None = defau
     "language": None,
     "picker_sort_by": None,
     "recent_searches": [],  # tickers clicked from the top-bar search, newest first
+    # Telegram notifications: chat_id is set by the Profile linking flow; the
+    # toggles only take effect once it is. The cron (notify/fanout.py) reads
+    # these headless straight from prefs.json.
+    "telegram_chat_id": None,
+    "notify_digest": True,
+    "notify_alerts": True,
 }
 
 STARTER_WATCHLIST = """\
@@ -718,6 +724,27 @@ def set_tags(ticker: str, tags: list[str], path: Path | None = None) -> list[str
 
     _update_entry(ticker, _set, path)
     return clean
+
+
+def set_alerts(ticker: str, alerts: list[dict], path: Path | None = None) -> None:
+    """Replace a ticker's alert rules; an empty list removes the key entirely.
+
+    Each dict is the YAML shape config.Alert accepts: {"type": ..., and one of
+    price/pct/level, optional window}. None values are dropped so the YAML
+    stays clean.
+    """
+    clean = [
+        {k: v for k, v in a.items() if v is not None and v != ""} for a in alerts
+    ]
+    clean = [a for a in clean if a.get("type")]
+
+    def _set(entry: dict) -> None:
+        if clean:
+            entry["alerts"] = clean
+        else:
+            entry.pop("alerts", None)
+
+    _update_entry(ticker, _set, path)
 
 
 def all_tags(path: Path | None = None) -> list[str]:

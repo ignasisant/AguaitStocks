@@ -1,0 +1,11 @@
+{
+  "notify.digest_title": "Aguait — resumen diario",
+  "notify.portfolio": "Cartera",
+  "notify.day": "Día",
+  "notify.week": "Semana",
+  "notify.movers": "Mayores movimientos",
+  "notify.earnings_7d": "Resultados, próximos 7 días",
+  "notify.alerts_subject": "⚠️ Alertas de precio",
+  "notify.linked_ok": "✅ Telegram vinculado a Aguait ({email}). Recibirás aquí tus resúmenes y alertas.",
+  "notify.test_message": "👋 Mensaje de prueba de Aguait — las notificaciones funcionan."
+}
