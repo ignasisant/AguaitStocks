@@ -2,12 +2,32 @@
 
 from __future__ import annotations
 
+import time
 from pathlib import Path
+from typing import Callable, TypeVar
 
 import pandas as pd
 import yfinance as yf
+from yfinance.exceptions import YFRateLimitError
 
 from stocks.config import DATA_DIR, ticker_aliases
+
+T = TypeVar("T")
+
+
+def _retry(fn: Callable[[], T], attempts: int = 3, base_delay: float = 1.5) -> T:
+    """Run fn, retrying on Yahoo's 429 with exponential backoff (1.5s, 3s).
+
+    Streamlit Cloud shares egress IPs, so transient rate limits are routine;
+    a short backoff usually clears them. The final attempt re-raises so
+    callers (the app-level guard) can degrade gracefully.
+    """
+    for i in range(attempts - 1):
+        try:
+            return fn()
+        except YFRateLimitError:
+            time.sleep(base_delay * 2**i)
+    return fn()
 
 
 def resolve(ticker: str) -> str:
@@ -18,7 +38,7 @@ def resolve(ticker: str) -> str:
 
 def fetch_history(ticker: str, period: str = "1y", interval: str = "1d") -> pd.DataFrame:
     """Download OHLCV history for one ticker."""
-    df = yf.Ticker(resolve(ticker)).history(period=period, interval=interval)
+    df = _retry(lambda: yf.Ticker(resolve(ticker)).history(period=period, interval=interval))
     df.index.name = "Date"
     return df
 
@@ -37,14 +57,16 @@ def fetch_many(
         return {}
     symbol_of = {t: resolve(t) for t in tickers}
     symbols = list(dict.fromkeys(symbol_of.values()))
-    data = yf.download(
-        symbols,
-        period=period,
-        interval=interval,
-        group_by="ticker",
-        auto_adjust=True,
-        progress=False,
-        threads=True,
+    data = _retry(
+        lambda: yf.download(
+            symbols,
+            period=period,
+            interval=interval,
+            group_by="ticker",
+            auto_adjust=True,
+            progress=False,
+            threads=True,
+        )
     )
     out: dict[str, pd.DataFrame] = {}
     for t in tickers:
@@ -69,7 +91,7 @@ def latest_price(ticker: str) -> float:
             return float(price)
     except Exception:
         pass
-    df = t.history(period="5d", interval="1d")
+    df = _retry(lambda: t.history(period="5d", interval="1d"))
     if df.empty:
         raise ValueError(f"no data for {ticker}")
     return float(df["Close"].iloc[-1])

@@ -20,6 +20,7 @@ if _SRC not in sys.path:
     sys.path.insert(0, _SRC)
 
 import streamlit as st  # noqa: E402
+from yfinance.exceptions import YFRateLimitError  # noqa: E402
 
 from stocks.web import auth  # noqa: E402
 from stocks.web import chat_core  # noqa: E402
@@ -584,12 +585,24 @@ _focus = (
 )
 render_topbar(page.title, _focus)
 
-page.run()
-
 # Assistant overlay: a top-right launcher icon + slide-in chat panel, reachable
 # from every page and carrying the current view (page + focused ticker) as
 # context. The panel is fully self-contained (provider choice, key entry, chat),
 # so there is no separate Chat page in the nav. Signed-in only — it reads the
-# account's real book.
+# account's real book. Rendered BEFORE page.run(): the launcher is position:
+# fixed (DOM order irrelevant) and must survive pages that crash or st.stop()
+# mid-run — an uncaught page exception used to eat the button entirely.
 if auth.is_logged_in():
     chat_core.render_side_panel(page.title)
+
+# Yahoo throttles Streamlit Cloud's shared egress IPs; when the fetch layer's
+# backoff (stocks.data.fetch._retry) is exhausted the error would otherwise
+# surface as Streamlit's opaque crash page. Degrade to a banner instead —
+# st.cache_data never caches exceptions, so a rerun retries the failed fetches
+# while every cached section keeps rendering.
+try:
+    page.run()
+except YFRateLimitError:
+    st.warning(tr("common.rate_limited"), icon=":material/hourglass_top:")
+    if st.button(tr("common.retry"), icon=":material/refresh:"):
+        st.rerun()

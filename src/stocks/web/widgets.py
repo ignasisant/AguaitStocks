@@ -16,6 +16,7 @@ from urllib.parse import quote
 
 import pandas as pd
 import streamlit as st
+from yfinance.exceptions import YFRateLimitError
 
 from stocks.config import load_watchlist
 from stocks.data.logo import brand_logo_url, logo_url, mirror_brand, mirror_logo
@@ -1349,7 +1350,13 @@ def ticker_picker(
         else tickers
     )
 
-    changes = daily_changes(tuple(tickers)) if show_changes else {}
+    # The picker renders before page.run(), outside the app-level rate-limit
+    # guard — a throttled Yahoo must dim the change chips, not crash the app.
+    # The miss isn't cached (st.cache_data skips exceptions), so a rerun retries.
+    try:
+        changes = daily_changes(tuple(tickers)) if show_changes else {}
+    except YFRateLimitError:
+        changes = {}
 
     # Apply the sort chosen in the popover. "Watchlist" keeps the favorites-first
     # source order; the rest reorder `shown`. Missing changes sink to the bottom.

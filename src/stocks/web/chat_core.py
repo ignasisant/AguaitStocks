@@ -779,8 +779,10 @@ def _panel_body() -> None:
 
 
 def render_side_panel(view_label: str) -> None:
-    """Overlay assistant: launcher icon + slide-in panel. Call from app.py after
-    page.run(), on every page, for signed-in users only."""
+    """Overlay assistant: launcher icon + slide-in panel. Call from app.py
+    BEFORE page.run() — the launcher is position: fixed, so DOM order doesn't
+    matter, and rendering first keeps it alive when a page raises or calls
+    st.stop(). Every page, signed-in users only."""
     st.session_state["_chat_view"] = view_label  # read by _view_context()
     st.html(_PANEL_CSS)
 

@@ -13,5 +13,7 @@
   "common.sign_in_google": "Iniciar sesión con Google",
   "common.log_out": "Cerrar sesión",
   "common.save": "Guardar",
-  "common.loading": "Cargando…"
+  "common.loading": "Cargando…",
+  "common.rate_limited": "Yahoo Finance está limitando las peticiones ahora mismo. Los datos en caché siguen visibles; las cotizaciones frescas suelen volver en unos minutos.",
+  "common.retry": "Reintentar"
 }

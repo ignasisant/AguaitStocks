@@ -13,5 +13,7 @@
   "common.sign_in_google": "Sign in with Google",
   "common.log_out": "Log out",
   "common.save": "Save",
-  "common.loading": "Loading…"
+  "common.loading": "Loading…",
+  "common.rate_limited": "Yahoo Finance is rate-limiting requests right now. Cached data still shows; fresh quotes usually return within a few minutes.",
+  "common.retry": "Retry"
 }
