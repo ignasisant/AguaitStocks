@@ -140,6 +140,12 @@ def test_deep_link_uses_secret_username(monkeypatch):
 
 
 def test_configured_tracks_token(monkeypatch):
+    import os
+
+    # Isolate from a developer's local .streamlit/secrets.toml — secret()
+    # falls back to it when the env var is unset.
+    monkeypatch.setattr(telegram, "secret",
+                        lambda env, *a, **k: os.environ.get(env, ""))
     monkeypatch.delenv("TELEGRAM_BOT_TOKEN", raising=False)
     assert not telegram.configured()
     monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "T")

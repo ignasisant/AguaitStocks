@@ -4,8 +4,12 @@ One bot serves every account: the token lives in TELEGRAM_BOT_TOKEN (env,
 GitHub Actions) or [telegram] bot_token (secrets.toml, Streamlit Cloud); each
 user's chat id lives in their prefs.json after the deep-link `/start` flow.
 
-The linking flow relies on getUpdates polling, so this bot must NEVER have a
-webhook configured (Telegram rejects getUpdates while a webhook is set).
+Inbound messages arrive via a webhook (set_webhook): Telegram POSTs each
+update to the Cloudflare Worker in workers/telegram-webhook/, which queues it
+in the bucket and wakes the GitHub Actions chat job (stocks/chat/bot.py).
+While the webhook is set Telegram rejects getUpdates — get_updates and
+match_start below are kept only for the rollback path (delete_webhook
+restores polling and the pre-webhook Profile linking flow).
 """
 
 from __future__ import annotations
@@ -111,8 +115,38 @@ def send_message(
         )
 
 
+def set_webhook(url: str, secret_token: str) -> None:
+    """Point the bot's webhook at `url` (the Cloudflare Worker).
+
+    `secret_token` rides back on every Telegram POST as the
+    X-Telegram-Bot-Api-Secret-Token header — the Worker rejects anything
+    without it. Pending getUpdates backlog is dropped: those updates predate
+    the webhook and would arrive with no queue consumer.
+    """
+    _call(
+        "setWebhook",
+        {
+            "url": url,
+            "secret_token": secret_token,
+            "allowed_updates": json.dumps(["message"]),
+            "drop_pending_updates": "true",
+        },
+    )
+
+
+def delete_webhook(drop_pending: bool = False) -> None:
+    """Remove the webhook — getUpdates polling works again (rollback path)."""
+    _call(
+        "deleteWebhook",
+        {"drop_pending_updates": "true" if drop_pending else None},
+    )
+
+
 def get_updates(timeout: int = 0) -> list[dict]:
     """Recent updates, without an offset so nothing is consumed.
+
+    Rollback path only: while a webhook is set (the normal state now)
+    Telegram rejects getUpdates with a 409, which returns [].
 
     Unconfirmed updates expire server-side after 24h; leaving them pending
     means two users linking at the same moment can't eat each other's /start.

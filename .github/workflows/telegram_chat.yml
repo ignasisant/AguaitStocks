@@ -1,0 +1,46 @@
+# Telegram chat — answer messages sent to the bot with the shared AI engine.
+#
+# Wake path: Telegram webhook → Cloudflare Worker (workers/telegram-webhook/)
+# → update queued in R2 under data/tg_updates/ → repository_dispatch here →
+# `stocks telegram-chat` drains the whole queue (identify user by chat id,
+# build the same persona/portfolio/skills prompt as the web panel, answer via
+# the user's BYOK provider or the free chain) and exits. See stocks/chat/.
+#
+# Concurrency: one run at a time; GitHub keeps at most one run pending behind
+# it, which is exactly right — a single drain empties everything queued.
+name: telegram chat
+
+on:
+  repository_dispatch:
+    types: [telegram-update]
+  workflow_dispatch:
+
+concurrency:
+  group: telegram-chat
+  cancel-in-progress: false
+
+env:
+  STOCKS_STORAGE_ENDPOINT_URL: ${{ secrets.STOCKS_STORAGE_ENDPOINT_URL }}
+  STOCKS_STORAGE_BUCKET: ${{ secrets.STOCKS_STORAGE_BUCKET }}
+  STOCKS_STORAGE_ACCESS_KEY_ID: ${{ secrets.STOCKS_STORAGE_ACCESS_KEY_ID }}
+  STOCKS_STORAGE_SECRET_ACCESS_KEY: ${{ secrets.STOCKS_STORAGE_SECRET_ACCESS_KEY }}
+  TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+  # Same Fernet key as Streamlit's [chat] enc_key — decrypts each user's own
+  # (BYOK) LLM key from their prefs. Optional; without it only the free chain.
+  CHAT_ENC_KEY: ${{ secrets.CHAT_ENC_KEY }}
+  # Keyless free-chain backends (same as the web panel's "Aguait AI").
+  FREE_LLM_GROQ: ${{ secrets.FREE_LLM_GROQ }}
+  FREE_LLM_CEREBRAS: ${{ secrets.FREE_LLM_CEREBRAS }}
+  FREE_LLM_OPENROUTER: ${{ secrets.FREE_LLM_OPENROUTER }}
+  # Optional override of the per-account free-message daily cap (default 30).
+  FREE_LLM_DAILY_CAP: ${{ vars.FREE_LLM_DAILY_CAP }}
+
+jobs:
+  chat:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - run: uv sync --frozen --no-dev
+      - run: uv run stocks telegram-chat

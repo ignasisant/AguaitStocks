@@ -11,10 +11,12 @@ from __future__ import annotations
 import html
 import re
 from datetime import date
+from urllib.error import URLError
 
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
+from yfinance.exceptions import YFRateLimitError
 
 from stocks.analysis.fundamentals import (
     KPI_SOURCES,
@@ -27,7 +29,7 @@ from stocks.analysis.fundamentals import (
     verdict_md,
 )
 from stocks.analysis.indicators import add_indicators
-from stocks.analysis.moat import MoatScore, PILLAR_WEIGHTS, moat_score
+from stocks.analysis.moat import PILLAR_WEIGHTS, MoatScore, moat_score
 from stocks.analysis.pe_history import pe_vs_history, window_stats
 from stocks.config import load_watchlist
 from stocks.data.crypto import is_crypto, split_pair
@@ -134,7 +136,7 @@ def _trim(df: pd.DataFrame, label: str) -> pd.DataFrame:
     return df[df.index >= df.index[-1] - _WINDOW[label]]
 
 
-@st.cache_data(ttl=300, show_spinner=False)
+@st.cache_data(ttl=300, show_spinner=tr("ticker.loading_history"))
 def _history(t: str, label: str) -> pd.DataFrame:
     period, interval = PERIODS[label]
     df = _trim(add_indicators(fetch_history(t, period=period, interval=interval)), label)
@@ -266,7 +268,7 @@ def _held(db: str):
         return {}
 
 
-@st.cache_data(ttl=300, show_spinner=False)
+@st.cache_data(ttl=300, show_spinner=tr("ticker.loading_position_values"))
 def _position_values_eur(db: str) -> dict[str, float]:
     """Live EUR market value per open position (latest price × ECB spot)."""
     from stocks.analysis.portfolio import market_values_eur
@@ -292,8 +294,13 @@ def _projection(t: str, last_fy: int) -> pd.DataFrame:
     financial statements (ADRs: statements local, estimates per USD ADS) —
     mixing them on one axis would be wrong.
     """
-    raw_est = _estimates(t)
-    fin_ccy = _raw(t).info.get("financialCurrency")
+    try:
+        raw_est = _estimates(t)
+        fin_ccy = _raw(t).info.get("financialCurrency")
+    except (YFRateLimitError, URLError):
+        raise  # app-level banner handles these with a retry button
+    except Exception:
+        return pd.DataFrame()
     est_ccy = estimate_currency(raw_est.revenue_estimate) or estimate_currency(
         raw_est.earnings_estimate
     )
@@ -503,7 +510,18 @@ def _price_section(ticker: str) -> None:
         )
         chart_type = chart_type or default_chart
 
-    df = _history(ticker, sel)
+    try:
+        df = _history(ticker, sel)
+    except (YFRateLimitError, URLError):
+        raise  # app-level banner handles these with a retry button
+    except Exception:
+        st.warning(tr("ticker.history_failed"))
+        return
+    # Delisted tickers return an empty frame without raising; the metrics
+    # below index the last two closes.
+    if df.empty or len(df["Close"].dropna()) < 2:
+        st.info(tr("ticker.history_empty"))
+        return
     db = str(auth.db_path())
     ledger_txs = _ledger(db)
     my_trades = [
@@ -1094,7 +1112,13 @@ def _financials_section(ticker: str, fin: pd.DataFrame, proj: pd.DataFrame) -> N
 
 
 # Annual revenue / profit / EPS trend, straight under the price chart.
-fin = annual_financials(_raw(ticker))
+with st.spinner(tr("ticker.loading_financials", ticker=ticker)):
+    try:
+        fin = annual_financials(_raw(ticker))
+    except (YFRateLimitError, URLError):
+        raise  # app-level banner handles these with a retry button
+    except Exception:
+        fin = pd.DataFrame()  # the section below self-hides on empty
 if not fin.empty:
     with st.container(border=True):
         proj = _projection(ticker, int(fin.index[-1]))
@@ -1126,38 +1150,47 @@ def _kpi(col, label: str, key: str, help: str | None = None) -> None:
 with st.container(border=True):
     st.subheader(tr("ticker.fundamentals"))
     with st.spinner(tr("ticker.loading_fundamentals", ticker=ticker)):
-        mets = _metrics(ticker)
-
-    st.caption(tr("ticker.verdict_tags"))
-
-    # Single dense KPI row — one metric height for the whole fundamentals block.
-    # On phones the 9 tiles wrap 3 per row instead of stacking full-width.
-    kpi_cols = metric_cells(9)
-    _kpi(kpi_cols[0], tr("ticker.kpi_pe_ttm"), "pe_ttm")
-    _kpi(kpi_cols[1], tr("ticker.kpi_pe_fwd"), "pe_fwd")
-    _kpi(kpi_cols[2], tr("ticker.kpi_peg"), "peg", help=tr("ticker.kpi_peg_help"))
-    _kpi(kpi_cols[3], tr("ticker.kpi_ev_ebitda"), "ev_ebitda")
-    _kpi(kpi_cols[4], tr("ticker.kpi_ev_sales"), "ev_sales")
-    _kpi(kpi_cols[5], tr("ticker.kpi_roic"), "roic")
-    _kpi(kpi_cols[6], tr("ticker.kpi_fcf_yield"), "fcf_yield")
-    _kpi(kpi_cols[7], tr("ticker.kpi_net_debt_ebitda"), "net_debt_ebitda")
-    _kpi(kpi_cols[8], tr("ticker.kpi_dilution"), "share_dilution")
-
-    if mets.get("market_cap") and mets.get("currency") == "USD":
         try:
-            rate, as_of = _fx_usd_eur()
-            cap_eur = float(mets["market_cap"]) * rate
-            st.caption(
-                tr(
-                    "ticker.market_cap_fx",
-                    usd=format_value("market_cap", mets["market_cap"]),
-                    eur=format_value("market_cap", cap_eur),
-                    rate=f"{rate:.4f}",
-                    as_of=as_of,
-                )
-            )
+            mets = _metrics(ticker)
+        except (YFRateLimitError, URLError):
+            raise  # app-level banner handles these with a retry button
         except Exception:
-            st.caption(tr("ticker.fx_unavailable"))
+            mets = {}
+
+    if not mets:
+        st.caption(tr("ticker.fundamentals_failed"))
+    else:
+        st.caption(tr("ticker.verdict_tags"))
+
+        # Single dense KPI row — one metric height for the whole fundamentals
+        # block. On phones the 9 tiles wrap 3 per row instead of stacking
+        # full-width.
+        kpi_cols = metric_cells(9)
+        _kpi(kpi_cols[0], tr("ticker.kpi_pe_ttm"), "pe_ttm")
+        _kpi(kpi_cols[1], tr("ticker.kpi_pe_fwd"), "pe_fwd")
+        _kpi(kpi_cols[2], tr("ticker.kpi_peg"), "peg", help=tr("ticker.kpi_peg_help"))
+        _kpi(kpi_cols[3], tr("ticker.kpi_ev_ebitda"), "ev_ebitda")
+        _kpi(kpi_cols[4], tr("ticker.kpi_ev_sales"), "ev_sales")
+        _kpi(kpi_cols[5], tr("ticker.kpi_roic"), "roic")
+        _kpi(kpi_cols[6], tr("ticker.kpi_fcf_yield"), "fcf_yield")
+        _kpi(kpi_cols[7], tr("ticker.kpi_net_debt_ebitda"), "net_debt_ebitda")
+        _kpi(kpi_cols[8], tr("ticker.kpi_dilution"), "share_dilution")
+
+        if mets.get("market_cap") and mets.get("currency") == "USD":
+            try:
+                rate, as_of = _fx_usd_eur()
+                cap_eur = float(mets["market_cap"]) * rate
+                st.caption(
+                    tr(
+                        "ticker.market_cap_fx",
+                        usd=format_value("market_cap", mets["market_cap"]),
+                        eur=format_value("market_cap", cap_eur),
+                        rate=f"{rate:.4f}",
+                        as_of=as_of,
+                    )
+                )
+            except Exception:
+                st.caption(tr("ticker.fx_unavailable"))
 
 
 # ------------------------------------------------------- valuation history
@@ -1233,6 +1266,25 @@ def _valuation_section(ticker: str) -> None:
     else:
         c3.caption(f":gray[{tr('ticker.pe_inline_avg')}] · {pctl_txt}")
 
+    # Around earnings the two P/Es legitimately diverge: Yahoo's TTM EPS picks
+    # up a press-released quarter weeks before its 10-Q/10-K lands in EDGAR,
+    # while this series only steps on filing dates. Flag gaps >20% so the
+    # mismatch reads as data vintage, not a bug.
+    try:
+        fund_pe = _metrics(ticker).get("pe_ttm")
+    except Exception:
+        fund_pe = None
+    if fund_pe and fund_pe > 0 and cur > 0 and abs(cur - fund_pe) / fund_pe > 0.20:
+        st.warning(
+            tr(
+                "ticker.pe_divergence",
+                cur=f"{cur:.1f}",
+                fund=f"{fund_pe:.1f}",
+                diff=f"{abs(cur - fund_pe) / fund_pe * 100:.0f}",
+            ),
+            icon="⚠️",
+        )
+
     fig = go.Figure()
     fig.add_trace(
         go.Scatter(
@@ -1274,8 +1326,13 @@ def _moat(t: str) -> MoatScore:
 
 with st.container(border=True):
     st.subheader(tr("ticker.moat"))
-    moat = _moat(ticker)
-    if moat.score is None:
+    try:
+        moat = _moat(ticker)
+    except (YFRateLimitError, URLError):
+        raise  # app-level banner handles these with a retry button
+    except Exception:
+        moat = None
+    if moat is None or moat.score is None:
         st.caption(tr("ticker.moat_insufficient"))
     else:
         moat_cols = metric_cells(len(moat.pillars) + 1)

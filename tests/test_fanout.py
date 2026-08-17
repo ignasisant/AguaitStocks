@@ -50,6 +50,22 @@ def test_iter_filters_on_chat_id_and_toggle(local):
     assert [u.label for u in alert_users] == ["bob_ef56ab78", "jane_ab12cd34"]
 
 
+def test_iter_all_users_includes_unlinked(local):
+    _user(local, "jane_ab12cd34", LINKED)
+    _user(local, "carol_11223344", {"currency": "EUR"})  # never linked
+
+    users = fanout.iter_all_users()
+    assert [u.label for u in users] == ["carol_11223344", "jane_ab12cd34"]
+    # chat.json path sits next to prefs.json for slug accounts
+    assert users[0].chat_path == local / "users" / "carol_11223344" / "chat.json"
+
+
+def test_owner_chat_path_is_data_chat_json(local):
+    (local / "prefs.json").write_text(json.dumps({"telegram_chat_id": 999}))
+    (owner,) = fanout.iter_all_users()
+    assert owner.chat_path == local / "chat.json"
+
+
 def test_owner_root_prefs_is_an_entry(local):
     (local / "prefs.json").write_text(json.dumps({"telegram_chat_id": 999}))
     users = fanout.iter_notify_users("digest")

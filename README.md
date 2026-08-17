@@ -1,3 +1,13 @@
+---
+title: Aguait Stocks
+emoji: 📈
+colorFrom: purple
+colorTo: gray
+sdk: docker
+app_port: 8501
+pinned: false
+---
+
 # Aguait Stocks
 
 <img src="src/stocks/web/assets/aguait-logo.svg" alt="Aguait Stocks logo" width="270">
@@ -101,6 +111,40 @@ object read/write only (on R2: *Object Read & Write* on the specific
 bucket), never an account-level key. Keep the bucket private (no public
 access / dev URL) and enable object versioning so a bad write can be
 rolled back.
+
+### Deploy — Hugging Face Space (Docker)
+
+The repo doubles as a HF Space: the YAML front matter at the top of this
+README is the Space config (`sdk: docker`, `app_port: 8501`), and the
+`Dockerfile` + `scripts/docker-entrypoint.sh` run the dashboard on any
+container host. Free CPU tier: 2 vCPU / 16 GB, sleeps after ~48 h without
+visits (the R2 sync makes restarts lossless).
+
+1. Create a blank **Docker** Space at <https://huggingface.co/new-space>.
+2. Space settings → *Variables and secrets* → add secret
+   `STREAMLIT_SECRETS_TOML` with the full contents of your deployed
+   `secrets.toml` (`[auth]`, `[app]`, `[storage]`, `[chat]`, `[free_llm]`,
+   `[telegram]`). The entrypoint writes it to `.streamlit/secrets.toml` at
+   boot.
+3. Google Cloud console → OAuth client → add
+   `https://<owner>-<space>.hf.space/oauth2callback` to the authorized
+   redirect URIs, and set that URL as `[auth] redirect_uri` in the secret.
+4. Repo secret `HF_TOKEN` (write-scope HF token) + repo variable `HF_SPACE`
+   (`owner/name`) — both managed by `infra/` (`hf_token` / `hf_space`
+   tfvars). Every push to `main` then mirrors to the Space via
+   `.github/workflows/deploy-hf.yml`; unset, the workflow stays dormant.
+
+Share the direct `https://<owner>-<space>.hf.space` URL — it serves the app
+full-page with no host chrome. The `huggingface.co/spaces/...` page wraps
+it in an iframe where the Google login popup/cookies may misbehave.
+
+Local check of the same image:
+
+```bash
+docker build -t aguait-stocks .
+docker run --rm -p 8501:8501 \
+  -e STREAMLIT_SECRETS_TOML="$(cat .streamlit/secrets.toml)" aguait-stocks
+```
 
 ## Usage
 
@@ -389,11 +433,11 @@ uv run ruff check  # lint
 uv run ruff format # format
 ```
 
-## Telegram notifications
+## Telegram notifications & chat
 
-Every account can self-serve two notification streams, delivered by a shared
-Telegram bot (create one with @BotFather; **never set a webhook on it** — the
-linking flow polls `getUpdates`):
+Every account can self-serve two notification streams — and a full two-way
+chat with the app's AI assistant — delivered by one shared Telegram bot
+(create it with @BotFather):
 
 - **Daily digest** (weekday evenings, after the US close): portfolio value,
   day/week change, top movers, earnings in the next 7 days, and an optional
@@ -405,25 +449,43 @@ linking flow polls `getUpdates`):
   it fires, then stays quiet until it clears or 24h pass
   (`data/.../alerts_state.json`).
 
+- **Assistant chat**: message the bot and the app's chat assistant answers —
+  same persona (investor profile), live portfolio snapshot, analysis skills,
+  web search and provider resolution (your saved BYOK key first, then the
+  free chain with its shared daily cap) as the in-app side panel, on the same
+  conversation thread (`chat.json`). `/clear` resets the thread, `/help`
+  explains. Replies take ~30-90 s (a GitHub Actions runner cold-starts per
+  burst of messages).
+
 Users link Telegram from the Profile page (deep-link + `/start` code) and can
-toggle each stream or disconnect there. The cron side is two GitHub Actions
-schedules (`.github/workflows/notify.yml`) running `stocks digest --all-users`
-and `stocks alerts --all-users`: accounts are discovered and restored from the
+toggle each stream or disconnect there. Digest and alerts are two GitHub
+Actions schedules (`.github/workflows/notify.yml`) running
+`stocks digest --all-users` and `stocks alerts --all-users`. Chat is
+event-driven: the bot has a **webhook** pointed at a tiny Cloudflare Worker
+(`workers/telegram-webhook/`) that stores each update in the R2 bucket
+(`data/tg_updates/`) and fires a `repository_dispatch`, which runs
+`stocks telegram-chat` (`.github/workflows/telegram_chat.yml`) to drain and
+answer the queue. In every job, accounts are discovered and restored from the
 `[storage]` bucket, so the ephemeral runner needs no user data in git.
 
 Setup (one-time):
 
 1. @BotFather → `/newbot` → copy the token and the bot's username.
 2. `cp .notify_secrets.env.example .notify_secrets.env`, paste the bot token,
-   username and the four `STOCKS_STORAGE_*` values (same creds the Streamlit
-   deploy uses).
+   username, a random `TELEGRAM_WEBHOOK_SECRET` and the four
+   `STOCKS_STORAGE_*` values (same creds the Streamlit deploy uses).
 3. `./scripts/setup_notify_secrets.sh` — pushes every GitHub Actions secret
    (harvesting `CHAT_ENC_KEY` and the `FREE_LLM_*` keys from your local
    `.streamlit/secrets.toml`) and prints the `[telegram]` block to paste into
    Streamlit Cloud's secrets. Needs `gh auth login` once.
-4. Reboot the Streamlit app, link your account on the Profile page, then
+4. Deploy the webhook Worker and point the bot at it — see
+   `workers/telegram-webhook/README.md`. Rollback any time with
+   `uv run stocks telegram-chat --delete-webhook` (restores `getUpdates`
+   polling).
+5. Reboot the Streamlit app, link your account on the Profile page, then
    Actions → notifications → Run workflow → digest to confirm delivery.
-   (Local smoke-test any time: `uv run stocks digest --dry-run`.)
+   (Local smoke tests: `uv run stocks digest --dry-run`,
+   `uv run stocks telegram-chat --ask "how is my book?" --user owner`.)
 
 ## Roadmap
 
@@ -433,6 +495,7 @@ Setup (one-time):
 - [x] Earnings calendar + reminders
 - [x] Alert upgrades (%move, drawdown, RSI, SMA cross, 52w) + Telegram/email delivery
 - [x] Per-user Telegram notifications: daily digest + hourly price alerts (GitHub Actions cron)
+- [x] Telegram assistant chat: webhook → Cloudflare Worker → R2 queue → Actions, same engine/thread as the in-app chat
 - [ ] Desktop / push (mobile) notifications on alert hits
 - [ ] More indicators (MACD, Bollinger)
 - [ ] Backtesting simple strategies

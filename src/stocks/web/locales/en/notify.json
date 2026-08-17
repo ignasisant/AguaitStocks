@@ -7,5 +7,11 @@
   "notify.earnings_7d": "Earnings, next 7 days",
   "notify.alerts_subject": "⚠️ Price alerts",
   "notify.linked_ok": "✅ Telegram linked to Aguait ({email}). You'll receive your digests and alerts here.",
-  "notify.test_message": "👋 Test message from Aguait — notifications are working."
+  "notify.test_message": "👋 Test message from Aguait — notifications are working.",
+  "notify.tg_linked": "✅ Telegram linked to Aguait. Digests, alerts — and you can chat with the assistant right here. Send /help to see what it can do.",
+  "notify.chat_not_linked": "This Telegram account isn't linked to Aguait yet. Open the app → Profile → Notifications → Connect Telegram.",
+  "notify.link_failed": "That link code is invalid or expired — generate a new one from the Profile page and tap the link again.",
+  "notify.chat_help": "Ask me anything about your portfolio or the markets — same assistant as the app's chat panel, same conversation thread. Replies can take a minute. Commands: /clear resets the conversation, /help shows this.",
+  "notify.chat_cleared": "🧹 Conversation cleared — same thread as the app, so it's cleared there too.",
+  "notify.chat_error": "Something went wrong answering that — please try again in a moment."
 }

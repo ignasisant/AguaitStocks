@@ -17,6 +17,8 @@ from __future__ import annotations
 
 import re
 
+from stocks.fuzzy import FUZZY_CUTOFF, MIN_QUERY, fuzzy_ratio
+
 # Fiat quote currencies with reliable Yahoo pairs (also ECB currencies, so the
 # FX layer can convert positions on statement currency alone).
 QUOTE_CURRENCIES = ("USD", "EUR", "GBP")
@@ -126,4 +128,16 @@ def search_crypto(query: str, limit: int = 6) -> list[tuple[str, str]]:
     by_name = [
         c for c, n in CRYPTO_NAMES.items() if q in n.upper() and c not in by_code
     ]
-    return [(to_pair(c), CRYPTO_NAMES[c]) for c in (by_code + by_name)[:limit]]
+    matches = by_code + by_name
+    if not matches and len(q) >= MIN_QUERY:
+        # Typo fallback ("bitcon"): fuzzy over code and name, best first.
+        # Score ties keep CRYPTO_NAMES order (major coins first), so Bitcoin
+        # beats Bitcoin Cash instead of losing the alphabetical tie-break.
+        scored = [
+            (-s, i, c)
+            for i, (c, n) in enumerate(CRYPTO_NAMES.items())
+            if (s := max(fuzzy_ratio(q, c), fuzzy_ratio(q, n.upper())))
+            >= FUZZY_CUTOFF
+        ]
+        matches = [c for _, _, c in sorted(scored)]
+    return [(to_pair(c), CRYPTO_NAMES[c]) for c in matches[:limit]]

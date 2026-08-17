@@ -1,0 +1,14 @@
+# Terraform state contains every secret in plaintext — never commit.
+*.tfstate
+*.tfstate.*
+*.tfstate.backup
+.terraform/
+
+# Real variable values
+terraform.tfvars
+*.auto.tfvars
+
+# Crash logs / plans may embed values
+crash.log
+crash.*.log
+*.tfplan

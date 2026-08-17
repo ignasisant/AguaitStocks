@@ -17,6 +17,7 @@ import pandas as pd
 
 from stocks.config import DATA_DIR
 from stocks.data.http import get_json
+from stocks.fuzzy import FUZZY_CUTOFF, MIN_QUERY, fuzzy_ratio
 
 TICKER_MAP_URL = "https://www.sec.gov/files/company_tickers.json"
 FACTS_URL = "https://data.sec.gov/api/xbrl/companyfacts/CIK{cik}.json"
@@ -109,6 +110,9 @@ def search_companies(query: str, limit: int = 8) -> list[tuple[str, str]]:
     other preferred series behind "bank of america") are skipped so a name
     query doesn't return one issuer `limit` times; distinct plain listings
     (GOOG next to GOOGL) survive.
+
+    When no tier matches at all, a fuzzy pass catches typos ("nvidai",
+    "microsft") — score-ordered, same share-class dedup.
     """
     q = query.strip().upper()
     if not q:
@@ -132,8 +136,26 @@ def search_companies(query: str, limit: int = 8) -> list[tuple[str, str]]:
             continue
         seen_cik.add(cik)
         ranked.append((rank, i, ticker, title))
+    if not ranked and len(q) >= MIN_QUERY:
+        return _fuzzy_companies(q, limit)
     ranked.sort()
     return [(t, _display_title(n)) for _, _, t, n in ranked[:limit]]
+
+
+def _fuzzy_companies(q: str, limit: int) -> list[tuple[str, str]]:
+    """Typo fallback for `search_companies` — best fuzzy scores first."""
+    scored: list[tuple[float, int, str, str]] = []
+    seen_cik: set[int] = set()
+    for i, (ticker, title, cik) in enumerate(_ROWS or []):
+        score = max(fuzzy_ratio(q, ticker), fuzzy_ratio(q, title.upper()))
+        if score < FUZZY_CUTOFF:
+            continue
+        if "-" in ticker and cik in seen_cik:
+            continue
+        seen_cik.add(cik)
+        scored.append((-score, i, ticker, title))
+    scored.sort()
+    return [(t, _display_title(n)) for _, _, t, n in scored[:limit]]
 
 
 def company_facts(ticker: str) -> dict | None:

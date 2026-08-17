@@ -55,7 +55,7 @@ def basket_history(db: str, mtime: float) -> pd.DataFrame:
     return position_values_history(ledger_state(db, mtime)[1], period="3mo")
 
 
-@st.cache_data(ttl=300, show_spinner=False)
+@st.cache_data(ttl=300, show_spinner="Loading last session moves…")
 def last_session_moves(tickers: tuple[str, ...]) -> dict[str, float]:
     """Cached last regular-session % move per ticker (fast_info burst).
 

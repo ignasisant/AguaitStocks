@@ -1,0 +1,35 @@
+# Build-context hygiene. HF Spaces builds from the pushed git repo, where
+# .gitignore already keeps personal data out; this covers local docker builds,
+# which see the working tree (private ledgers, secrets, caches).
+.git
+.venv
+__pycache__
+*.pyc
+.pytest_cache
+.ruff_cache
+
+# Secrets — never bake into an image
+.streamlit/secrets.toml
+.env
+.notify_secrets.env
+
+# Personal data + runtime caches (restored from R2 / refetched at runtime)
+data/users/
+data/statements/
+data/*.csv
+data/*.parquet
+data/portfolio.db*
+data/prefs.json
+data/chat.json
+data/fx_history.json
+data/last_import.json
+watchlist.yaml
+src/stocks/web/static/logos/
+
+# Not needed at runtime
+notebooks/
+tests/
+infra/
+.github/
+.claude/
+.agents/

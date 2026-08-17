@@ -89,6 +89,55 @@ def cmd_digest(args: argparse.Namespace) -> None:
     print("digest sent")
 
 
+def cmd_telegram_chat(args: argparse.Namespace) -> None:
+    import os
+
+    if args.set_webhook:
+        from stocks.notify import telegram
+
+        secret_token = os.environ.get("TELEGRAM_WEBHOOK_SECRET", "")
+        if not secret_token:
+            raise SystemExit("TELEGRAM_WEBHOOK_SECRET must be set (same value "
+                             "as the Worker's WEBHOOK_SECRET)")
+        telegram.set_webhook(args.set_webhook, secret_token)
+        print(f"webhook set: {args.set_webhook}")
+        return
+    if args.delete_webhook:
+        from stocks.notify import telegram
+
+        telegram.delete_webhook()
+        print("webhook deleted (getUpdates polling available again)")
+        return
+    if args.ask:
+        # Local engine smoke test — no Telegram, no queue. --user picks the
+        # account by fanout label ("owner" or a slug).
+        from stocks.chat.engine import answer, free_daily_cap
+        from stocks.notify.fanout import iter_all_users
+
+        users = {u.label: u for u in iter_all_users()}
+        user = users.get(args.user)
+        if user is None:
+            raise SystemExit(
+                f"unknown user {args.user!r}; have: {', '.join(sorted(users))}")
+        reply = answer(prefs=user.prefs, prefs_path=user.prefs_path,
+                       chat_path=user.chat_path, watchlist=user.watchlist,
+                       db=user.db, message=args.ask, lang=user.lang)
+        if reply.error:
+            print(f"error: {reply.error} (cap {free_daily_cap()})")
+        else:
+            print(f"[{reply.provider_id}] {reply.text}")
+        return
+
+    from stocks.chat.bot import drain
+
+    status = drain(dry_run=args.dry_run)
+    if not status:
+        print("queue empty")
+        return
+    for key, result in status.items():
+        print(f"{key}: {result}")
+
+
 def _parse_kv(items: list[str] | None) -> list[tuple[str, float]]:
     """Parse repeated 'metric=value' filter args into (metric, value) pairs."""
     pairs = []
@@ -630,6 +679,33 @@ def build_parser() -> argparse.ArgumentParser:
         help="print the rendered digest(s) instead of sending",
     )
     p_digest.set_defaults(func=cmd_digest)
+
+    p_tg = sub.add_parser(
+        "telegram-chat",
+        help="answer queued Telegram chat messages (webhook → R2 queue → here)",
+    )
+    p_tg.add_argument(
+        "--dry-run", action="store_true",
+        help="print what each queued update would get; send and delete nothing",
+    )
+    p_tg.add_argument(
+        "--ask", metavar="TEXT",
+        help="local engine smoke test: answer TEXT for --user, no Telegram",
+    )
+    p_tg.add_argument(
+        "--user", default="owner", metavar="LABEL",
+        help="account label for --ask: 'owner' or a data/users/ slug",
+    )
+    p_tg.add_argument(
+        "--set-webhook", metavar="URL",
+        help="point the bot's webhook at the Worker URL "
+             "(reads TELEGRAM_WEBHOOK_SECRET)",
+    )
+    p_tg.add_argument(
+        "--delete-webhook", action="store_true",
+        help="remove the webhook (rollback to getUpdates polling)",
+    )
+    p_tg.set_defaults(func=cmd_telegram_chat)
 
     p_screen = sub.add_parser("screen", help="rank/filter the whole watchlist by KPIs")
     p_screen.add_argument("--sort", help="metric key to rank by, e.g. roic, pe_ttm")

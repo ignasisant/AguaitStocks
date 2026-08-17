@@ -12,30 +12,17 @@ to the next step. A digest must never fail, or even stall, because of an LLM.
 
 from __future__ import annotations
 
-import time
 from concurrent.futures import ThreadPoolExecutor
 
-from stocks.secrets_env import secret
+from stocks.chat import engine
 
-_TTL = 15 * 24 * 3600  # keep in sync with chat_core._TTL (the "15 days" promise)
-_BYOK_ORDER = ("anthropic", "openai", "gemini")
+_TTL = engine.BYOK_TTL  # the shared "remembered for 15 days" promise
 _LANG_NAME = {"en": "English", "es": "Spanish"}
 MAX_CHARS = 300
 
-
-def _decrypt_byok(prefs: dict, pid: str) -> str:
-    """The user's stored key for `pid`, or '' (missing / expired / bad token)."""
-    try:
-        from cryptography.fernet import Fernet
-
-        enc_key = secret("CHAT_ENC_KEY", "chat", "enc_key")
-        token = prefs.get(f"{pid}_key_enc")
-        saved_at = prefs.get(f"{pid}_key_saved_at", 0)
-        if not enc_key or not token or time.time() - saved_at > _TTL:
-            return ""
-        return Fernet(enc_key).decrypt(token.encode()).decode()
-    except Exception:
-        return ""
+# BYOK decryption and provider resolution live in the shared chat engine now
+# (stocks/chat/engine.py); these names stay for the callers and tests.
+_decrypt_byok = engine.decrypt_byok
 
 
 def _prompt(data, lang: str) -> tuple[str, list[dict]]:
@@ -65,23 +52,7 @@ def _prompt(data, lang: str) -> tuple[str, list[dict]]:
     return system, [{"role": "user", "content": json.dumps(facts)}]
 
 
-def _attempts(prefs: dict):
-    """(provider, api_key, model) candidates in resolution order."""
-    from stocks.web import llm
-
-    seen = []
-    preferred = prefs.get("llm_provider")
-    for pid in dict.fromkeys([preferred, *_BYOK_ORDER]):
-        if not pid or pid == "free" or pid not in llm.PROVIDERS:
-            continue
-        key = _decrypt_byok(prefs, pid)
-        if key:
-            provider = llm.PROVIDERS[pid]
-            seen.append((provider, key, prefs.get(f"{pid}_model") or ""))
-    free = llm.PROVIDERS["free"]
-    if free.available():
-        seen.append((free, "", ""))
-    return seen
+_attempts = engine.attempts
 
 
 def _sanitize(text: str) -> str | None:

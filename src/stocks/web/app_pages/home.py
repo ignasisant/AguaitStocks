@@ -12,10 +12,12 @@ from __future__ import annotations
 
 import html
 from datetime import date, timedelta
+from urllib.error import URLError
 
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
+from yfinance.exceptions import YFRateLimitError
 
 from stocks.analysis.portfolio import basket_change, market_live, us_market_open
 from stocks.config import Holding, load_watchlist
@@ -36,7 +38,6 @@ from stocks.web.portfolio_data import (
 )
 from stocks.web.widgets import (
     HOVERLABEL,
-    INFO_COLOR,
     LOSS_COLOR,
     PROFIT_COLOR,
     TEXT_MUTED,
@@ -99,7 +100,95 @@ def _first_run_banner() -> None:
             st.rerun()
 
 
+def _setup_card() -> None:
+    """Feature-activation checklist — which of the four connectable
+    capabilities (Google sign-in, ledger import, a BYOK provider key,
+    Telegram) this account has switched on. Pending rows carry their
+    activation entry point; once everything is active the card offers a
+    one-time dismiss persisted in prefs.json.
+    """
+    signed_in = auth.is_logged_in()
+    prefs = auth.load_prefs()
+    imported = False
+    if signed_in:
+        try:
+            imported = bool(all_transactions(auth.db_path()))
+        except Exception:
+            pass  # unreadable/missing ledger reads as "not imported yet"
+    # "Connected" = a provider key saved to prefs (encrypted, chat_core) or
+    # entered this session; the keyless Aguait free chain doesn't count.
+    has_ai_key = any(k.endswith("_key_enc") for k in prefs) or any(
+        k.startswith("llm_key::") and st.session_state[k] for k in st.session_state
+    )
+    tg_linked = bool(prefs.get("telegram_chat_id"))
+
+    states = (signed_in, imported, has_ai_key, tg_linked)
+    done = sum(states)
+    if done == len(states) and prefs.get("setup_card_dismissed"):
+        return
+
+    def _label(on: bool, icon: str, label: str) -> str:
+        """Pill label: the feature's own icon, green + bold when active,
+        gray when pending."""
+        return (f":green[:material/{icon}:] **{label}**" if on
+                else f":gray[:material/{icon}:] :gray[{label}]")
+
+    # Dense single-strip card: title + progress badge + one uniform tertiary
+    # pill per feature, all in a wrapping horizontal row. Same element type
+    # everywhere keeps the pills aligned; page pills navigate via
+    # st.switch_page. Guests get disabled pills — the target pages sit behind
+    # require_login() — except sign-in, which is the pending action itself.
+    with st.container(border=True):
+        row = st.container(horizontal=True, vertical_alignment="center",
+                           gap="small")
+        row.markdown(
+            f"{tr('home.setup_title')} "
+            f":gray-badge[{tr('home.setup_progress', done=done, total=len(states))}]"
+        )
+
+        # Google pill: pending = the sign-in action; done = Profile (log-out
+        # and account settings live there).
+        if signed_in:
+            if row.button(_label(True, "account_circle", tr("home.setup_google")),
+                          key="setup_card_google", type="tertiary"):
+                st.switch_page("app_pages/profile.py")
+        else:
+            row.button(_label(False, "account_circle", tr("home.setup_google")),
+                       key="setup_card_login", type="tertiary",
+                       on_click=st.login, disabled="auth" not in st.secrets)
+
+        if row.button(_label(imported, "upload_file", tr("home.setup_import")),
+                      key="setup_card_import", type="tertiary",
+                      disabled=not signed_in):
+            st.switch_page("app_pages/import_transactions.py")
+
+        # AI pill: the key gate lives in the assistant side panel, not a nav
+        # page, so it opens the panel in place (signed-in only — app.py gates
+        # render_side_panel on is_logged_in()). auto_awesome = the launcher
+        # FAB's icon, so the pill points at the thing it opens.
+        if row.button(_label(has_ai_key, "auto_awesome", tr("home.setup_ai")),
+                      key="setup_card_ai", type="tertiary",
+                      disabled=not signed_in):
+            st.session_state["chat_panel_open"] = True
+            st.rerun()
+
+        if row.button(_label(tg_linked, "send", tr("home.setup_tg")),
+                      key="setup_card_tg", type="tertiary",
+                      disabled=not signed_in):
+            # Land on the Notifications tab, where the linking flow lives.
+            st.session_state["profile_tab"] = "notify"
+            st.switch_page("app_pages/profile.py")
+
+        if done == len(states):
+            if row.button(f":material/close: {tr('home.dismiss')}",
+                          key="setup_card_dismiss", type="tertiary"):
+                prefs["setup_card_dismissed"] = True
+                auth.save_prefs(prefs)
+                st.rerun()
+
+
 _first_run_banner()
+_setup_card()
 
 # ---------------------------------------------------------- portfolio glance
 # Daily-glance cut of the Portfolio page: value / today / unrealised P/L plus
@@ -123,14 +212,29 @@ held_moves: dict[str, float] = {}  # {ticker: day_pct}, feeds the Big-moves card
 _spark_slot = None  # reserved in the glance row, filled at the bottom
 if auth.is_logged_in():
     DB = str(auth.db_path())
-    txs, positions, realized = ledger_state(DB, db_mtime(DB))
+    realized: list = []
+    try:
+        txs, positions, realized = ledger_state(DB, db_mtime(DB))
+    except (YFRateLimitError, URLError):
+        raise  # app-level banner handles these with retry
+    except Exception:
+        # Ledger replay / FX prefetch failed for a non-banner reason: skip the
+        # whole glance (txs/positions/realized stay empty) instead of crashing.
+        st.warning(tr("home.data_unavailable"))
     # realized non-empty proves ledger activity even with every position
     # closed; both empty = brand-new user, already covered by the banner.
     if positions or realized:
         st.subheader(tr("home.portfolio_title"))
     if positions:
-        tbl = enriched_positions(DB, db_mtime(DB))
-        if tbl.empty:
+        try:
+            tbl = enriched_positions(DB, db_mtime(DB))
+        except (YFRateLimitError, URLError):
+            raise  # app-level banner handles these with retry
+        except Exception:
+            tbl = None  # price/FX enrichment failed — skip the glance card
+        if tbl is None:
+            st.warning(tr("home.data_unavailable"))
+        elif tbl.empty:
             st.caption(tr("home.prices_unavailable"))
         else:
             cost = tbl["cost_eur"].sum()
@@ -142,7 +246,14 @@ if auth.is_logged_in():
             if fx is None:
                 ccy, fx = "EUR", 1.0
             sym = auth.CURRENCY_SYMBOL[ccy]
-            hist = basket_history(DB, db_mtime(DB))
+            try:
+                hist = basket_history(DB, db_mtime(DB))
+            except (YFRateLimitError, URLError):
+                raise  # app-level banner handles these with retry
+            except Exception:
+                # basket_change(empty, …) is None, so the 1w/1m deltas below
+                # degrade to their "n/a" cells instead of crashing the card.
+                hist = pd.DataFrame()
             gain_pct = (value / cost - 1) if cost else None
             realized_gain = sum(s.gain_eur for s in realized)
             realized_cost = sum(s.cost_eur for s in realized)
@@ -289,7 +400,13 @@ _held = {p.ticker for p in positions}
 # tables render further down. No st.stop() on an empty watchlist: the deferred
 # cards at the bottom must still fill for a portfolio-only user.
 holdings = load_watchlist(auth.watchlist_path())
-closes = recent_closes(tuple(h.ticker for h in holdings)) if holdings else {}
+# A throttled Yahoo must dim/blank the watchlist rows, not crash the page.
+# The miss isn't cached (st.cache_data skips exceptions), so a rerun retries;
+# URLError still propagates to the app-level banner.
+try:
+    closes = recent_closes(tuple(h.ticker for h in holdings)) if holdings else {}
+except YFRateLimitError:
+    closes = {}
 
 # ------------------------------------------------------------------ what's new
 # Bordered cards, two per row on desktop (st.columns stack on phones). The
@@ -364,7 +481,7 @@ else:
 
 # Defined above the refresh button so its clear() call can reference it; the
 # actual 1y fetch still only runs in the deferred fill at the bottom.
-@st.cache_data(ttl=6 * 3600, show_spinner=False)
+@st.cache_data(ttl=6 * 3600, show_spinner=tr("home.loading_extremes"))
 def _year_extremes(tickers: tuple[str, ...]) -> list[tuple[str, float, str, float | None]]:
     """(ticker, last close, "high"/"low", distance) for names within 2% of
     their 52-week high or low — one bulk 1y download, keyed by the ticker tuple
@@ -466,7 +583,14 @@ if _spark_slot is not None:
     # Called inside the slot so the cold-build spinner shows in the chart's
     # cell instead of at the page bottom.
     with _spark_slot:
-        _hist, _, _ = ledger_history((len(txs), txs[-1].date, date.today()), DB)
+        try:
+            _hist, _, _ = ledger_history((len(txs), txs[-1].date, date.today()), DB)
+        except (YFRateLimitError, URLError):
+            raise  # app-level banner handles these with retry
+        except Exception:
+            # Price-span build failed — drop the sparkline, keep the page.
+            st.warning(tr("home.data_unavailable"))
+            _hist = pd.DataFrame()
     if not _hist.empty:
         # ffill BEFORE the 30-day slice so both lines enter the window
         # continuous instead of starting on the first in-window quote.
@@ -505,15 +629,45 @@ if _spark_slot is not None:
                 hoverinfo="skip",
             )
         )
-        # Theme accent, not green/red: with two lines a sign-colored value
-        # line reads as "in profit", not "up this month" — polarity lives in
-        # the tooltip's colored % and the Today delta instead.
+        # Sign-split value line (same mask-overlap trick as the Portfolio
+        # history chart): green above injected, red below; masks overlap one
+        # point at each crossing so the segments stay connected.
+        _gain = _hist["value_eur"] >= _hist["injected_eur"]
+        _up = _hist["value_eur"].where(_gain | _gain.shift(1, fill_value=False))
+        _down = _hist["value_eur"].where(
+            ~_gain | (~_gain).shift(1, fill_value=False)
+        )
+        # Both traces share the "Valor" legend name; only one shows in the
+        # legend (green wins when any point is in profit) to avoid a duplicate.
+        fig.add_trace(
+            go.Scatter(
+                x=_hist.index,
+                y=_up,
+                name=tr("home.chart_value"),
+                line=dict(color=PROFIT_COLOR, width=2),
+                hoverinfo="skip",
+                showlegend=bool(_gain.any()),
+            )
+        )
+        fig.add_trace(
+            go.Scatter(
+                x=_hist.index,
+                y=_down,
+                name=tr("home.chart_value"),
+                line=dict(color=LOSS_COLOR, width=2),
+                hoverinfo="skip",
+                showlegend=not bool(_gain.any()),
+            )
+        )
+        # Invisible full-coverage trace: one continuous tooltip regardless of
+        # which colored segment is under the cursor (as on the Portfolio page).
         fig.add_trace(
             go.Scatter(
                 x=_hist.index,
                 y=_hist["value_eur"],
-                name=tr("home.chart_value"),
-                line=dict(color=INFO_COLOR, width=2),
+                line=dict(width=0),
+                opacity=0,
+                showlegend=False,
                 customdata=_custom,
                 hovertemplate=tr("home.spark_hover_tmpl"),
             )
@@ -546,7 +700,7 @@ if _spark_slot is not None:
 
 
 # --------------------------------------------- earnings calendar (slot fill)
-@st.cache_data(ttl=6 * 3600, show_spinner=False)
+@st.cache_data(ttl=6 * 3600, show_spinner=tr("home.loading_earnings"))
 def _cal_data(tickers: tuple[str, ...]):
     """(upcoming events, past reported results) for the calendar — one parallel
     yfinance pass, keyed by the ticker tuple so watchlist or portfolio edits
@@ -661,44 +815,56 @@ _earn_tickers = tuple(
 if _earn_tickers:
     with _earn_slot.container(border=True, height="stretch"):
         st.markdown(tr("home.earnings_upcoming"))
-        _events, _results = _cal_data(_earn_tickers)
-        _today = date.today()
-        # Window: the previous week's Monday through the last shown Friday.
-        _cal_start = _today - timedelta(days=_today.weekday() + 7)
-        _cal_end = _cal_start + timedelta(days=_MINI_CAL_WEEKS * 7 - 1)
-        # Upcoming (one next-date per ticker) and past prints, grouped by day —
-        # weekdays only (the grid drops Sat/Sun; equity prints never land there).
-        _by_date: dict[date, list] = {}
-        for _e in _events:
-            if _e.date and _cal_start <= _e.date <= _cal_end and _e.date.weekday() < 5:
-                _by_date.setdefault(_e.date, []).append(_e)
-        _res_by_date: dict[date, list] = {}
-        for _r in _results:
-            if _cal_start <= _r.date <= _cal_end and _r.date.weekday() < 5:
-                _res_by_date.setdefault(_r.date, []).append(_r)
-        _syms = {x.ticker for row in _by_date.values() for x in row} | {
-            x.ticker for row in _res_by_date.values() for x in row
-        }
-        if _syms:
-            _names = {t: (company_name(t) or t) for t in _syms}
-            _logos = {t: logo(t) for t in _syms}
-
-            @st.dialog(tr("earnings.dialog_title"))
-            def _mini_result_dialog(ticker: str, iso: str) -> None:
-                render_result_body(ticker, iso, _results, _names, _logos)
-
-            _grid = _mini_cal_grid(
-                data={"html": _mini_calendar_html(
-                    _cal_start, _by_date, _res_by_date, _today, _names, _logos
-                )},
-                key="home_earn_cal",
-                on_pick_change=lambda: None,
-            )
-            if _grid.pick:
-                _mini_result_dialog(_grid.pick["ticker"], _grid.pick["date"])
-            st.caption(tr("home.earnings_3w_caption"))
+        try:
+            _events, _results = _cal_data(_earn_tickers)
+        except (YFRateLimitError, URLError):
+            raise  # app-level banner handles these with retry
+        except Exception:
+            # Non-banner failure (payload/parser change): stub the card and
+            # keep the page — the miss isn't cached, so a rerun retries.
+            _events = _results = None
+        if _events is None:
+            st.caption(tr("home.earnings_unavailable"))
         else:
-            st.caption(tr("home.no_reports_3w"))
+            _today = date.today()
+            # Window: the previous week's Monday through the last shown Friday.
+            _cal_start = _today - timedelta(days=_today.weekday() + 7)
+            _cal_end = _cal_start + timedelta(days=_MINI_CAL_WEEKS * 7 - 1)
+            # Upcoming (one next-date per ticker) and past prints, grouped by
+            # day — weekdays only (the grid drops Sat/Sun; equity prints never
+            # land there).
+            _by_date: dict[date, list] = {}
+            for _e in _events:
+                if (_e.date and _cal_start <= _e.date <= _cal_end
+                        and _e.date.weekday() < 5):
+                    _by_date.setdefault(_e.date, []).append(_e)
+            _res_by_date: dict[date, list] = {}
+            for _r in _results:
+                if _cal_start <= _r.date <= _cal_end and _r.date.weekday() < 5:
+                    _res_by_date.setdefault(_r.date, []).append(_r)
+            _syms = {x.ticker for row in _by_date.values() for x in row} | {
+                x.ticker for row in _res_by_date.values() for x in row
+            }
+            if _syms:
+                _names = {t: (company_name(t) or t) for t in _syms}
+                _logos = {t: logo(t) for t in _syms}
+
+                @st.dialog(tr("earnings.dialog_title"))
+                def _mini_result_dialog(ticker: str, iso: str) -> None:
+                    render_result_body(ticker, iso, _results, _names, _logos)
+
+                _grid = _mini_cal_grid(
+                    data={"html": _mini_calendar_html(
+                        _cal_start, _by_date, _res_by_date, _today, _names, _logos
+                    )},
+                    key="home_earn_cal",
+                    on_pick_change=lambda: None,
+                )
+                if _grid.pick:
+                    _mini_result_dialog(_grid.pick["ticker"], _grid.pick["date"])
+                st.caption(tr("home.earnings_3w_caption"))
+            else:
+                st.caption(tr("home.no_reports_3w"))
         st.page_link(
             "app_pages/earnings.py",
             label=tr("home.link_earnings_calendar"),
@@ -713,8 +879,18 @@ _xt_tickers = tuple(sorted(t for t in _held | set(favs) if not is_crypto(t)))
 if _xt_tickers:
     with _xt_slot.container(border=True):
         st.markdown(tr("home.extremes_52w"))
-        _extremes = _year_extremes(_xt_tickers)
-        if _extremes:
+        try:
+            _extremes = _year_extremes(_xt_tickers)
+        except (YFRateLimitError, URLError):
+            raise  # app-level banner handles these with retry
+        except Exception:
+            # None ≠ [] — an empty scan means "nothing at extremes", a failed
+            # one shows the unavailable stub; the miss isn't cached, so a
+            # rerun retries.
+            _extremes = None
+        if _extremes is None:
+            st.caption(tr("home.extremes_unavailable"))
+        elif _extremes:
 
             def _where(kind: str, pct: float | None) -> str:
                 if kind == "high":

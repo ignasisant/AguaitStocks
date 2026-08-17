@@ -16,19 +16,21 @@ Storage is account-scoped: session slot "llm_key::<pid>", prefs "<pid>_key_enc" 
 from __future__ import annotations
 
 import time
+from datetime import date
+from urllib.parse import urlparse
 
 import streamlit as st
-from cryptography.fernet import Fernet, InvalidToken
+from cryptography.fernet import Fernet
 
+from stocks.chat import engine
 from stocks.config import load_watchlist
-from stocks.config import positions as load_positions
 from stocks.secrets_env import secret
-from stocks.web import auth, chat_skills, llm
+from stocks.web import auth, chat_actions, chat_skills, chat_web, llm
 from stocks.web.i18n import t as tr
 from stocks.web.portfolio_data import enriched_positions
 from stocks.web.widgets import asset_logo, brand_logo, db_mtime
 
-_TTL = 15 * 24 * 3600  # 15 days, seconds — must match the Chat page's window
+_TTL = engine.BYOK_TTL  # 15 days, seconds — the shared "remembered" window
 
 
 # ------------------------------------------------------------- key + provider
@@ -49,18 +51,7 @@ def _fernet() -> Fernet | None:
 
 def _load_saved_key(pid: str) -> str:
     """Decrypt a remembered provider key if present and within the 15-day window."""
-    f = _fernet()
-    if not f:
-        return ""
-    prefs = auth.load_prefs()
-    token = prefs.get(f"{pid}_key_enc")
-    saved_at = prefs.get(f"{pid}_key_saved_at", 0)
-    if not token or time.time() - saved_at > _TTL:
-        return ""
-    try:
-        return f.decrypt(token.encode()).decode()
-    except InvalidToken:
-        return ""  # enc_key rotated or ciphertext corrupt -> treat as unset
+    return engine.decrypt_byok(auth.load_prefs(), pid)
 
 
 def _save_key(pid: str, api_key: str) -> None:
@@ -102,33 +93,17 @@ def active_key(provider: llm.Provider) -> str:
     return st.session_state.get(_sk(provider.id)) or _load_saved_key(provider.id)
 
 
-# The free chain runs on the operator's shared keys, so each account gets a
-# modest daily allowance (override with [free_llm] daily_cap) — one runaway
-# user must not drain the quota every other account depends on.
-_FREE_DAILY_CAP = 30
-
-
-def _free_daily_cap() -> int:
-    try:
-        return int(st.secrets.get("free_llm", {}).get("daily_cap", _FREE_DAILY_CAP))
-    except Exception:
-        return _FREE_DAILY_CAP
+# Free-chain daily allowance: constants and counter logic live in the shared
+# engine (stocks/chat/engine.py) so the web panel and the Telegram bot spend
+# from the same per-account pot ("free_msgs::<date>" in prefs).
+_free_daily_cap = engine.free_daily_cap
 
 
 def _spend_free_quota() -> bool:
-    """Consume one unit of today's free allowance; False when it's spent.
-
-    The counter lives in the account's prefs under "free_msgs::<date>"; keys
-    from previous days are dropped on write so prefs.json never accumulates."""
-    day = time.strftime("%Y-%m-%d")
-    key = f"free_msgs::{day}"
+    """Consume one unit of today's free allowance; False when it's spent."""
     prefs = auth.load_prefs()
-    used = int(prefs.get(key, 0))
-    if used >= _free_daily_cap():
+    if not engine.spend_free_quota(prefs):
         return False
-    for stale in [k for k in prefs if k.startswith("free_msgs::") and k != key]:
-        prefs.pop(stale)
-    prefs[key] = used + 1
     auth.save_prefs(prefs)
     return True
 
@@ -281,32 +256,114 @@ def _resolve_skills(provider: llm.Provider, api_key: str,
     router call itself fails it falls back to the previous answer's skills —
     the answer always proceeds, and an unchanged skill set keeps the system
     prompt byte-identical, which keeps provider prompt caches warm."""
+    return engine.resolve_skills(auth.load_prefs(), provider, api_key,
+                                 history, context=_view_context().strip())
+
+
+# ------------------------------------------------------------- web search
+# Keyless DuckDuckGo search (web/chat_web.py): a planner call on the provider's
+# cheapest model decides per message whether the web is needed and with which
+# queries — the same one-extra-cheap-call shape as the skill auto-router.
+
+
+def _web_enabled() -> bool:
+    return chat_web.available() and bool(auth.load_prefs().get("chat_web", True))
+
+
+def _pick_web() -> None:
+    """Web-search toggle; remembered in prefs ("chat_web")."""
+    if not chat_web.available():
+        return
     prefs = auth.load_prefs()
-    mode = prefs.get("chat_skills_mode", "auto")
-    if mode == "off":
+    saved = bool(prefs.get("chat_web", True))
+    on = st.toggle(tr("chat.web_label"), value=saved, key="panel_web",
+                   help=tr("chat.web_help"))
+    if on != saved:
+        prefs["chat_web"] = on
+        auth.save_prefs(prefs)
+
+
+def _plan_web(provider: llm.Provider, api_key: str,
+              history: list[dict]) -> list[str]:
+    """Search queries for the pending answer ([] = none needed / web off).
+
+    Prior user turns ride along so follow-ups ("and today?", "any news?")
+    keep planning within the thread's topic."""
+    if not _web_enabled():
         return []
-    if mode == "manual":
-        valid = chat_skills.valid_ids()
-        return [i for i in prefs.get("chat_skills", [])
-                if i in valid][:chat_skills.MAX_MANUAL]
-    # Auto. Prior user turns ride along so follow-ups ("why?", "and the
-    # dividend?") keep routing to the thread's topic, not to nothing.
     prior = [m["content"][:200] for m in history[:-1] if m["role"] == "user"][-2:]
-    context = _view_context().strip()
+    context = f"Today is {date.today().isoformat()}.\n" + _view_context().strip()
     if prior:
         context += "\nEarlier user messages (topic continuity): " + " | ".join(prior)
-    ids = chat_skills.classify(provider, api_key, history[-1]["content"], context)
-    if ids is None:  # router failed — reuse the previous turn's lens
-        prev = [m for m in history if m["role"] == "assistant" and m.get("skills")]
-        return prev[-1]["skills"] if prev else []
-    return ids
+    return chat_web.plan(provider, api_key, history[-1]["content"], context)
+
+
+def _host(url: str) -> str:
+    return urlparse(url).netloc.removeprefix("www.") or url
+
+
+def _sources_label(sources: list[dict]) -> str:
+    """'Sources: host · host …' caption, each host linking to its article."""
+    links = " · ".join(f"[{_host(s['url'])}]({s['url']})" for s in sources)
+    return tr("chat.sources", sources=links)
+
+
+# ------------------------------------------------------------- actions
+# App operations straight from chat (web/chat_actions.py): favorite, price
+# alerts, groups. Detection only runs when the keyword gate hits; a detected
+# action replaces the LLM answer with a deterministic localized confirmation
+# (no free-quota spend), and any failure falls through to a normal answer.
+
+
+def _action_context() -> str:
+    """What the action parser needs: current view (resolves "this"), the
+    watchlist (resolves company names to symbols) and existing groups."""
+    bits = [_view_context().strip()]
+    holds = load_watchlist(auth.watchlist_path())
+    if holds:
+        bits.append("Watchlist: " + ", ".join(
+            f"{h.ticker} ({h.name})" if h.name else h.ticker for h in holds))
+    tags = auth.all_tags()
+    if tags:
+        bits.append("Existing groups: " + ", ".join(tags))
+    return "\n".join(b for b in bits if b)
+
+
+def _action_reply(act: chat_actions.Action) -> str:
+    """Localized confirmation bubble for an executed action."""
+    if act.kind == "favorite":
+        return tr("chat.action_favorited", ticker=act.ticker)
+    if act.kind == "unfavorite":
+        return tr("chat.action_unfavorited", ticker=act.ticker)
+    if act.kind == "set_alerts":
+        rules = ", ".join(
+            tr(f"chat.action_alert_{a['type']}", price=f"{a['price']:g}")
+            for a in act.alerts
+        )
+        return tr("chat.action_alerts_set", ticker=act.ticker, rules=rules)
+    return tr("chat.action_tagged", ticker=act.ticker,
+              groups=", ".join(act.tags))
+
+
+def _try_action(provider: llm.Provider, api_key: str,
+                message: str) -> chat_actions.Action | None:
+    """Detect and execute an app action for the message, or None.
+
+    None on gate miss, parse failure or execution error — the caller then
+    answers normally, so a broken action path never blocks the chat."""
+    if not chat_actions.maybe_action(message):
+        return None
+    act = chat_actions.detect(provider, api_key, message, _action_context())
+    if act is None:
+        return None
+    try:
+        chat_actions.execute(act, auth.watchlist_path())
+    except Exception:
+        return None
+    return act
 
 
 # ------------------------------------------------------------- context
-
-
-def _fmt_eur(x) -> str:
-    return f"€{x:,.0f}" if x is not None and x == x else "n/a"  # x==x screens NaN
 
 
 def _view_context() -> str:
@@ -336,143 +393,24 @@ def _portfolio_context() -> str:
     """
     db = auth.db_path()
     tbl = enriched_positions(str(db), db_mtime(str(db))) if db.exists() else None
-
-    if tbl is not None and not tbl.empty:
-        lines = []
-        for tk, r in tbl.iterrows():
-            pnl_pct, day_pct, wt = r.get("pnl_pct"), r.get("day_pct"), r.get("weight")
-            lines.append(
-                f"- {tk}: {r['shares']:g} sh | value {_fmt_eur(r['value_eur'])}"
-                f" | cost {_fmt_eur(r['cost_eur'])}"
-                + (f" | P/L {pnl_pct:+.1%} ({_fmt_eur(r['pnl_eur'])})"
-                   if pnl_pct == pnl_pct else "")
-                + (f" | weight {wt:.0%}" if wt == wt else "")
-                + (f" | today {day_pct:+.1%}" if day_pct == day_pct else "")
-            )
-        total = tbl["value_eur"].dropna().sum()
-        total_pnl = tbl["pnl_eur"].dropna().sum()
-        book = (
-            f"Holdings (live market data, EUR). Total book {_fmt_eur(total)}, "
-            f"unrealised P/L {_fmt_eur(total_pnl)}:\n" + "\n".join(lines)
-        )
-        held = set(tbl.index)
-    else:
-        holds = load_positions(auth.watchlist_path())
-        book = (
-            "Positions (from watchlist; no live valuation):\n"
-            + "\n".join(
-                f"- {h.ticker}: {h.shares:g} shares"
-                + (f" @ {h.cost:g} avg cost" if h.cost else "")
-                for h in holds
-            )
-            if holds
-            else "(no open positions)"
-        )
-        held = {h.ticker for h in holds}
-
-    watching = [
-        h.ticker for h in load_watchlist(auth.watchlist_path()) if h.ticker not in held
-    ]
-    if watching:
-        book += "\n\nAlso on the watchlist (not held): " + ", ".join(watching)
-    return book
-
-
-# English phrasings for the stored profile enum keys (auth.PROFILE_*). The
-# system prompt is English regardless of UI language, so the persona is built
-# from these, not from the localized form labels.
-_RISK_EN = {
-    "aggressive": "an aggressive",
-    "very_aggressive": "a very aggressive",
-    "balanced": "a balanced",
-    "conservative": "a conservative",
-}
-_HORIZON_EN = {
-    "5y_plus": "5+ year",
-    "3_5y": "3–5 year",
-    "1_3y": "1–3 year",
-    "under_1y": "under-1-year",
-}
-_FOCUS_EN = {
-    "tech": "technology and growth stocks",
-    "em": "emerging markets",
-    "crypto": "crypto assets",
-    "dividends_value": "dividends, value and broad-index holdings",
-}
-_CONSTRAINT_EN = {
-    "spain_tax": "factor in Spanish tax residency (IRPF; no US wash-sale rule)",
-    "eur": "reason and report in EUR",
-    "no_leverage": "avoid recommending leverage, margin or derivatives",
-    "esg": "apply ESG screening",
-}
-
-
-def _join_en(parts: list[str]) -> str:
-    """'a', 'a and b', 'a, b and c'."""
-    if len(parts) <= 1:
-        return parts[0] if parts else ""
-    return f"{', '.join(parts[:-1])} and {parts[-1]}"
-
-
-def _persona() -> str:
-    """The 'who am I advising' sentence, built from the user's saved profile.
-
-    Falls back to the historical default when the user hasn't filled the
-    investor-profile form yet (auth.load_profile()['set'] is False)."""
-    prof = auth.load_profile()
-    if not prof.get("set"):
-        return "The signed-in user is an aggressive long-term (5y+) investor. "
-    risk = _RISK_EN.get(prof.get("risk"), "an aggressive")
-    horizon = _HORIZON_EN.get(prof.get("horizon"), "5+ year")
-    out = (
-        f"The signed-in user describes themselves as {risk} investor with a "
-        f"{horizon} time horizon. "
-    )
-    focus = [_FOCUS_EN[f] for f in prof.get("focus", []) if f in _FOCUS_EN]
-    if focus:
-        out += "They focus on " + _join_en(focus) + ". "
-    cons = [_CONSTRAINT_EN[c] for c in prof.get("constraints", []) if c in _CONSTRAINT_EN]
-    if cons:
-        out += "Always respect these constraints: " + _join_en(cons) + ". "
-    notes = (prof.get("notes") or "").strip()
-    if notes:
-        out += f"Additional context from the user: {notes} "
-    return out
+    return engine.book_snapshot(tbl, auth.watchlist_path())
 
 
 def _system_prompt(skill_ids: list[str] | None = None) -> str:
     """Persona (from the user's profile) + the current view + a live snapshot
-    of the account's book + the analysis frameworks chosen for this turn."""
-    return (
-        "You are a concise investing assistant embedded in a personal stock "
-        "tracker. " + _persona() + "You are not a licensed financial advisor: "
-        "give analysis and trade-offs, not directives, and flag when something "
-        "needs the user's own judgement. The context below is current as of "
-        "this message; treat the figures as the user's real position, and let "
-        "the current view guide what they are most likely asking about.\n\n"
-        f"{_view_context()}"
-        f"{_portfolio_context()}"
-        + chat_skills.skills_block(skill_ids or [])
+    of the account's book + the analysis frameworks chosen for this turn.
+    Assembled by the shared engine (stocks/chat/engine.py) — the Telegram bot
+    builds the same prompt from the same pieces."""
+    return engine.system_prompt(
+        auth.load_profile(), _view_context() + _portfolio_context(), skill_ids
     )
 
 
 # ------------------------------------------------------------- conversation
 
-# How many past messages to actually send the model per request. The full thread
-# stays on screen and on disk; only this tail is re-sent, so cost stops growing
-# quadratically with conversation length. ~10 exchanges of memory.
-_MAX_CONTEXT_MSGS = 20
-
-
-def _recent(history: list[dict]) -> list[dict]:
-    """The tail of the conversation sent to the model. Trims any leading
-    assistant turn so the slice still opens with a user message (Anthropic
-    requires it; the others don't care). Rebuilt as bare role/content dicts —
-    stored turns carry extra keys (e.g. "skills") the provider APIs reject."""
-    msgs = history[-_MAX_CONTEXT_MSGS:]
-    while msgs and msgs[0]["role"] != "user":
-        msgs = msgs[1:]
-    return [{"role": m["role"], "content": m["content"]} for m in msgs]
+# The tail of the conversation actually sent to the model (engine.recent):
+# the full thread stays on screen and on disk.
+_recent = engine.recent
 
 
 def render_conversation(ns: str, provider: llm.Provider, model: str, api_key: str) -> None:
@@ -500,6 +438,8 @@ def render_conversation(ns: str, provider: llm.Provider, model: str, api_key: st
                 if msg.get("skills"):  # which lens produced this answer
                     st.caption(_lens_label(msg["skills"]))
                 st.markdown(msg["content"])
+                if msg.get("web"):  # which pages grounded this answer
+                    st.caption(_sources_label(msg["web"]))
 
     if prompt := st.chat_input(tr("chat.placeholder"), key=f"{ns}_input"):
         history.append({"role": "user", "content": prompt})
@@ -509,37 +449,70 @@ def render_conversation(ns: str, provider: llm.Provider, model: str, api_key: st
     # Generate whenever the last turn is a user turn still awaiting a reply
     # (covers both a fresh message and a Regenerate through one code path).
     if history and history[-1]["role"] == "user":
-        if provider.id == "free" and not _spend_free_quota():
-            history.pop()  # drop the turn we won't answer
+        # App actions first: an executed action (favorite / alert / group)
+        # answers with a deterministic localized confirmation — no main model
+        # call, no free-quota spend.
+        with st.spinner(tr("chat.thinking")):
+            act = _try_action(provider, api_key, history[-1]["content"])
+        if act is not None:
+            note = _action_reply(act)
+            with box, st.chat_message("assistant"):
+                st.markdown(note)
+            history.append(
+                {"role": "assistant", "content": note, "action": act.kind}
+            )
             auth.save_chat(history)
-            st.error(tr("chat.free_cap", cap=_free_daily_cap()))
-            st.stop()
-        with box, st.chat_message("assistant"):
-            try:
-                # Spinner covers the skill routing plus the wait for the first
-                # token (write_stream shows nothing until the model responds);
-                # it clears as text streams in.
-                with st.spinner(tr("chat.thinking")):
-                    skills = _resolve_skills(provider, api_key, history)
+        else:
+            if provider.id == "free" and not _spend_free_quota():
+                history.pop()  # drop the turn we won't answer
+                auth.save_chat(history)
+                st.error(tr("chat.free_cap", cap=_free_daily_cap()))
+                st.stop()
+            with box, st.chat_message("assistant"):
+                try:
+                    # First spinner covers the skill + web routing calls; the
+                    # search one covers the DuckDuckGo round-trips; the last
+                    # covers the wait for the first token (write_stream shows
+                    # nothing until the model responds).
+                    with st.spinner(tr("chat.thinking")):
+                        skills = _resolve_skills(provider, api_key, history)
+                        queries = _plan_web(provider, api_key, history)
+                    hits: list[chat_web.Result] = []
+                    if queries:
+                        with st.spinner(tr("chat.searching")):
+                            hits = chat_web.search(queries)
                     if skills:
                         st.caption(_lens_label(skills))
-                    answer = st.write_stream(
-                        provider.stream(api_key, model, _system_prompt(skills),
-                                        _recent(history))
-                    )
-            except Exception as exc:  # classified per provider; unknown -> re-raise
-                err = provider.error_key(exc)
-                if err is None:
-                    raise
-                history.pop()  # drop the unanswered user turn
-                auth.save_chat(history)
-                st.error(tr(err, provider=provider.label))
-                st.stop()
-        turn: dict = {"role": "assistant", "content": answer}
-        if skills:
-            turn["skills"] = skills
-        history.append(turn)
-        auth.save_chat(history)  # persist the completed user+assistant turn
+                    # Hits ride on the outgoing copy of the user turn, not the
+                    # system prompt — the stored history keeps the user's own
+                    # text, and provider prompt caches stay warm.
+                    msgs = _recent(history)
+                    if hits:
+                        msgs[-1]["content"] = chat_web.augment(
+                            msgs[-1]["content"], hits)
+                    with st.spinner(tr("chat.thinking")):
+                        answer = st.write_stream(
+                            provider.stream(api_key, model,
+                                            _system_prompt(skills), msgs)
+                        )
+                    web_sources = chat_web.sources(hits)
+                    if web_sources:
+                        st.caption(_sources_label(web_sources))
+                except Exception as exc:  # classified per provider; unknown -> re-raise
+                    err = provider.error_key(exc)
+                    if err is None:
+                        raise
+                    history.pop()  # drop the unanswered user turn
+                    auth.save_chat(history)
+                    st.error(tr(err, provider=provider.label))
+                    st.stop()
+            turn: dict = {"role": "assistant", "content": answer}
+            if skills:
+                turn["skills"] = skills
+            if web_sources:
+                turn["web"] = web_sources
+            history.append(turn)
+            auth.save_chat(history)  # persist the completed user+assistant turn
 
     if history and history[-1]["role"] == "assistant":
         with box, st.container(horizontal=True):
@@ -632,6 +605,15 @@ body:has(.st-key-chatpanel) .st-key-topbar_search {
 .st-key-chatpanel [data-testid="stChatInput"] {
   background: #18161C; padding-top: 0.4rem;
 }
+/* Send button on the LEFT of the input. The input row is a flex container of
+   [textarea wrapper (order 0), upload group (order -1), button group (order 0)];
+   pulling the group that holds the submit button to order -2 puts it before
+   everything else. Same rule also reorders the expanded (multi-line) bottom
+   row, so the button stays leftmost in both layouts. */
+.st-key-chatpanel [data-testid="stChatInput"]
+  div:has(> button[data-testid="stChatInputSubmitButton"]) {
+  order: -2;
+}
 /* Conversation palette. Streamlit's default avatars borrow the market-semantic
    redColor (user) and orangeColor (assistant) tokens — a pink face and an
    orange robot that read as "loss"/"alert" and clash with the brand. Recolour
@@ -660,6 +642,15 @@ body:has(.st-key-chatpanel) .st-key-topbar_search {
   [data-testid="stChatMessageContent"] {
   background: rgba(127, 63, 232, 0.16); border: 1px solid rgba(127, 63, 232, 0.35);
 }
+/* Settings expander: captions (the skills-mode hint) spill a few px past
+   their under-sized container — same Streamlit quirk as the metric-row
+   captions in app.py — and the next element paints over the text. Pad the
+   caption to swallow the spill, and give the forget-key button its own
+   breathing room above. */
+.st-key-chatpanel [data-testid="stExpanderDetails"] [data-testid="stCaptionContainer"] {
+  padding-bottom: 0.6rem;
+}
+.st-key-chatpanel .st-key-panel_forget { margin-top: 0.4rem; }
 /* Wide screens: reserve room so page content never hides under the panel, but
    never surrender more than 60% of the width to it (tracks --chat-w). */
 @media (min-width: 1100px) {
@@ -764,7 +755,11 @@ def _panel_body() -> None:
         if len(provider.models) > 1:
             _pick_model(provider, f"panel_model_{provider.id}")  # persists the choice
         _pick_skills()
-        if provider.needs_key and st.button(
+        _pick_web()
+        # Forget only makes sense when this provider actually has a key; while
+        # it has one the BYOK form below stays hidden, so forgetting is the
+        # only path to entering a different key.
+        if provider.needs_key and active_key(provider) and st.button(
             tr("chat.forget"), icon=":material/logout:", key="panel_forget"
         ):
             _forget_key(provider.id)

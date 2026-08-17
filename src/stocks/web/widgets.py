@@ -12,6 +12,7 @@ from __future__ import annotations
 import html
 import re
 from pathlib import Path
+from urllib.error import URLError
 from urllib.parse import quote
 
 import pandas as pd
@@ -20,6 +21,7 @@ from yfinance.exceptions import YFRateLimitError
 
 from stocks.config import Alert, load_watchlist
 from stocks.data.logo import brand_logo_url, logo_url, mirror_brand, mirror_logo
+from stocks.fuzzy import FUZZY_CUTOFF, MIN_QUERY, fuzzy_ratio
 from stocks.web import auth
 from stocks.web.i18n import t as tr
 
@@ -178,6 +180,21 @@ def chart_layout(
 _STATIC_LOGO_DIR = Path(__file__).parent / "static" / "logos"
 
 
+def _static_logo_src(name: str) -> str:
+    """Browser URL for a mirrored logo file — RELATIVE, no leading slash.
+
+    Streamlit serves ./static at <base>/app/static, where <base> is wherever
+    the document actually lives: "/" locally, but "/~/+/" behind Streamlit
+    Cloud's shell iframe, and "/<prefix>/" under server.baseUrlPath. A
+    relative URL resolves against the document URL and lands on the right
+    mount in all three; an absolute "/app/static/..." escapes the Cloud
+    iframe mount and 404s (this is also the form the Streamlit docs use).
+    Page routes (".../portfolio") have no trailing slash, so the last
+    segment drops out and "app/static/..." still resolves at the mount root.
+    """
+    return f"app/static/logos/{name}"
+
+
 @st.cache_data(ttl=86400, show_spinner=False)
 def logo(ticker: str) -> str | None:
     """Same-origin logo URL for a ticker (cached a day — logos rarely change).
@@ -189,8 +206,7 @@ def logo(ticker: str) -> str | None:
     a chance instead); None when no source knows the ticker.
     """
     if name := mirror_logo(ticker, _STATIC_LOGO_DIR):
-        base = (st.get_option("server.baseUrlPath") or "").strip("/")
-        return (f"/{base}" if base else "") + f"/app/static/logos/{name}"
+        return _static_logo_src(name)
     return logo_url(ticker)
 
 
@@ -204,8 +220,7 @@ def brand_logo(key: str, domain: str | None) -> str | None:
     if not domain:
         return None
     if name := mirror_brand(key, domain, _STATIC_LOGO_DIR):
-        base = (st.get_option("server.baseUrlPath") or "").strip("/")
-        return (f"/{base}" if base else "") + f"/app/static/logos/{name}"
+        return _static_logo_src(name)
     return brand_logo_url(domain)
 
 
@@ -221,8 +236,7 @@ def asset_logo(name: str) -> str | None:
             dest.write_bytes(src.read_bytes())
     except OSError:
         return None
-    base = (st.get_option("server.baseUrlPath") or "").strip("/")
-    return (f"/{base}" if base else "") + f"/app/static/logos/{name}"
+    return _static_logo_src(name)
 
 
 @st.cache_data(ttl=86400, show_spinner=False)
@@ -230,13 +244,20 @@ def _company_name(ticker: str, watchlist: str) -> str | None:
     for h in load_watchlist(Path(watchlist)):
         if h.ticker.upper() == ticker.upper() and h.name:
             return h.name
-    from stocks.data.crypto import crypto_name
+    # Both fallbacks hit the network on a cold cache (coin list, SEC ticker
+    # map) and render pre-page.run, outside the app-level guard — a dead or
+    # throttled endpoint must degrade to "no name" (callers show the symbol),
+    # not crash the page. The miss isn't cached, so a rerun retries.
+    try:
+        from stocks.data.crypto import crypto_name
 
-    if name := crypto_name(ticker):
-        return name
-    from stocks.data.edgar import title_for
+        if name := crypto_name(ticker):
+            return name
+        from stocks.data.edgar import title_for
 
-    return title_for(ticker)
+        return title_for(ticker)
+    except Exception:
+        return None
 
 
 def company_name(ticker: str) -> str | None:
@@ -406,26 +427,54 @@ export default function (component) {
   if (!input) return
   input.placeholder = (data && data.placeholder) || ""
   const nextValue = (data && data.value) ?? ""
-  if (input.value !== nextValue) input.value = nextValue
+  // Only overwrite the field when the user isn't typing in it — a render whose
+  // run started before the last keystroke echoes the stale value and would
+  // wipe the in-progress query.
+  if (input.value !== nextValue && !input.matches(":focus")) input.value = nextValue
+  if (input.value === nextValue) {
+    // Python echoed exactly what the field shows: the keystroke landed, so
+    // stop re-asserting it.
+    clearTimeout(input._retry)
+    input._retryN = 0
+  }
   if (data && data.blur) {
     // A row click navigated. Clearing only the DOM input is not enough: the
     // frontend widget manager re-sends its stored "value" with every rerun,
     // so the old query would resurrect the dropdown. Sync the clear into
-    // widget state and drop any pending debounce still holding that query.
+    // widget state and drop any pending debounce/retry still holding it.
     clearTimeout(input._timer)
+    clearTimeout(input._retry)
+    input._retryN = 0
     input.value = ""
     setStateValue("value", "")
     input.blur()
   }
   if (!input.dataset.wired) {
     input.dataset.wired = "1"
+    // A keystroke's fragment-rerun request dies when a full app run is in
+    // flight (the run cleared the fragment ids, or fastReruns replaced the
+    // ScriptRunner holding the queued request) — the value never reaches
+    // Python and the dropdown stays closed even though the field shows the
+    // query. Re-assert until a render echoes it back (the ack above); bumping
+    // "nonce" defeats same-value dedup so each retry still forces a rerun.
+    // 12 × 800ms outlasts the slowest throttled-Yahoo page run.
+    const send = (v) => {
+      setStateValue("value", v)
+      clearTimeout(input._retry)
+      if ((input._retryN = (input._retryN || 0) + 1) > 12) return
+      input._retry = setTimeout(() => {
+        setStateValue("nonce", (input._nonce = (input._nonce || 0) + 1))
+        send(input.value)
+      }, 800)
+    }
     input.addEventListener("input", (e) => {
       clearTimeout(input._timer)
+      input._retryN = 0
       const v = e.target.value
-      input._timer = setTimeout(() => setStateValue("value", v), 160)
+      input._timer = setTimeout(() => send(v), 160)
     })
     input.addEventListener("keydown", (e) => {
-      if (e.key === "Enter") { clearTimeout(input._timer); setStateValue("value", e.target.value) }
+      if (e.key === "Enter") { clearTimeout(input._timer); input._retryN = 0; send(e.target.value) }
     })
     // Report focus so Python can show recent searches on an empty, focused
     // field. Blur is delayed so a click on a dropdown row (a Streamlit button
@@ -452,6 +501,8 @@ export default function (component) {
     const results = doc.querySelector(".st-key-topbar_results")
     if (!results || !results.contains(e.target)) return
     clearTimeout(input._timer)
+    clearTimeout(input._retry)
+    input._retryN = 0
     clearTimeout(input._blurTimer)
     results.style.display = "none"
     input.value = ""
@@ -480,6 +531,9 @@ def _live_search_input(*, key: str, placeholder: str) -> tuple[str, bool]:
         width="stretch",
         on_value_change=lambda: None,
         on_focused_change=lambda: None,
+        # "nonce" exists only to force a rerun: the JS bumps it when it retries
+        # a keystroke the server never acked (same "value" would be deduped).
+        on_nonce_change=lambda: None,
     )
     if blur:
         # Just navigated from a row click: the browser input still reports focus
@@ -490,6 +544,31 @@ def _live_search_input(*, key: str, placeholder: str) -> tuple[str, bool]:
         (getattr(result, "value", "") or "").strip(),
         bool(getattr(result, "focused", focused)),
     )
+
+
+def _fuzzy_order(
+    q: str,
+    tickers: list[str],
+    labels: dict[str, str],
+    tag_map: dict[str, tuple],
+) -> list[str]:
+    """Tickers whose symbol, name or tag fuzzy-matches `q`, best score first.
+
+    Typo fallback shared by the top-bar dropdown and the drawer picker; both
+    call it only after exact substring matching came up empty.
+    """
+    if len(q) < MIN_QUERY:
+        return []
+    scored = []
+    for i, t in enumerate(tickers):  # ties keep list order (favorites first)
+        score = max(
+            fuzzy_ratio(q, t.upper()),
+            fuzzy_ratio(q, labels[t].upper()),
+            *(fuzzy_ratio(q, tag.upper()) for tag in tag_map.get(t, ())),
+        )
+        if score >= FUZZY_CUTOFF:
+            scored.append((-score, i, t))
+    return [t for _, _, t in sorted(scored)]
 
 
 def _topbar_matches(raw: str):
@@ -511,7 +590,7 @@ def _topbar_matches(raw: str):
     db = str(auth.db_path())
     held_set = set(held_tickers(db, db_mtime(db)))
     for t in sorted(held_set - set(labels)):
-        labels[t] = t
+        labels[t] = sec_title(t) or t
     order = [t for t in labels if t in fav_set] + [t for t in labels if t not in fav_set]
 
     watch: list[tuple[str, str, str]] = []
@@ -521,6 +600,12 @@ def _topbar_matches(raw: str):
             or q in labels[t].upper()
             or any(q in tag.upper() for tag in tag_map.get(t, ()))
         ):
+            mark = "⭐" if t in fav_set else ("💼" if t in held_set else "")
+            watch.append((t, labels[t], mark))
+    if not watch:
+        # Typo fallback ("oracel"): fuzzy over the same fields, best first.
+        # Only when exact substring found nothing, so it never dilutes results.
+        for t in _fuzzy_order(q, order, labels, tag_map):
             mark = "⭐" if t in fav_set else ("💼" if t in held_set else "")
             watch.append((t, labels[t], mark))
 
@@ -550,7 +635,7 @@ def _recent_rows() -> list[tuple[str, str, str]]:
     held_set = set(held_tickers(db, db_mtime(db)))
     rows = []
     for t in recents:
-        name = labels.get(t, "")
+        name = labels.get(t) or (sec_title(t) if t in held_set else None) or ""
         mark = "⭐" if t in fav_set else ("💼" if t in held_set else "")
         rows.append((t, name if name != t else "", mark))
     return rows
@@ -1069,6 +1154,23 @@ def ticker_table_html(
 
 
 @st.cache_data(ttl=86400, show_spinner=False)
+def sec_title(ticker: str) -> str | None:
+    """Company name for a held-but-unlisted ticker, from the SEC map.
+
+    Without it those rows carry the bare symbol, so a name query ("oracle")
+    can't find an imported ORCL position — and the `t not in labels` dedup
+    then drops the SEC result too, leaving only the Analyze fallback. None
+    (cached, so an offline miss isn't retried per rerun) for non-US symbols.
+    """
+    from stocks.data.edgar import title_for
+
+    try:
+        return title_for(ticker)
+    except Exception:
+        return None
+
+
+@st.cache_data(ttl=86400, show_spinner=False)
 def sec_matches(query: str) -> list[tuple[str, str]]:
     """SEC ticker-map search (symbol or company name) behind the picker.
 
@@ -1244,7 +1346,7 @@ def ticker_picker(
     _db = str(auth.db_path())
     held_set = set(held_tickers(_db, db_mtime(_db)))
     for t in sorted(held_set - set(labels)):
-        labels[t] = t
+        labels[t] = sec_title(t) or t
     # Favorites float to the top of the list; ⭐ marks them in the row.
     tickers = [t for t in labels if t in fav_set]
     tickers += [t for t in labels if t not in fav_set]
@@ -1349,13 +1451,17 @@ def ticker_picker(
         if q
         else tickers
     )
+    if q and not shown:
+        # Typo fallback ("oracel") — same fields, fuzzy, best score first.
+        shown = _fuzzy_order(q, tickers, labels, tag_map)
 
     # The picker renders before page.run(), outside the app-level rate-limit
-    # guard — a throttled Yahoo must dim the change chips, not crash the app.
-    # The miss isn't cached (st.cache_data skips exceptions), so a rerun retries.
+    # guard — a throttled Yahoo or dead network must dim the change chips, not
+    # crash the app (same exception pair the app-level guard catches). The miss
+    # isn't cached (st.cache_data skips exceptions), so a rerun retries.
     try:
         changes = daily_changes(tuple(tickers)) if show_changes else {}
-    except YFRateLimitError:
+    except (YFRateLimitError, URLError):
         changes = {}
 
     # Apply the sort chosen in the popover. "Watchlist" keeps the favorites-first

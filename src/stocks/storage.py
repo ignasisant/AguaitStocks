@@ -191,6 +191,30 @@ def restore_dir(directory: Path) -> None:
         raise
 
 
+def read_key(key: str) -> bytes | None:
+    """One object's bytes by bucket key, or None (missing / storage off).
+
+    For bucket-only data with no local mirror (the Telegram update queue);
+    file-backed data goes through restore().
+    """
+    if not enabled():
+        return None
+    cfg = _config() or {}
+    client = _client()
+    try:
+        return client.get_object(Bucket=cfg["bucket"], Key=key)["Body"].read()
+    except client.exceptions.NoSuchKey:
+        return None
+
+
+def delete_key(key: str) -> None:
+    """Delete one object by bucket key. No-op when storage is unconfigured."""
+    if not enabled():
+        return
+    cfg = _config() or {}
+    _client().delete_object(Bucket=cfg["bucket"], Key=key)
+
+
 def list_keys(prefix: str = "") -> list[str]:
     """All bucket keys under `prefix` ([] when storage is unconfigured).
 

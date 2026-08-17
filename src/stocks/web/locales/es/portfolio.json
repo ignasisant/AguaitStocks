@@ -1,6 +1,7 @@
 {
   "portfolio.no_transactions": "Aún no hay transacciones — sube un CSV de Revolut en la página **Importar**.",
   "portfolio.ledger_no_positions": "El libro tiene filas pero no se pudieron construir posiciones. Revisa la vista previa de Importar.",
+  "portfolio.data_unavailable": "Datos de mercado no disponibles ahora mismo — cambia de pestaña o recarga para reintentar.",
   "portfolio.tab_positions": "Posiciones",
   "portfolio.tab_alloc_risk": "Asignación y riesgo",
   "portfolio.tab_realized_tax": "Realizado y fiscal",
@@ -34,6 +35,7 @@
   "portfolio.return_window": "Ventana de rentabilidad",
   "portfolio.no_positions_analyse": "Sin posiciones abiertas que analizar.",
   "portfolio.loading_prices_profiles": "Cargando precios y perfiles de empresa…",
+  "portfolio.report_failed": "No se pudo generar el informe — falló la descarga de precios y perfiles. Cambia de pestaña o recarga para reintentar.",
   "portfolio.annualised_return": "Rentabilidad anualizada",
   "portfolio.annualised_return_help": "Rentabilidad anual geométrica de la cartera ponderada en la ventana seleccionada.",
   "portfolio.annualised_vol": "Volatilidad anualizada",

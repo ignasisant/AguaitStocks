@@ -7,5 +7,11 @@
   "notify.earnings_7d": "Resultados, próximos 7 días",
   "notify.alerts_subject": "⚠️ Alertas de precio",
   "notify.linked_ok": "✅ Telegram vinculado a Aguait ({email}). Recibirás aquí tus resúmenes y alertas.",
-  "notify.test_message": "👋 Mensaje de prueba de Aguait — las notificaciones funcionan."
+  "notify.test_message": "👋 Mensaje de prueba de Aguait — las notificaciones funcionan.",
+  "notify.tg_linked": "✅ Telegram vinculado a Aguait. Resúmenes, alertas — y puedes chatear con el asistente aquí mismo. Envía /help para ver qué puede hacer.",
+  "notify.chat_not_linked": "Esta cuenta de Telegram aún no está vinculada a Aguait. Abre la app → Perfil → Notificaciones → Conectar Telegram.",
+  "notify.link_failed": "Ese código de vinculación no es válido o ha caducado — genera uno nuevo desde la página de Perfil y vuelve a tocar el enlace.",
+  "notify.chat_help": "Pregúntame lo que quieras sobre tu cartera o los mercados — el mismo asistente que el panel de chat de la app, el mismo hilo de conversación. Las respuestas pueden tardar un minuto. Comandos: /clear reinicia la conversación, /help muestra esto.",
+  "notify.chat_cleared": "🧹 Conversación borrada — es el mismo hilo que en la app, así que allí también.",
+  "notify.chat_error": "Algo ha fallado al responder — inténtalo de nuevo en un momento."
 }

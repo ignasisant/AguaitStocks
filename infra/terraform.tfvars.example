@@ -1,0 +1,30 @@
+# Copy to terraform.tfvars (git-ignored) and fill in. Values marked optional
+# may stay empty — the corresponding GitHub secret is then not created.
+
+# Cloudflare — dashboard -> My Profile -> API Tokens. Needs BOTH:
+#   Account / Workers R2 Storage / Edit
+#   Account / Account API Tokens / Edit   (mints the bucket-scoped S3 token)
+cloudflare_api_token  = ""
+cloudflare_account_id = "" # 32-hex id from the R2 endpoint URL or dashboard sidebar
+
+# GitHub — `gh auth token`, or a PAT with secrets write on the repo
+github_token = ""
+# github_owner = "ignasisant"
+# github_repo  = "AguaitStocks"
+
+# R2 — must match the existing bucket when importing
+# r2_bucket_name = "aguait-user-data"
+
+# Telegram — @BotFather /newbot. NEVER set a webhook on this bot.
+telegram_bot_token = ""
+
+# Optional — digest highlight LLM chain
+chat_enc_key        = "" # must equal Streamlit [chat] enc_key
+free_llm_groq       = ""
+free_llm_cerebras   = ""
+free_llm_openrouter = ""
+
+# Optional — Hugging Face Space deploy (deploy-hf.yml). Token: hf.co settings
+# -> Access Tokens -> write scope. Space id like "ignasi/aguait-stocks".
+hf_token = ""
+hf_space = ""

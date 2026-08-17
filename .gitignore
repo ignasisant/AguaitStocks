@@ -34,6 +34,7 @@ wheels/
 /data/users/
 /data/prefs.json
 /data/chat.json
+/data/tg_updates/
 
 # Notebooks
 .ipynb_checkpoints/

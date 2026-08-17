@@ -87,7 +87,13 @@ bot_username = "${TELEGRAM_BOT_USERNAME:-}"
 
 Then:
   1. Reboot the Streamlit app so it picks up the new secrets.
-  2. Profile page -> Connect Telegram -> press Start in Telegram.
-  3. GitHub -> Actions -> notifications -> Run workflow -> digest.
+  2. Deploy the webhook Worker and set the bot's webhook — see
+     workers/telegram-webhook/README.md (wrangler deploy + secrets, then
+     TELEGRAM_WEBHOOK_SECRET=... uv run stocks telegram-chat --set-webhook <url>).
+  3. Profile page -> Connect Telegram -> press Start in Telegram
+     (the link completes via the telegram chat workflow, ~30-90 s).
+  4. GitHub -> Actions -> notifications -> Run workflow -> digest.
      Message should land in Telegram within ~2 min.
+  5. Chat: message the bot anything — the telegram chat workflow answers
+     with the same assistant as the app's chat panel.
 EOF

@@ -8,8 +8,12 @@ Telegram and left the matching toggle on are yielded. With storage
 unconfigured (local dev) the same discovery runs over the local filesystem,
 so `stocks alerts --all-users` is testable without a bucket.
 
-Write discipline: the cron writes only alerts_state.json. prefs.json and
-watchlist.yaml belong to live app sessions — disjoint writers, no races.
+Write discipline: the alerts/digest crons write only alerts_state.json;
+prefs.json and watchlist.yaml belong to live app sessions. The telegram-chat
+job (stocks.chat.bot) additionally writes prefs.json (link completion, free
+-quota counter) and chat.json — a live web session writing the same files is
+last-write-wins, accepted: the web app hydrates once per session and the
+overlap window is a single turn.
 """
 
 from __future__ import annotations
@@ -59,6 +63,12 @@ class NotifyUser:
     def lang(self) -> str:
         return self.prefs.get("language") or "en"
 
+    @property
+    def chat_path(self) -> Path:
+        """chat.json sibling of prefs — data/chat.json for the owner,
+        data/users/<slug>/chat.json otherwise (matches auth.paths_for)."""
+        return self.prefs_path.with_name("chat.json")
+
 
 def _read_prefs(path: Path) -> dict:
     try:
@@ -88,11 +98,12 @@ def _restore_user_files(*paths: Path) -> None:
         storage.restore(p)
 
 
-def iter_notify_users(kind: str) -> list[NotifyUser]:
-    """Accounts with Telegram linked and `notify_<kind>` enabled, restored.
+def iter_all_users() -> list[NotifyUser]:
+    """Every account, prefs/watchlist/db restored — no telegram/notify filter.
 
-    kind: "digest" | "alerts". The owner (root data/prefs.json + repo-root
-    watchlist.yaml) is just another entry, labelled "owner".
+    The owner (root data/prefs.json + repo-root watchlist.yaml) is just
+    another entry, labelled "owner". chat.json is NOT restored here — the
+    telegram-chat job pulls it lazily, only for accounts that messaged.
     """
     users: list[NotifyUser] = []
 
@@ -130,9 +141,17 @@ def iter_notify_users(kind: str) -> list[NotifyUser]:
             )
         )
 
+    return users
+
+
+def iter_notify_users(kind: str) -> list[NotifyUser]:
+    """Accounts with Telegram linked and `notify_<kind>` enabled, restored.
+
+    kind: "digest" | "alerts".
+    """
     return [
         u
-        for u in users
+        for u in iter_all_users()
         if u.prefs.get("telegram_chat_id") and u.prefs.get(f"notify_{kind}", True)
     ]
 

@@ -1,0 +1,39 @@
+# Deploy — mirror main to the Hugging Face Space that serves the dashboard.
+#
+# The Space (Docker SDK) rebuilds from its git repo on every push; this just
+# force-pushes main there. Space config lives in the README front matter
+# (sdk: docker, app_port: 8501); runtime secrets live in the Space settings
+# (STREAMLIT_SECRETS_TOML), not in this repo.
+#
+# Setup (once):
+#   - create the Space: https://huggingface.co/new-space -> Docker -> blank
+#   - repo secret HF_TOKEN: HF access token with write scope
+#   - repo variable HF_SPACE: space id, e.g. "ignasi/aguait-stocks"
+#   (both managed by infra/ — see github_actions_secret.hf_token)
+# Unset HF_SPACE = job skipped, workflow stays dormant.
+name: deploy-hf
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-hf
+  cancel-in-progress: true
+
+jobs:
+  push-to-space:
+    runs-on: ubuntu-latest
+    if: vars.HF_SPACE != ''
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # full history — Space push rejects shallow clones
+
+      - name: Push to Space
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          HF_SPACE: ${{ vars.HF_SPACE }}
+        run: |
+          git push --force "https://${HF_SPACE%%/*}:${HF_TOKEN}@huggingface.co/spaces/${HF_SPACE}" HEAD:main

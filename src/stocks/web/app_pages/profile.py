@@ -10,6 +10,7 @@ from __future__ import annotations
 import pandas as pd
 import streamlit as st
 
+from stocks import storage
 from stocks.config import load_watchlist
 from stocks.web import auth, i18n, widgets
 from stocks.web.i18n import t as tr
@@ -39,13 +40,25 @@ prefs = auth.load_prefs()
 # every run) are intentional: the watchlist editor keeps unsaved edits across
 # tab switches and the Telegram polling fragment keeps polling while another
 # tab is in front.
+# Deep-linking: another page (e.g. the Home setup card) can request a tab by
+# setting session "profile_tab" to a _TAB_LABELS id before st.switch_page.
+# One-shot — popped into the tabs widget's own keyed state, which then owns
+# the selection (so reruns and manual tab clicks behave normally).
+_TAB_LABELS = {
+    "prefs": f":material/tune: {tr('profile.preferences')}",
+    "iv": f":material/person: {tr('profile.iv_section')}",
+    "watch": f":material/format_list_bulleted: {tr('profile.watchlist')}",
+    "notify": f":material/notifications: {tr('profile.notifications')}",
+}
+_want_tab = st.session_state.pop("profile_tab", None)
+if _want_tab in _TAB_LABELS:
+    st.session_state["profile_tabs"] = _TAB_LABELS[_want_tab]
+# on_change="rerun" makes the tabs a real keyed widget (session-settable);
+# every tab still renders every run — no .open gating — so the watchlist
+# editor and the polling fragment keep their existing behavior, at the cost
+# of one rerun per manual tab switch.
 tab_prefs, tab_iv, tab_watch, tab_notify = st.tabs(
-    [
-        f":material/tune: {tr('profile.preferences')}",
-        f":material/person: {tr('profile.iv_section')}",
-        f":material/format_list_bulleted: {tr('profile.watchlist')}",
-        f":material/notifications: {tr('profile.notifications')}",
-    ]
+    list(_TAB_LABELS.values()), key="profile_tabs", on_change="rerun"
 )
 
 # -------------------------------------------------------------- preferences
@@ -172,9 +185,12 @@ with tab_watch:
 
 # ------------------------------------------------------------ notifications
 # Telegram linking + digest/alert toggles. The linking flow: a one-time code
-# scoped to this session, a t.me deep link, and a polling fragment that
-# watches getUpdates for "/start <code>" — see notify/telegram.py. The cron
-# (notify/fanout.py, GitHub Actions) reads the resulting prefs headless.
+# scoped to this session, written into prefs (mirrored to the bucket) and
+# carried by a t.me deep link; the user's "/start <code>" arrives through the
+# webhook queue, the Actions chat job (stocks/chat/bot.py) matches it and
+# writes telegram_chat_id back into prefs, and the polling fragment below
+# watches its own prefs until the id appears. The crons (notify/fanout.py)
+# read the resulting prefs headless.
 with tab_notify:
     st.caption(tr("profile.notify_caption"))
 
@@ -228,59 +244,76 @@ with tab_notify:
 
         _LINK_TTL = 600  # seconds a pending link code stays valid
 
+        st.markdown(tr("profile.tg_how_body"))
+
         link = st.session_state.get("tg_link")
         if link and _time.time() - link["ts"] > _LINK_TTL:
             link = None
             st.session_state.pop("tg_link", None)
+            # Retire the code server-side too — a stale code must not stay
+            # matchable in prefs after the page stopped waiting for it.
+            fresh = auth.load_prefs()
+            if fresh.pop("tg_link_code", None) is not None:
+                fresh.pop("tg_link_ts", None)
+                auth.save_prefs(fresh)
             st.warning(tr("profile.tg_expired"))
 
         if link is None:
+            st.space("small")
             if st.button(
                 tr("profile.tg_connect"), type="primary", icon=":material/send:"
             ):
                 # Random, session-scoped one-time code: an attacker sending
                 # "/start <guess>" from their own Telegram can only ever match
                 # their own session. Never derive this from the email.
-                st.session_state["tg_link"] = {
-                    "code": _secrets.token_urlsafe(12),
-                    "ts": _time.time(),
-                }
+                code = _secrets.token_urlsafe(12)
+                st.session_state["tg_link"] = {"code": code, "ts": _time.time()}
+                # The code goes into prefs (mirrored to the bucket) so the
+                # Actions chat job can match the incoming "/start <code>".
+                fresh = auth.load_prefs()
+                fresh["tg_link_code"] = code
+                fresh["tg_link_ts"] = int(_time.time())
+                auth.save_prefs(fresh)
                 st.rerun()
         else:
+            st.space("small")
             st.link_button(
                 tr("profile.tg_open"),
                 _tg.deep_link(link["code"]),
                 type="primary",
                 icon=":material/open_in_new:",
             )
+            st.caption(
+                tr(
+                    "profile.tg_manual",
+                    bot=f"@{_tg.bot_username()}",
+                    code=link["code"],
+                )
+            )
+            st.space("small")
 
             @st.fragment(run_every="3s")
             def _tg_poll() -> None:
+                # The "/start <code>" arrives via the webhook queue; the
+                # Actions chat job matches it and writes telegram_chat_id
+                # into this account's prefs.json in the bucket. Poll our own
+                # prefs (bucket first) until the id appears — the job also
+                # sends the in-chat confirmation.
                 pending = st.session_state.get("tg_link")
                 if not pending or _time.time() - pending["ts"] > _LINK_TTL:
                     st.rerun(scope="app")  # expired mid-poll: let the page re-gate
                     return
-                chat = _tg.match_start(_tg.get_updates(), pending["code"])
-                if chat is None:
-                    st.caption(f":material/hourglass_top: {tr('profile.tg_waiting')}")
+                try:
+                    if storage.enabled():
+                        storage.restore(paths.prefs)
+                except Exception:  # noqa: BLE001 — transient; next 3s tick retries
+                    st.caption(f":material/error: {tr('profile.tg_poll_error')}")
                     return
                 fresh = auth.load_prefs()
-                fresh["telegram_chat_id"] = chat["id"]
-                fresh["telegram_username"] = chat.get("username") or ""
-                fresh["telegram_linked_at"] = int(_time.time())
-                auth.save_prefs(fresh)
+                if not fresh.get("telegram_chat_id"):
+                    st.caption(f":material/hourglass_top: {tr('profile.tg_waiting')}")
+                    return
                 st.session_state.pop("tg_link", None)
-                try:
-                    _tg.send_message(
-                        i18n.translate(
-                            "notify.linked_ok", i18n.active_language(),
-                            email=st.user.email,
-                        ),
-                        chat["id"],
-                        parse_mode=None,
-                    )
-                except Exception:  # noqa: BLE001 — linking succeeded regardless
-                    pass
                 st.rerun(scope="app")
 
             _tg_poll()

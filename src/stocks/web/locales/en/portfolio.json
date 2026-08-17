@@ -1,6 +1,7 @@
 {
   "portfolio.no_transactions": "No transactions yet — upload a Revolut CSV on the **Import** page.",
   "portfolio.ledger_no_positions": "Ledger has rows but no positions could be built. Check the Import preview.",
+  "portfolio.data_unavailable": "Market data unavailable right now — switch tabs or reload to retry.",
   "portfolio.tab_positions": "Positions",
   "portfolio.tab_alloc_risk": "Allocation & risk",
   "portfolio.tab_realized_tax": "Realized & tax",
@@ -34,6 +35,7 @@
   "portfolio.return_window": "Return window",
   "portfolio.no_positions_analyse": "No open positions to analyse.",
   "portfolio.loading_prices_profiles": "Loading prices & company profiles…",
+  "portfolio.report_failed": "Couldn't build the report — the price & profile download failed. Switch tabs or reload to retry.",
   "portfolio.annualised_return": "Annualised return",
   "portfolio.annualised_return_help": "Geometric yearly return of the weighted book over the selected window.",
   "portfolio.annualised_vol": "Annualised vol",

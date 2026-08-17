@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
+from urllib.error import URLError
 
 # Streamlit Community Cloud runs this file straight from the repo checkout;
 # make src/ importable there (and pin imports to the source tree locally).
@@ -291,13 +292,16 @@ st.html(
 )
 
 # Badge mover for the Community Cloud "Manage app" / "Hosted with Streamlit"
-# pill (see the CSS fallback in the base style block): it sits fixed
-# bottom-right over the chat panel's send button, so park it bottom-left.
-# The cloud host portals it into a body-level div whose class hashes change
-# per deploy, so match by label text instead and re-anchor the outermost
-# fixed-position ancestor. Scoped to portals OUTSIDE the stApp root: BaseWeb
-# portals (dialogs, dropdowns) also live at body level, but none of them
-# carry these exact labels. Injected async by the host, hence the
+# pill: it sits fixed bottom-right over the chat panel's send button, so park
+# it bottom-left. On Community Cloud the app runs inside a same-origin iframe
+# (src //<host>/~/+/, sandbox includes allow-same-origin) under the cloud
+# shell SPA, and the badge lives in the PARENT shell document — querying our
+# own document never finds it. So walk up to window.parent when reachable and
+# operate there; falls back to our own document when embedded cross-origin or
+# running locally (where no badge exists anyway). The shell's class hashes
+# change per deploy, so match the stable data-testid plus label text, and
+# re-anchor the outermost fixed-position ancestor. The stApp guard only
+# matters in the own-document fallback. Badge mounts async, hence the
 # MutationObserver.
 st.html(
     """
@@ -305,21 +309,28 @@ st.html(
     (function () {
       if (window.__aguaitBadgeMover) return;  /* survive reruns — wire once */
       window.__aguaitBadgeMover = true;
+      let doc = document;
+      try {
+        if (window.parent !== window && window.parent.document.body) {
+          doc = window.parent.document;
+        }
+      } catch (e) { /* cross-origin parent — keep own document */ }
       const LABELS = ["manage app", "hosted with streamlit", "made with streamlit"];
       const move = () => {
-        document.querySelectorAll("button, a").forEach((el) => {
+        doc.querySelectorAll('[data-testid="manage-app-button"], button, a').forEach((el) => {
           if (el.closest('[data-testid="stApp"]')) return;
-          if (!LABELS.includes((el.textContent || "").trim().toLowerCase())) return;
+          if (el.getAttribute("data-testid") !== "manage-app-button" &&
+              !LABELS.includes((el.textContent || "").trim().toLowerCase())) return;
           let fixed = null;
-          for (let n = el; n && n !== document.body; n = n.parentElement) {
-            if (getComputedStyle(n).position === "fixed") fixed = n;
+          for (let n = el; n && n !== doc.body; n = n.parentElement) {
+            if (doc.defaultView.getComputedStyle(n).position === "fixed") fixed = n;
           }
           const target = fixed || el.closest("body > div") || el;
           target.style.setProperty("left", "0.75rem", "important");
           target.style.setProperty("right", "auto", "important");
         });
       };
-      new MutationObserver(move).observe(document.body, {subtree: true, childList: true});
+      new MutationObserver(move).observe(doc.body, {subtree: true, childList: true});
       move();
     })();
     </script>
@@ -604,5 +615,11 @@ try:
     page.run()
 except YFRateLimitError:
     st.warning(tr("common.rate_limited"), icon=":material/hourglass_top:")
+    if st.button(tr("common.retry"), icon=":material/refresh:"):
+        st.rerun()
+except URLError:
+    # DNS/socket failure (offline, VPN drop, wake-from-sleep) from the plain
+    # urllib fetchers (FX, logos). Same degrade-to-banner treatment.
+    st.warning(tr("common.offline"), icon=":material/wifi_off:")
     if st.button(tr("common.retry"), icon=":material/refresh:"):
         st.rerun()

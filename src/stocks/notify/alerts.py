@@ -122,6 +122,14 @@ def check_holding(holding: Holding, df: pd.DataFrame | None = None) -> list[Aler
     return [h for h in hits if h is not None]
 
 
+def _safe_check(holding: Holding) -> list[AlertHit]:
+    """check_holding, isolated: one dead ticker must not abort the whole run."""
+    try:
+        return check_holding(holding)
+    except Exception:
+        return []
+
+
 def check_holdings(
     holdings: list[Holding],
     frames: dict[str, pd.DataFrame] | None = None,
@@ -143,7 +151,7 @@ def check_holdings(
                 hits.extend(check_holding(h, df))
         return hits
     with ThreadPoolExecutor(max_workers=max_workers) as pool:
-        results = pool.map(check_holding, holdings)
+        results = pool.map(_safe_check, holdings)
     return [hit for r in results for hit in r]
 
 

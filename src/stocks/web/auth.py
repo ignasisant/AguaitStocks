@@ -151,6 +151,16 @@ _USER_FILES = (
 )
 
 
+def _persist(path: Path) -> None:
+    """Mirror to the bucket after a committed local write. Cloud failure
+    must not crash the interaction — but surface it: the local copy is
+    fine now and still vanishes on the next container restart."""
+    try:
+        storage.persist(path)
+    except Exception:
+        st.toast(tr("common.sync_failed"), icon=":material/cloud_off:")
+
+
 def _migrate_legacy(paths: UserPaths, legacy_root: Path) -> None:
     """Move an account dir named with the pre-digest slug to its new name.
 
@@ -169,6 +179,9 @@ def _migrate_legacy(paths: UserPaths, legacy_root: Path) -> None:
     if not legacy_root.exists():
         return
     legacy_root.rename(paths.root)
+    # Deliberately storage.persist, not _persist: a failed push must abort
+    # (ensure_user_data fails the login closed) before the old key is
+    # deleted, or the bucket could end up holding neither copy.
     for name in _USER_FILES:
         storage.persist(paths.root / name)  # push under the new key
         storage.persist(legacy_root / name)  # gone locally -> delete old key
@@ -182,17 +195,25 @@ def ensure_user_data(paths: UserPaths, legacy_root: Path | None = None) -> None:
     persisted copies instead of re-seeding. `legacy_root` is the account's
     pre-digest-slug dir; when it still exists (locally or in the bucket) it
     is renamed and re-keyed before anything is restored or seeded.
+
+    A bucket outage here fails closed: falling through to the seeding below
+    would show an empty book whose next save overwrites the account's real
+    cloud data, so the session halts instead and the user retries.
     """
-    if legacy_root is not None:
-        _migrate_legacy(paths, legacy_root)
-    paths.root.mkdir(parents=True, exist_ok=True)
-    storage.restore_once(
-        paths.root,
-        (paths.watchlist, paths.db, paths.last_import, paths.prefs, paths.chat),
-    )
+    try:
+        if legacy_root is not None:
+            _migrate_legacy(paths, legacy_root)
+        paths.root.mkdir(parents=True, exist_ok=True)
+        storage.restore_once(
+            paths.root,
+            (paths.watchlist, paths.db, paths.last_import, paths.prefs, paths.chat),
+        )
+    except Exception:
+        st.error(tr("common.storage_restore_failed"), icon=":material/cloud_off:")
+        st.stop()
     if not paths.watchlist.exists():
         paths.watchlist.write_text(STARTER_WATCHLIST)
-        storage.persist(paths.watchlist)
+        _persist(paths.watchlist)
 
 
 def is_logged_in() -> bool:
@@ -419,7 +440,7 @@ def load_prefs(path: Path | None = None) -> dict:
 def save_prefs(prefs: dict, path: Path | None = None) -> None:
     p = path or user_paths().prefs
     p.write_text(json.dumps(prefs, indent=2))
-    storage.persist(p)
+    _persist(p)
 
 
 # ------------------------------------------------------- recent searches
@@ -593,7 +614,7 @@ def load_chat(path: Path | None = None) -> list[dict]:
 def save_chat(history: list[dict], path: Path | None = None) -> None:
     p = path or user_paths().chat
     p.write_text(json.dumps(history, indent=2))
-    storage.persist(p)
+    _persist(p)
 
 
 def display_currency() -> str:
@@ -659,7 +680,7 @@ def save_watchlist_entries(entries: list[dict], path: Path | None = None) -> Non
 
     raw["watchlist"] = items
     p.write_text(yaml.safe_dump(raw, sort_keys=False, allow_unicode=True))
-    storage.persist(p)
+    _persist(p)
 
 
 # ------------------------------------------------------- favorites and tags
@@ -696,7 +717,7 @@ def _update_entry(ticker: str, mutate, path: Path | None = None) -> dict:
     mutate(entry)
     raw["watchlist"] = items
     p.write_text(yaml.safe_dump(raw, sort_keys=False, allow_unicode=True))
-    storage.persist(p)
+    _persist(p)
     return entry
 
 
@@ -710,6 +731,19 @@ def toggle_favorite(ticker: str, path: Path | None = None) -> bool:
             entry["favorite"] = True
 
     return bool(_update_entry(ticker, _flip, path).get("favorite"))
+
+
+def set_favorite(ticker: str, value: bool, path: Path | None = None) -> None:
+    """Set (not flip) a ticker's favorite flag — chat actions need idempotent
+    semantics: "add to favorites" on an already-favorited ticker is a no-op."""
+
+    def _set(entry: dict) -> None:
+        if value:
+            entry["favorite"] = True
+        else:
+            entry.pop("favorite", None)
+
+    _update_entry(ticker, _set, path)
 
 
 def set_tags(ticker: str, tags: list[str], path: Path | None = None) -> list[str]:

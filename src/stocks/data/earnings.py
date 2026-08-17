@@ -125,8 +125,17 @@ def fetch_earnings(ticker: str) -> tuple[list[date], list[EarningsResult]]:
     future, plus the forward-looking `calendar` entries) lands in the list.
     """
     import yfinance as yf
+    from yfinance.exceptions import YFRateLimitError
 
-    t = yf.Ticker(resolve(ticker))
+    # A dead symbol failing in resolve()/Ticker() must not abort a whole
+    # pool.map in upcoming()/calendar_events() — but rate limits re-raise so
+    # the web app's banner still sees them.
+    try:
+        t = yf.Ticker(resolve(ticker))
+    except YFRateLimitError:
+        raise
+    except Exception:
+        return [], []
     found: set[date] = set()
     results: dict[date, EarningsResult] = {}
     try:

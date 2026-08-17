@@ -80,3 +80,27 @@ def test_existing_lookups_still_work():
     assert edgar.cik_for("AAPL") == "0000320193"
     assert edgar.title_for("NVDA") == "Nvidia Corp"
     assert edgar.title_for("AAPL") == "Apple Inc."
+
+
+def test_fuzzy_typo_falls_back():
+    # No exact tier matches "nvidai"; fuzzy catches the transposition.
+    assert edgar.search_companies("nvidai")[0] == ("NVDA", "Nvidia Corp")
+
+
+def test_fuzzy_multiword_typo():
+    assert edgar.search_companies("bank of amrica")[0][0] == "BAC"
+
+
+def test_fuzzy_dedupes_share_classes():
+    tickers = [t for t, _ in edgar.search_companies("bank of amrica")]
+    assert "BAC-PB" not in tickers and "BML-PG" not in tickers
+
+
+def test_fuzzy_skipped_when_exact_matches():
+    # "a" matches plenty exactly; fuzzy must not run or reorder anything.
+    tickers = [t for t, _ in edgar.search_companies("a")]
+    assert tickers == ["AAPL", "AVGO", "AMD", "ABNB", "BAC", "GOOGL", "GOOG", "NVDA"]
+
+
+def test_fuzzy_needs_min_query_length():
+    assert edgar.search_companies("zz") == []

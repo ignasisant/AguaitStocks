@@ -9,10 +9,11 @@ appending a Platform here; validation, preview and commit are shared.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Callable
 
 from stocks.portfolio import (
+    clicktrade,
     degiro,
     generic,
     ibkr,
@@ -115,6 +116,22 @@ PLATFORMS: tuple[Platform, ...] = (
             data.decode("utf-8-sig")
         ),
         domain="interactivebrokers.com",
+    ),
+    Platform(
+        key="clicktrade",
+        label="ClickTrade / Saxo",
+        file_types=("xlsx", "csv"),
+        hint=(
+            "Export from ClickTrade/SaxoTraderGO → Informes históricos → "
+            "Operaciones ejecutadas (Trades executed) → Excel. Spanish and "
+            "English headers are recognised; symbols map from the Saxo "
+            "exchange code (TEF:xmce → TEF.MC), unknown ones import under "
+            "the ISIN — map those in watchlist.yaml `aliases:`. Dividends "
+            "are in the account statement, not this report; add them "
+            "separately."
+        ),
+        parse=clicktrade.parse,
+        domain="clicktrade.es",
     ),
     Platform(
         key="generic",
