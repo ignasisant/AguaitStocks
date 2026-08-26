@@ -27,10 +27,16 @@ from stocks.data.earnings import (
     group_by_date,
     month_weeks,
 )
-from stocks.web import auth
+from stocks.web import auth, skeletons
 from stocks.web.earnings_ui import calendar_component, render_result_body
 from stocks.web.i18n import t as tr
-from stocks.web.widgets import db_mtime, held_tickers, is_mobile, ticker_table_html
+from stocks.web.widgets import (
+    calendar_css,
+    db_mtime,
+    held_tickers,
+    is_mobile,
+    ticker_table_html,
+)
 from stocks.web.widgets import logo as _logo
 
 st.title(tr("earnings.title"))
@@ -67,7 +73,7 @@ for h in holdings:
 _groups.update(sorted(_tag_groups.items()))
 
 
-@st.cache_data(ttl=6 * 3600, show_spinner=tr("earnings.fetching_dates"))
+@st.cache_data(ttl=6 * 3600, show_spinner=False)
 def _calendar_data(sig: tuple):
     # One parallel yfinance pass -> (upcoming events, past reported results).
     # The calendar places both on their month; the list splits them into two
@@ -77,41 +83,34 @@ def _calendar_data(sig: tuple):
     return calendar_events(holdings)
 
 
+# One parallel pass over the whole watchlist, then a logo lookup per reporting
+# name: the page has nothing to show until both are done. Reserve the body in
+# the shape of the view that is actually coming — phones default to the list,
+# desktop to the month grid — and fill it below.
+_body_slot = (
+    skeletons.reserve("table", rows=8, cols=3)
+    if is_mobile()
+    else skeletons.reserve("calendar", weeks=5, cols=7, cell=96)
+)
 events, results = _calendar_data(tuple(tickers))
 if not events and not results:
-    st.info(tr("earnings.no_dates"))
+    _body_slot.container().info(tr("earnings.no_dates"))
     st.stop()
 
 logos = {t: _logo(t) for t in {e.ticker for e in events} | {r.ticker for r in results}}
 today = date.today()
 imminent = sum(1 for e in events if e.days_until is not None and e.days_until <= 7)
+# Claimed once and reused: the warning and the view below both belong in the
+# body the skeleton was holding open.
+_body = _body_slot.container()
 if imminent:
-    st.warning(tr("earnings.imminent_warning", n=imminent))
+    _body.warning(tr("earnings.imminent_warning", n=imminent))
 
 # ────────────────────────────────────────────────────────────── calendar view
-CAL_CSS = """
-  .earn-cal {width:100%; border-collapse:separate; border-spacing:4px; table-layout:fixed;}
-  .earn-cal th {font-size:0.72rem; text-transform:uppercase; letter-spacing:.06em;
-                color:#827F8C; font-weight:600; padding:0.3rem 0.4rem; text-align:left;}
-  .earn-cal td {border:1px solid #3B3942; border-radius:8px; vertical-align:top;
-                height:96px; padding:0.3rem 0.35rem; width:14.28%;}
-  .earn-cal td.dim {background:rgba(59,57,66,.25);}
-  .earn-cal td.today {background:#301263; border-color:#A98EF7;}
-  .earn-daynum {font-size:0.78rem; color:#696673; font-weight:600; margin-bottom:0.2rem;}
-  .earn-cal td.today .earn-daynum {color:#C6B7FB;}
-  .earn-chip {display:flex; align-items:center; gap:0.3rem; margin:0.12rem 0;
-              padding:0.1rem 0.28rem; border-radius:4px; background:#4E2092;
-              font-size:0.72rem; font-weight:600; line-height:1.3;
-              color:#DED7FD;
-              font-family:var(--st-font, inherit);}
-  .earn-chip.soon {background:rgba(204,64,47,.25); color:#FFD2CB;}
-  .earn-chip img {width:16px; height:16px; border-radius:3px; object-fit:contain;}
-  .earn-chip span {white-space:nowrap; overflow:hidden; text-overflow:ellipsis;}
-  .earn-chip.past {cursor:pointer;}
-  .earn-chip.past:hover {background:#6A2EBF; color:#FEFEFF;}
-  .earn-chip.beat {background:rgba(42,130,0,.35); color:#DBFFD2;}
-  .earn-chip.miss {background:rgba(204,64,47,.25); color:#FFD2CB;}
-"""
+# Seven columns at page width — the shared grid, regular density.
+CAL_CSS = calendar_css(
+    "earn", density="regular", cell_height="96px", cell_width="14.28%"
+)
 
 # Clickable grid: Python hands the finished table HTML over as data, the shared
 # component wires each past chip (data-ticker/data-date) to a {ticker, date}
@@ -324,4 +323,5 @@ def _views() -> None:
         st.caption(tr("earnings.calendar_legend"))
 
 
-_views()
+with _body:
+    _views()

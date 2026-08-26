@@ -16,6 +16,8 @@
   "common.loading": "Loading…",
   "common.rate_limited": "Yahoo Finance is rate-limiting requests right now. Cached data still shows; fresh quotes usually return within a few minutes.",
   "common.offline": "No internet connection. Cached data still shows; check your network and retry.",
+  "common.toast_rate_limited": "Yahoo Finance is rate-limiting — some figures are missing. Usually clears in a few minutes.",
+  "common.toast_offline": "No connection to the data provider — some figures are missing.",
   "common.retry": "Retry",
   "common.sync_failed": "Cloud sync failed — change kept on this device for now.",
   "common.storage_restore_failed": "Cloud storage is unreachable, so sign-in was halted to protect your data. Retry in a few minutes."

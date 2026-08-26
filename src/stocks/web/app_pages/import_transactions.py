@@ -30,7 +30,7 @@ import streamlit as st
 from stocks.portfolio import last_import, platforms
 from stocks.portfolio.ledger import add_many, all_transactions, clear, delete_many
 from stocks.portfolio.validate import known_tickers, validate
-from stocks.web import auth
+from stocks.web import auth, skeletons
 from stocks.web.i18n import t as tr
 from stocks.web.widgets import brand_logo, ticker_table_html
 
@@ -196,21 +196,25 @@ if not result.transactions and not result.skipped:
 # are merely doubled, and makes real split ratios underivable.
 wipe = st.checkbox(tr("import.wipe_checkbox"))
 
-with st.spinner(tr("import.validating")):
-    validation = validate(
-        result,
-        [] if wipe else ledger,
-        known=known_tickers(paths.watchlist, paths.db),
-        lookup=_ticker_exists,
-    )
-
-st.subheader(tr("import.preview", summary=validation.summary))
+# Validation re-derives split ratios and replays every sell against the prior
+# ledger, and looks unknown symbols up live — seconds on a full statement. The
+# preview shimmers as the table it is about to become, heading included, so
+# the commit button below keeps its place on the page.
+_preview = skeletons.reserve("table", rows=6, cols=5, title=True)
+validation = validate(
+    result,
+    [] if wipe else ledger,
+    known=known_tickers(paths.watchlist, paths.db),
+    lookup=_ticker_exists,
+)
 
 importable = validation.importable
-if importable:
-    _tx_table(_tx_frame(importable))
-else:
-    st.warning(tr("import.no_importable"))
+with _preview.container():
+    st.subheader(tr("import.preview", summary=validation.summary))
+    if importable:
+        _tx_table(_tx_frame(importable))
+    else:
+        st.warning(tr("import.no_importable"))
 
 if validation.flagged:
     st.warning(tr("import.rows_with_warnings", n=len(validation.flagged)))

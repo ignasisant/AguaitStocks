@@ -5,6 +5,11 @@ loader in two page modules would double every fetch and price burst. Both
 pages import these instead. Every function is keyed by (db, mtime) —
 `db` isolates concurrent users, `mtime` (widgets.db_mtime) invalidates
 exactly when the ledger file changes; live prices refresh via ttl.
+
+Every loader is `show_spinner=False`: the call site owns the loading state and
+paints a `stocks.web.skeletons` placeholder shaped like the block it is about
+to fill, so a cold cache holds the layout instead of collapsing it behind a
+spinner.
 """
 
 from __future__ import annotations
@@ -40,7 +45,7 @@ def ledger_state(db: str, mtime: float):
     return txs, positions, realized
 
 
-@st.cache_data(ttl=300, show_spinner="Loading live prices…")
+@st.cache_data(ttl=300, show_spinner=False)
 def positions_table(db: str, mtime: float) -> pd.DataFrame:
     """Live-priced EUR positions table (one concurrent price burst via
     market_values_eur), cached so Home, plain reruns and the Realized & tax
@@ -48,14 +53,14 @@ def positions_table(db: str, mtime: float) -> pd.DataFrame:
     return positions_frame_eur(ledger_state(db, mtime)[1])
 
 
-@st.cache_data(ttl=900, show_spinner="Loading recent prices…")
+@st.cache_data(ttl=900, show_spinner=False)
 def basket_history(db: str, mtime: float) -> pd.DataFrame:
     """Fixed-basket daily EUR values (3mo of closes × ECB FX at today's
     quantities) — feeds the day/week/month chips and per-ticker day change."""
     return position_values_history(ledger_state(db, mtime)[1], period="3mo")
 
 
-@st.cache_data(ttl=300, show_spinner="Loading last session moves…")
+@st.cache_data(ttl=300, show_spinner=False)
 def last_session_moves(tickers: tuple[str, ...]) -> dict[str, float]:
     """Cached last regular-session % move per ticker (fast_info burst).
 
@@ -104,7 +109,7 @@ def enriched_positions(db: str, mtime: float) -> pd.DataFrame:
     return tbl.sort_values("weight", ascending=False, na_position="last")
 
 
-@st.cache_data(ttl=3600, show_spinner="Building ledger history…")
+@st.cache_data(ttl=3600, show_spinner=False)
 def ledger_history(fingerprint: tuple, db: str):
     """Full-span daily history from the ledger: injected vs value, TWR, missing.
 

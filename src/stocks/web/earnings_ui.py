@@ -16,6 +16,7 @@ import pandas as pd
 import streamlit as st
 
 from stocks.data.earnings import price_reaction
+from stocks.web import skeletons
 from stocks.web.i18n import t as tr
 
 
@@ -84,25 +85,30 @@ def render_result_body(
         st.info(tr("earnings.no_figures"))
         return
 
-    move = reaction(ticker, iso)
-    m1, m2, m3 = st.columns(3)
-    m1.metric(
-        tr("earnings.reported_eps"),
-        f"{r.reported_eps:.2f}" if r.reported_eps is not None else "—",
-        delta=tr("earnings.surprise_vs_est", pct=f"{r.surprise_pct:+.2f}")
-        if r.surprise_pct is not None
-        else None,
-    )
-    m2.metric(
-        tr("earnings.eps_estimate"),
-        f"{r.eps_estimate:.2f}" if r.eps_estimate is not None else "—",
-    )
-    m3.metric(
-        tr("earnings.price_reaction"),
-        f"{move:+.2f}%" if move is not None else "—",
-        delta=f"{move:+.2f}%" if move is not None else None,
-    )
-    st.caption(tr("earnings.price_reaction_caption"))
+    # The price reaction is a fresh fetch on first open — the three tiles
+    # shimmer so the dialog opens at its final height instead of growing under
+    # the pointer.
+    with skeletons.slot("metrics", n=3) as tiles:
+        move = reaction(ticker, iso)
+        with tiles.container():
+            m1, m2, m3 = st.columns(3)
+            m1.metric(
+                tr("earnings.reported_eps"),
+                f"{r.reported_eps:.2f}" if r.reported_eps is not None else "—",
+                delta=tr("earnings.surprise_vs_est", pct=f"{r.surprise_pct:+.2f}")
+                if r.surprise_pct is not None
+                else None,
+            )
+            m2.metric(
+                tr("earnings.eps_estimate"),
+                f"{r.eps_estimate:.2f}" if r.eps_estimate is not None else "—",
+            )
+            m3.metric(
+                tr("earnings.price_reaction"),
+                f"{move:+.2f}%" if move is not None else "—",
+                delta=f"{move:+.2f}%" if move is not None else None,
+            )
+            st.caption(tr("earnings.price_reaction_caption"))
 
     history = [x for x in results if x.ticker == ticker]
     if len(history) > 1:

@@ -37,7 +37,7 @@ from stocks.analysis.portfolio import (
 )
 from stocks.portfolio import dividends
 from stocks.portfolio.tax_es import fiscal_year, modelo_720_flag
-from stocks.web import auth
+from stocks.web import auth, notices, skeletons
 from stocks.web.i18n import t as tr
 from stocks.web.portfolio_data import (
     basket_history,
@@ -48,7 +48,10 @@ from stocks.web.portfolio_data import (
     positions_table,
 )
 from stocks.web.widgets import (
+    DIVERGING_SCALE,
+    LOSS_BAND,
     LOSS_COLOR,
+    PROFIT_BAND,
     PROFIT_COLOR,
     TEXT_MUTED,
     chart_layout,
@@ -92,17 +95,24 @@ tab_pos, tab_risk, tab_tax, tab_div = st.tabs(
 # concurrently instead of back to back.
 @st.fragment(parallel=True)
 def _positions_section() -> None:
-    with st.container(border=True):
+    # The card is drawn twice: first as a shimmer of the two KPI rows and the
+    # positions table, then — same bordered box, same height — refilled with the
+    # real figures. The two fragments below run in parallel, so without this the
+    # tab would pop into place a section at a time.
+    card = skeletons.reserve("metrics", border=True, title=True, n=(4, 3))
+    # Shared loader (web/portfolio_data.py) — already weight/day-enriched and
+    # weight-sorted; Home shows the same frame, so the price burst is shared.
+    try:
+        tbl = enriched_positions(DB, db_mtime(DB))
+    except (YFRateLimitError, URLError) as exc:
+        notices.data_toast(exc)
+        card.clear()  # the toast is the whole message; no empty card behind it
+        return
+    except Exception:
+        card.container(border=True).warning(tr("portfolio.data_unavailable"))
+        return
+    with card.container(border=True):
         st.subheader(tr("portfolio.open_positions_pl"))
-        # Shared loader (web/portfolio_data.py) — already weight/day-enriched and
-        # weight-sorted; Home shows the same frame, so the price burst is shared.
-        try:
-            tbl = enriched_positions(DB, db_mtime(DB))
-        except (YFRateLimitError, URLError):
-            raise  # app-level banner handles these with a retry button
-        except Exception:
-            st.warning(tr("portfolio.data_unavailable"))
-            return
         if tbl.empty:
             st.caption(tr("portfolio.no_open_positions"))
         else:
@@ -136,8 +146,9 @@ def _positions_section() -> None:
 
             try:
                 vals = basket_history(DB, db_mtime(DB))
-            except (YFRateLimitError, URLError):
-                raise  # app-level banner handles these with a retry button
+            except (YFRateLimitError, URLError) as exc:
+                notices.data_toast(exc)
+                vals = pd.DataFrame()  # 1w/1m read n/a; the table below stands
             except Exception:
                 # Degrade: 1w/1m read n/a; the positions table below still renders.
                 st.warning(tr("portfolio.data_unavailable"))
@@ -196,39 +207,63 @@ def _positions_section() -> None:
             # total P/L stays full color. Crypto is 24/7 so it never dims.
             muted = {t for t in tbl["ticker"] if not market_live(t)}
             day_cols = ("day_eur", "day_pct")
+            # € and % of the same move belong in one cell: "€-97  (-1.1%)",
+            # the percentage as a tinted pill. Halves the desktop column count.
+            pairs = (("day_eur", "day_pct"), ("pnl_eur", "pnl_pct"))
+            labels = {
+                "ticker": tr("portfolio.col_position"),
+                "shares": tr("portfolio.col_shares"),
+                "ccy": tr("portfolio.col_currency"),
+                "cost_eur": tr("portfolio.cost_basis"),
+                "value_eur": tr("portfolio.market_value"),
+                "weight": tr("portfolio.col_weight"),
+                "day_eur": tr("portfolio.today"),
+                "pnl_eur": tr("portfolio.col_total_pl"),
+            }
 
             if _MOBILE:
-                # Dense Revolut-style rows — value + day% on the right, weight and
-                # total P/L in the dim second line; nothing pans horizontally.
-                # Full table one expander below.
+                # Dense Revolut-style rows — value + day% on the right, total
+                # P/L as a pill beside the symbol (the dim line ellipsizes, so a
+                # number there got cut), weight below; nothing pans
+                # horizontally. Full sortable table one expander below.
                 st.html(ticker_table_html(
                     tbl, fmt=fmt, signed=pnl_cols, muted=muted, muted_cols=day_cols,
+                    labels=labels,
                     mobile={"value": "value_eur", "delta": "day_pct",
-                            "sub": ("weight", "pnl_pct"),
-                            "sub_labels": {"pnl_pct": "P/L"}}))
+                            "badge": "pnl_pct", "sub": ("weight",)}))
                 with st.expander(tr("portfolio.all_columns")):
                     st.html(ticker_table_html(
-                        tbl, fmt=fmt, signed=pnl_cols, muted=muted, muted_cols=day_cols))
+                        tbl, fmt=fmt, signed=pnl_cols, muted=muted,
+                        muted_cols=day_cols, pairs=pairs, labels=labels,
+                        sortable="positions"))
             else:
                 st.html(ticker_table_html(
-                    tbl, fmt=fmt, signed=pnl_cols, muted=muted, muted_cols=day_cols))
+                    tbl, fmt=fmt, signed=pnl_cols, muted=muted, muted_cols=day_cols,
+                    pairs=pairs, labels=labels, sortable="positions"))
             st.caption(tr("portfolio.positions_caption"))
 
 
 @st.fragment(parallel=True)
 def _history_section() -> None:
-    with st.container(border=True):
+    # Full-span price history: the slowest fetch on the page on a cold cache.
+    # Reserve the chart's exact height so the tab doesn't grow by 380px under
+    # the reader when it lands.
+    card = skeletons.reserve(
+        "chart", border=True, title=True, height=380, legend=True
+    )
+    try:
+        hist, _, missing = ledger_history(
+            (len(txs), txs[-1].date, date.today()), DB
+        )
+    except (YFRateLimitError, URLError) as exc:
+        notices.data_toast(exc)
+        card.clear()
+        return
+    except Exception:
+        card.container(border=True).warning(tr("portfolio.data_unavailable"))
+        return
+    with card.container(border=True):
         st.subheader(tr("portfolio.injected_vs_value"))
-
-        try:
-            hist, _, missing = ledger_history(
-                (len(txs), txs[-1].date, date.today()), DB
-            )
-        except (YFRateLimitError, URLError):
-            raise  # app-level banner handles these with a retry button
-        except Exception:
-            st.warning(tr("portfolio.data_unavailable"))
-            return
         if hist.empty:
             st.caption(tr("portfolio.not_enough_history"))
         else:
@@ -270,7 +305,7 @@ def _history_section() -> None:
             gain = hist["value_eur"] >= hist["injected_eur"]
             up = hist["value_eur"].where(gain | gain.shift(1, fill_value=False))
             down = hist["value_eur"].where(~gain | (~gain).shift(1, fill_value=False))
-            GREEN_FILL, RED_FILL = "rgba(42,199,126,0.18)", "rgba(240,82,106,0.18)"
+            GREEN_FILL, RED_FILL = PROFIT_BAND, LOSS_BAND
 
             fig = go.Figure()
             fig.add_trace(
@@ -378,20 +413,26 @@ if tab_risk.open:
                 # only, and the cache is shared across sessions — reading the
                 # session's positions through the closure would serve one user's
                 # report to another whose ticker tuple matches.
-                @st.cache_data(
-                    ttl=3600, show_spinner=tr("portfolio.loading_prices_profiles"))
+                @st.cache_data(ttl=3600, show_spinner=False)
                 def _report(period: str, tickers: tuple[str, ...], db: str, mtime: float):
                     pos = ledger_state(db, mtime)[1]
                     held = [p for p in pos if p.ticker in tickers]
                     holds = holdings_from_positions(held)
                     return analyze(period=period, holdings=holds)
 
+                # Prices + company profiles for every held name — the fetch that
+                # gates this whole tab. The four risk KPIs shimmer under the
+                # window selector while it runs, so changing the window doesn't
+                # blank the card down to the dropdown alone.
+                risk_kpis = skeletons.reserve("metrics", n=4)
                 try:
                     rep = _report(period, tickers, DB, db_mtime(DB))
-                except (YFRateLimitError, URLError):
-                    raise  # app-level banner handles these with a retry button
+                except (YFRateLimitError, URLError) as exc:
+                    notices.data_toast(exc)
+                    risk_kpis.clear()
+                    rep = None
                 except Exception:
-                    st.warning(tr("portfolio.report_failed"))
+                    risk_kpis.container().warning(tr("portfolio.report_failed"))
                     rep = None
                 if rep is not None:
                     if choice == FROM_START:
@@ -412,26 +453,28 @@ if tab_risk.open:
                         positions, rep.prices, rep.meta)
                     rep.port_returns = portfolio_returns(rep.returns, rep.weights)
 
-                    c1, c2, c3, c4 = metric_cells(4)
-                    c1.metric(tr("portfolio.annualised_return"), f"{rep.cagr * 100:.1f}%",
-                              help=tr("portfolio.annualised_return_help"))
-                    c2.metric(tr("portfolio.annualised_vol"),
-                              f"{rep.volatility * 100:.1f}%",
-                              help=tr("portfolio.annualised_vol_help"))
-                    c3.metric(tr("portfolio.max_drawdown"),
-                              f"{rep.max_drawdown * 100:.1f}%",
-                              help=tr("portfolio.max_drawdown_help"))
-                    c4.metric(tr("portfolio.effective_names"),
-                              f"{effective_positions(rep.weights):.1f}",
-                              help=tr("portfolio.effective_names_help"))
+                    with risk_kpis.container():
+                        c1, c2, c3, c4 = metric_cells(4)
+                        c1.metric(tr("portfolio.annualised_return"),
+                                  f"{rep.cagr * 100:.1f}%",
+                                  help=tr("portfolio.annualised_return_help"))
+                        c2.metric(tr("portfolio.annualised_vol"),
+                                  f"{rep.volatility * 100:.1f}%",
+                                  help=tr("portfolio.annualised_vol_help"))
+                        c3.metric(tr("portfolio.max_drawdown"),
+                                  f"{rep.max_drawdown * 100:.1f}%",
+                                  help=tr("portfolio.max_drawdown_help"))
+                        c4.metric(tr("portfolio.effective_names"),
+                                  f"{effective_positions(rep.weights):.1f}",
+                                  help=tr("portfolio.effective_names_help"))
 
-                    betas = " · ".join(
-                        f"β {b} {rep.beta_vs(b):.2f}" for b in rep.bench_returns)
-                    if betas:
-                        st.caption(
-                            tr("portfolio.beta_caption", betas=betas,
-                               pct=f"{top_n_weight(rep.weights, 5) * 100:.0f}")
-                        )
+                        betas = " · ".join(
+                            f"β {b} {rep.beta_vs(b):.2f}" for b in rep.bench_returns)
+                        if betas:
+                            st.caption(
+                                tr("portfolio.beta_caption", betas=betas,
+                                   pct=f"{top_n_weight(rep.weights, 5) * 100:.0f}")
+                            )
 
             if rep is not None:
                 with st.container(border=True):
@@ -457,17 +500,26 @@ if tab_risk.open:
                         pie.update_layout(**chart_layout(title=title, height=300))
                         show_chart(pie, container=col)
 
-                with st.container(border=True):
-                    st.subheader(tr("portfolio.cumulative_return"))
-                    try:
-                        _, twr, twr_missing = ledger_history(
-                            (len(txs), txs[-1].date, date.today()), DB
-                        )
-                    except (YFRateLimitError, URLError):
-                        raise  # app-level banner handles these with a retry button
-                    except Exception:
-                        st.warning(tr("portfolio.data_unavailable"))
-                    else:
+                # Same full-span history the Positions tab builds, and cold
+                # whenever the reader opens this tab first — so the card holds
+                # its 420px chart as a shimmer rather than appearing late and
+                # shoving the correlation matrix down the page.
+                cum_card = skeletons.reserve(
+                    "chart", border=True, title=True, height=420, legend=True
+                )
+                try:
+                    _, twr, twr_missing = ledger_history(
+                        (len(txs), txs[-1].date, date.today()), DB
+                    )
+                except (YFRateLimitError, URLError) as exc:
+                    notices.data_toast(exc)
+                    cum_card.clear()  # else-block skipped: no chart
+                except Exception:
+                    cum_card.container(border=True).warning(
+                        tr("portfolio.data_unavailable"))
+                else:
+                    with cum_card.container(border=True):
+                        st.subheader(tr("portfolio.cumulative_return"))
                         # Clip the ledger TWR to the window so it rebases with
                         # the benchmarks.
                         win_start = rep.returns.index[0]
@@ -525,7 +577,7 @@ if tab_risk.open:
                         heat = go.Figure(
                             go.Heatmap(
                                 z=corr.values, x=corr.columns, y=corr.index,
-                                zmin=-1, zmax=1, colorscale="RdBu", reversescale=True,
+                                zmin=-1, zmax=1, colorscale=DIVERGING_SCALE,
                                 hovertemplate=tr("portfolio.hover_correlation"),
                             )
                         )
@@ -594,6 +646,16 @@ if tab_tax.open:
                             },
                             signed=("gain_eur",),
                             left_cols=("buy", "sell"),
+                            sortable="realized",
+                            labels={
+                                "ticker": tr("portfolio.col_position"),
+                                "buy": tr("portfolio.col_bought"),
+                                "sell": tr("portfolio.col_sold"),
+                                "qty": tr("portfolio.col_shares"),
+                                "cost_eur": tr("portfolio.cost_basis"),
+                                "proceeds_eur": tr("portfolio.col_proceeds"),
+                                "gain_eur": tr("portfolio.col_gain"),
+                            },
                         )
                     )
 
@@ -601,8 +663,8 @@ if tab_tax.open:
                 # Positions tab's price burst; unpriced names fall back to cost.
                 try:
                     ptbl = positions_table(DB, db_mtime(DB))
-                except (YFRateLimitError, URLError):
-                    raise  # app-level banner handles these with a retry button
+                except (YFRateLimitError, URLError) as exc:
+                    notices.data_toast(exc)  # else-block skipped: no breakdown
                 except Exception:
                     st.warning(tr("portfolio.data_unavailable"))
                 else:
@@ -641,6 +703,16 @@ if tab_div.open:
                     for yr, d in sorted(years.items())
                 ]
                 st.dataframe(
-                    pd.DataFrame(rows).set_index("year").style.format("€{:,.0f}"),
+                    pd.DataFrame(rows)
+                    .set_index("year")
+                    .rename_axis(tr("portfolio.col_year"))
+                    .rename(columns={
+                        "gross_eur": tr("portfolio.col_gross"),
+                        "withheld_eur": tr("portfolio.col_withheld"),
+                        "net_eur": tr("portfolio.col_net"),
+                        "creditable_eur": tr("portfolio.col_creditable"),
+                        "reclaimable_eur": tr("portfolio.col_reclaimable"),
+                    })
+                    .style.format("€{:,.0f}"),
                 )
                 st.caption(tr("portfolio.dividends_caption"))

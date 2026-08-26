@@ -26,6 +26,7 @@ from stocks.analysis.fundamentals import (
     compute_metrics,
     format_value,
     quarterly_eps,
+    verdict,
     verdict_md,
 )
 from stocks.analysis.indicators import add_indicators
@@ -51,24 +52,44 @@ from stocks.data.insiders import (
 from stocks.formatting import compact_money
 from stocks.portfolio.ledger import all_transactions
 from stocks.portfolio.positions import build as build_positions
-from stocks.web import auth
+from stocks.web import auth, notices, skeletons
 from stocks.web.i18n import t as tr
 from stocks.web.kpi_text import kpi_desc, sources_table
 from stocks.web.widgets import (
+    ACCENT_BAND,
+    BORDER,
     BRAND_ACCENT,
     CANDLE_DOWN,
     CANDLE_UP,
+    CRITICAL_FILL,
     DOWN_COLOR,
     EVENT_LINE,
+    FS_3XL,
+    FS_BASE,
+    FS_DISPLAY,
+    FS_LG,
+    FS_SM,
+    FS_XS,
+    PURPLE_300,
+    PURPLE_800,
+    RADIUS_MD,
+    RADIUS_PILL,
+    RADIUS_SM,
+    RADIUS_XS,
     SMA_FAST,
     SMA_SLOW,
+    SUCCESS_FILL,
+    SURFACE_PAGE,
     TEXT_MUTED,
+    TEXT_PRIMARY,
+    TEXT_SECONDARY,
     UP_COLOR,
     WARN_COLOR,
     chart_layout,
     company_name,
     hover_wrap,
     is_mobile,
+    kpi_grid_html,
     metric_cells,
     show_chart,
     ticker_actions,
@@ -136,7 +157,7 @@ def _trim(df: pd.DataFrame, label: str) -> pd.DataFrame:
     return df[df.index >= df.index[-1] - _WINDOW[label]]
 
 
-@st.cache_data(ttl=300, show_spinner=tr("ticker.loading_history"))
+@st.cache_data(ttl=300, show_spinner=False)
 def _history(t: str, label: str) -> pd.DataFrame:
     period, interval = PERIODS[label]
     df = _trim(add_indicators(fetch_history(t, period=period, interval=interval)), label)
@@ -268,7 +289,7 @@ def _held(db: str):
         return {}
 
 
-@st.cache_data(ttl=300, show_spinner=tr("ticker.loading_position_values"))
+@st.cache_data(ttl=300, show_spinner=False)
 def _position_values_eur(db: str) -> dict[str, float]:
     """Live EUR market value per open position (latest price × ECB spot)."""
     from stocks.analysis.portfolio import market_values_eur
@@ -297,8 +318,9 @@ def _projection(t: str, last_fy: int) -> pd.DataFrame:
     try:
         raw_est = _estimates(t)
         fin_ccy = _raw(t).info.get("financialCurrency")
-    except (YFRateLimitError, URLError):
-        raise  # app-level banner handles these with a retry button
+    except (YFRateLimitError, URLError) as exc:
+        notices.data_toast(exc)
+        return pd.DataFrame()  # no projection overlay this run
     except Exception:
         return pd.DataFrame()
     est_ccy = estimate_currency(raw_est.revenue_estimate) or estimate_currency(
@@ -309,8 +331,9 @@ def _projection(t: str, last_fy: int) -> pd.DataFrame:
     return projection(raw_est, last_fy)
 
 
-# Divider between reported and forecast regions of a chart.
-_FORECAST_DIVIDER = dict(line_dash="dot", line_color="rgba(154,165,181,0.6)")
+# Divider between reported and forecast regions of a chart. Reuses the
+# corporate-event rule token, so every non-data line on a chart is neutral-600.
+_FORECAST_DIVIDER = dict(line_dash="dot", line_color=EVENT_LINE)
 
 
 _fmt_money = compact_money  # shared compact currency label, e.g. $394.3B
@@ -341,27 +364,31 @@ def _pill_html(pct: float, *, small: bool = False) -> str:
     up = pct >= 0
     return (
         '<span style="display:inline-flex;align-items:center;gap:3px;'
-        f"background:{'#2A8200' if up else '#CC402F'};"
-        f"color:{'#DBFFD2' if up else '#FEFEFF'};"
-        f"font-size:{'11px' if small else '12px'};font-weight:600;"
-        f'border-radius:9999px;padding:{"1px 7px" if small else "2px 8px"}">'
+        f"background:{SUCCESS_FILL if up else CRITICAL_FILL};"
+        f"color:{UP_COLOR if up else DOWN_COLOR};"
+        f"font-size:{FS_XS if small else FS_SM};font-weight:600;"
+        f'border-radius:{RADIUS_PILL};padding:{"1px 7px" if small else "2px 8px"}">'
         f"{'↑' if up else '↓'} {pct:+.2f}%</span>"
     )
 
 
 def _muted(txt: str) -> str:
-    return f'<span style="font-size:11px;color:#827F8C">{html.escape(txt)}</span>'
+    return (
+        f'<span style="font-size:{FS_XS};color:{TEXT_MUTED}">'
+        f"{html.escape(txt)}</span>"
+    )
 
 
 def _tile(label: str, value_html: str, note_html: str = "") -> str:
     """One grid tile: muted label over a 16px value, optional caption line.
     Page-tone fill so the tile reads inset inside the section card."""
     return (
-        '<div style="background:#18161C;border:1px solid #3B3942;border-radius:12px;'
+        f'<div style="background:{SURFACE_PAGE};border:1px solid {BORDER};'
+        f"border-radius:{RADIUS_MD};"
         'padding:12px;display:flex;flex-direction:column;gap:4px;align-items:flex-start">'
-        '<span style="font-size:11px;font-weight:500;color:#B3AFBD">'
+        f'<span style="font-size:{FS_XS};font-weight:500;color:{TEXT_SECONDARY}">'
         f"{html.escape(label)}</span>"
-        '<span style="font-size:16px;font-weight:600;line-height:1.2">'
+        f'<span style="font-size:{FS_LG};font-weight:600;line-height:1.2">'
         f"{value_html}</span>"
         + note_html
         + "</div>"
@@ -385,9 +412,9 @@ def _mobile_summary_html(df: pd.DataFrame, sel: str, my_pos, db: str) -> str:
     parts = [
         '<div style="display:flex;align-items:flex-end;gap:10px;flex-wrap:wrap">'
         "<span style=\"font-family:'Epilogue','Instrument Sans',sans-serif;"
-        f'font-weight:700;font-size:32px;line-height:1">{last:,.2f}</span>'
+        f'font-weight:700;font-size:{FS_DISPLAY};line-height:1">{last:,.2f}</span>'
         + _pill_html((last - prev) / prev * 100)
-        + f'<span style="font-size:12px;padding-bottom:2px;'
+        + f'<span style="font-size:{FS_SM};padding-bottom:2px;'
         f'color:{UP_COLOR if period_pct >= 0 else DOWN_COLOR}">'
         + html.escape(tr("ticker.period_change", pct=f"{period_pct:+.2f}%", period=sel))
         + "</span></div>"
@@ -471,7 +498,9 @@ def _price_section(ticker: str) -> None:
     """
     # Reserve the metrics slot above the period buttons: widget values return
     # inline where the widget is defined, but the metrics need the fetched df.
-    metrics_slot = st.container()
+    # It shimmers meanwhile, so switching period leaves the pills sitting on a
+    # placeholder instead of jumping to the top of an empty card.
+    metrics_slot = skeletons.reserve("metrics", n=(1, 2, 2) if _MOBILE else 3)
     # Phones: 8 period pills overflow a 360px viewport — drop the two
     # in-between ranges (6m/2y) there.
     period_opts = (
@@ -510,17 +539,27 @@ def _price_section(ticker: str) -> None:
         )
         chart_type = chart_type or default_chart
 
+    # Second slot, below the controls: the candlestick canvas at its final
+    # height, so the sections under it keep their place across the fetch.
+    chart_slot = skeletons.reserve("chart", height=440, shape="bars", bars=30)
     try:
         df = _history(ticker, sel)
-    except (YFRateLimitError, URLError):
-        raise  # app-level banner handles these with a retry button
+    except (YFRateLimitError, URLError) as exc:
+        # A fragment rerun (period switch) lands here with app.py off the
+        # stack — re-raising would surface Streamlit's crash card.
+        notices.data_toast(exc)
+        metrics_slot.clear()
+        chart_slot.clear()
+        return
     except Exception:
-        st.warning(tr("ticker.history_failed"))
+        metrics_slot.clear()
+        chart_slot.container().warning(tr("ticker.history_failed"))
         return
     # Delisted tickers return an empty frame without raising; the metrics
     # below index the last two closes.
     if df.empty or len(df["Close"].dropna()) < 2:
-        st.info(tr("ticker.history_empty"))
+        metrics_slot.clear()
+        chart_slot.container().info(tr("ticker.history_empty"))
         return
     db = str(auth.db_path())
     ledger_txs = _ledger(db)
@@ -533,9 +572,12 @@ def _price_section(ticker: str) -> None:
     prev = float(df["Close"].iloc[-2])
     if _MOBILE:
         # Phone summary per the design: price hero + 2×2 position tiles.
-        metrics_slot.html(_mobile_summary_html(df, sel, my_pos, db))
+        # Built before the slot is claimed: _mobile_summary_html triggers its
+        # own position-values fetch, which belongs under the shimmer.
+        summary = _mobile_summary_html(df, sel, my_pos, db)
+        metrics_slot.container().html(summary)
     else:
-        with metrics_slot:
+        with metrics_slot.container():
             # One row: price/RSI/SMA plus the position block when the ticker
             # is held.
             cols = metric_cells(7 if my_pos else 3)
@@ -623,7 +665,7 @@ def _price_section(ticker: str) -> None:
         # White triangles with a canvas-dark outline per the design — the
         # markers must read against candles of either color.
         for action, symbol, color in (
-            ("buy", "triangle-up", "#F9F9FA"),
+            ("buy", "triangle-up", TEXT_PRIMARY),
             ("sell", "triangle-down", DOWN_COLOR),
         ):
             pts = [
@@ -665,7 +707,7 @@ def _price_section(ticker: str) -> None:
                     name=tr("ticker.my_buys") if action == "buy" else tr("ticker.my_sells"),
                     marker=dict(
                         symbol=symbol, size=12, color=color,
-                        line=dict(width=1.5, color="#18161C"),
+                        line=dict(width=1.5, color=SURFACE_PAGE),
                     ),
                     customdata=customdata,
                     hovertemplate=hovertemplate,
@@ -701,7 +743,7 @@ def _price_section(ticker: str) -> None:
                 name=name,
                 marker=dict(
                     symbol="diamond", size=7, color=color,
-                    line=dict(width=1, color="#18161C"),
+                    line=dict(width=1, color=SURFACE_PAGE),
                 ),
                 customdata=[hover_wrap(txt) for _, txt in pts],
                 hovertemplate="%{customdata}<extra></extra>",
@@ -717,7 +759,7 @@ def _price_section(ticker: str) -> None:
         hovermode="x unified",
     )
     fig.update_xaxes(rangebreaks=_rangebreaks(df, PERIODS[sel][1]))
-    show_chart(fig)
+    show_chart(fig, container=chart_slot.container())
 
     # Card footer per the design: the most recent buy at a glance — size @
     # price · date · return to the current price (· blended average cost).
@@ -745,12 +787,16 @@ def _price_section(ticker: str) -> None:
         if _MOBILE:
             # The design's phone frame boxes this line in its own inset tile.
             line = re.sub(
-                r"\*\*(.+?)\*\*", r'<strong style="color:#F9F9FA">\1</strong>', line
+                r"\*\*(.+?)\*\*",
+                rf'<strong style="color:{TEXT_PRIMARY}">\1</strong>',
+                line,
             )
             st.html(
                 '<div style="display:flex;align-items:flex-start;gap:8px;'
-                "background:#18161C;border:1px solid #3B3942;border-radius:12px;"
-                'padding:12px;font-size:12px;color:#B3AFBD;line-height:1.45">'
+                f"background:{SURFACE_PAGE};border:1px solid {BORDER};"
+                f"border-radius:{RADIUS_MD};"
+                f'padding:12px;font-size:{FS_SM};color:{TEXT_SECONDARY};'
+                'line-height:1.45">'
                 '<span style="flex-shrink:0">▲</span><span>' + line + "</span></div>"
             )
         else:
@@ -774,8 +820,11 @@ def _header_html() -> str:
     if src:
         parts.append(
             f'<img src="{html.escape(src)}" alt="" style="width:{logo_px}px;'
-            f"height:{logo_px}px;border-radius:8px;background:#FEFEFF;"
-            "border:1px solid #3B3942;box-sizing:border-box;"
+            f"height:{logo_px}px;border-radius:{RADIUS_SM};"
+            # Opaque plate behind transparent brand marks — neutral-50, the
+            # lightest step on the DS ramp.
+            f"background:{TEXT_PRIMARY};"
+            f"border:1px solid {BORDER};box-sizing:border-box;"
             f'padding:{4 if _MOBILE else 5}px;object-fit:contain">'
         )
     show_name = label.upper() != ticker
@@ -783,31 +832,34 @@ def _header_html() -> str:
         # Phones stack symbol over the name (the design's compact app bar);
         # min-width:0 + ellipsis keep long names from pushing the badge off.
         name_line = (
-            '<span style="font-size:12px;color:#827F8C;overflow:hidden;'
+            f'<span style="font-size:{FS_SM};color:{TEXT_MUTED};overflow:hidden;'
             f'text-overflow:ellipsis;white-space:nowrap">{html.escape(label)}</span>'
             if show_name
             else ""
         )
         parts.append(
             '<div style="display:flex;flex-direction:column;min-width:0">'
-            f'<span style="font-size:16px;font-weight:600">{html.escape(ticker)}</span>'
+            f'<span style="font-size:{FS_LG};font-weight:600">'
+            f"{html.escape(ticker)}</span>"
             + name_line
             + "</div>"
         )
     else:
         parts.append(
-            '<h1 style="font-size:28px;font-weight:600;line-height:1.21;'
+            f'<h1 style="font-size:{FS_3XL};font-weight:600;line-height:1.21;'
             f'padding:0;margin:0">{html.escape(ticker)}</h1>'
         )
         if show_name:
             parts.append(
-                f'<span style="font-size:14px;color:#827F8C">{html.escape(label)}</span>'
+                f'<span style="font-size:{FS_BASE};color:{TEXT_MUTED}">'
+                f"{html.escape(label)}</span>"
             )
     if ticker in _held(str(auth.db_path())):
         # Purple-800 fill / purple-300 text — the DS brand badge pair on dark.
         parts.append(
-            '<span style="background:#4E2092;color:#DED7FD;font-size:11px;'
-            "font-weight:600;border-radius:4px;padding:2px 8px;white-space:nowrap;"
+            f'<span style="background:{PURPLE_800};color:{PURPLE_300};'
+            f"font-size:{FS_XS};font-weight:600;border-radius:{RADIUS_XS};"
+            "padding:2px 8px;white-space:nowrap;"
             f'{"margin-left:auto" if _MOBILE else ""}">'
             f'{html.escape(tr("ticker.in_portfolio"))}</span>'
         )
@@ -846,6 +898,8 @@ def _crypto_section(t: str) -> None:
     """Asset stats for a coin — the crypto stand-in for the fundamentals,
     insiders and comps blocks, none of which exist for crypto."""
     st.subheader(tr("ticker.asset_stats"))
+    # The coin snapshot is a live yfinance info call; four tiles held open.
+    box = skeletons.reserve("metrics", n=4)
     info = _crypto_info(t)
     _, quote = split_pair(t) or (t, "USD")
     sym = {"USD": "$", "EUR": "€", "GBP": "£"}.get(quote, "")
@@ -855,17 +909,19 @@ def _crypto_section(t: str) -> None:
     hi, lo = info.get("fiftyTwoWeekHigh"), info.get("fiftyTwoWeekLow")
     na = tr("ticker.na")
 
-    c1, c2, c3, c4 = metric_cells(4)
-    c1.metric(tr("ticker.market_cap"), compact_money(cap, sym) if cap else na)
-    c2.metric(tr("ticker.volume_24h"), compact_money(vol, sym) if vol else na)
-    c3.metric(
-        tr("ticker.circulating_supply"), compact_money(supply, "") if supply else na
-    )
-    c4.metric(
-        tr("ticker.range_52w"),
-        f"{lo:,.0f} – {hi:,.0f}" if lo and hi else na,
-    )
-    st.caption(tr("ticker.crypto_caption", quote=quote))
+    with box.container():
+        c1, c2, c3, c4 = metric_cells(4)
+        c1.metric(tr("ticker.market_cap"), compact_money(cap, sym) if cap else na)
+        c2.metric(tr("ticker.volume_24h"), compact_money(vol, sym) if vol else na)
+        c3.metric(
+            tr("ticker.circulating_supply"),
+            compact_money(supply, "") if supply else na,
+        )
+        c4.metric(
+            tr("ticker.range_52w"),
+            f"{lo:,.0f} – {hi:,.0f}" if lo and hi else na,
+        )
+        st.caption(tr("ticker.crypto_caption", quote=quote))
 
 
 # Crypto pairs stop after price + stats: statements, Form 4 filings and
@@ -977,7 +1033,7 @@ def _annual_combined_chart(fin: pd.DataFrame, proj: pd.DataFrame) -> None:
                         mode="lines",
                         line=dict(width=0),
                         fill="tonexty",
-                        fillcolor="rgba(201, 166, 218, 0.15)",
+                        fillcolor=ACCENT_BAND,
                         hoverinfo="skip",
                         showlegend=False,
                     )
@@ -1111,17 +1167,26 @@ def _financials_section(ticker: str, fin: pd.DataFrame, proj: pd.DataFrame) -> N
     _annual_combined_chart(fin, proj)
 
 
-# Annual revenue / profit / EPS trend, straight under the price chart.
-with st.spinner(tr("ticker.loading_financials", ticker=ticker)):
-    try:
-        fin = annual_financials(_raw(ticker))
-    except (YFRateLimitError, URLError):
-        raise  # app-level banner handles these with a retry button
-    except Exception:
-        fin = pd.DataFrame()  # the section below self-hides on empty
-if not fin.empty:
-    with st.container(border=True):
-        proj = _projection(ticker, int(fin.index[-1]))
+# Annual revenue / profit / EPS trend, straight under the price chart. The
+# statement pull and the consensus projection are two more round trips, so the
+# card shimmers its grouped bars until both are in.
+_fin_card = skeletons.reserve(
+    "chart", border=True, height=320, shape="bars", bars=12, legend=True
+)
+try:
+    fin = annual_financials(_raw(ticker))
+except (YFRateLimitError, URLError) as exc:
+    notices.data_toast(exc)
+    fin = pd.DataFrame()  # the section below self-hides on empty
+except Exception:
+    fin = pd.DataFrame()  # the section below self-hides on empty
+if fin.empty:
+    _fin_card.clear()  # no statements for this name — the card never appears
+else:
+    # Fetched before the slot is claimed so the estimates round trip also
+    # happens under the shimmer.
+    proj = _projection(ticker, int(fin.index[-1]))
+    with _fin_card.container(border=True):
         _financials_section(ticker, fin, proj)
 
 
@@ -1136,45 +1201,50 @@ def _fx_usd_eur() -> tuple[float, str]:
     return usd_eur()
 
 
-def _kpi(col, label: str, key: str, help: str | None = None) -> None:
-    """Metric + colored rule-of-thumb verdict caption beneath it.
+def _kpi(label: str, key: str, help: str | None = None) -> tuple:
+    """One `kpi_grid_html` tile spec: (label, value, verdict, tooltip).
 
     Tooltip defaults to the plain-language definition in KPI_SOURCES; pass
     `help` only to override it (e.g. the PEG reliability warning).
     """
-    tip = help or (kpi_desc(key) if key in KPI_SOURCES else None)
-    col.metric(label, format_value(key, mets[key]), help=tip)
-    col.caption(verdict_md(key, mets[key]))
+    return (
+        label,
+        format_value(key, mets[key]),
+        verdict(key, mets[key]),
+        help or (kpi_desc(key) if key in KPI_SOURCES else None),
+    )
 
 
-with st.container(border=True):
+# Nine KPI tiles off one metrics computation — reserved at full width so the
+# valuation card below doesn't ride up while it lands.
+_fund_card = skeletons.reserve("metrics", border=True, title=True, n=9)
+try:
+    mets = _metrics(ticker)
+except (YFRateLimitError, URLError) as exc:
+    notices.data_toast(exc)
+    mets = {}
+except Exception:
+    mets = {}
+
+with _fund_card.container(border=True):
     st.subheader(tr("ticker.fundamentals"))
-    with st.spinner(tr("ticker.loading_fundamentals", ticker=ticker)):
-        try:
-            mets = _metrics(ticker)
-        except (YFRateLimitError, URLError):
-            raise  # app-level banner handles these with a retry button
-        except Exception:
-            mets = {}
-
     if not mets:
         st.caption(tr("ticker.fundamentals_failed"))
     else:
-        st.caption(tr("ticker.verdict_tags"))
-
-        # Single dense KPI row — one metric height for the whole fundamentals
-        # block. On phones the 9 tiles wrap 3 per row instead of stacking
-        # full-width.
-        kpi_cols = metric_cells(9)
-        _kpi(kpi_cols[0], tr("ticker.kpi_pe_ttm"), "pe_ttm")
-        _kpi(kpi_cols[1], tr("ticker.kpi_pe_fwd"), "pe_fwd")
-        _kpi(kpi_cols[2], tr("ticker.kpi_peg"), "peg", help=tr("ticker.kpi_peg_help"))
-        _kpi(kpi_cols[3], tr("ticker.kpi_ev_ebitda"), "ev_ebitda")
-        _kpi(kpi_cols[4], tr("ticker.kpi_ev_sales"), "ev_sales")
-        _kpi(kpi_cols[5], tr("ticker.kpi_roic"), "roic")
-        _kpi(kpi_cols[6], tr("ticker.kpi_fcf_yield"), "fcf_yield")
-        _kpi(kpi_cols[7], tr("ticker.kpi_net_debt_ebitda"), "net_debt_ebitda")
-        _kpi(kpi_cols[8], tr("ticker.kpi_dilution"), "share_dilution")
+        # One HTML grid, not nine Streamlit tiles: the verdict has to sit on
+        # the value's line to be unmistakably ITS verdict, and Streamlit's
+        # wrapping metric row can't do that (see kpi_grid_html).
+        st.html(kpi_grid_html([
+            _kpi(tr("ticker.kpi_pe_ttm"), "pe_ttm"),
+            _kpi(tr("ticker.kpi_pe_fwd"), "pe_fwd"),
+            _kpi(tr("ticker.kpi_peg"), "peg", help=tr("ticker.kpi_peg_help")),
+            _kpi(tr("ticker.kpi_ev_ebitda"), "ev_ebitda"),
+            _kpi(tr("ticker.kpi_ev_sales"), "ev_sales"),
+            _kpi(tr("ticker.kpi_roic"), "roic"),
+            _kpi(tr("ticker.kpi_fcf_yield"), "fcf_yield"),
+            _kpi(tr("ticker.kpi_net_debt_ebitda"), "net_debt_ebitda"),
+            _kpi(tr("ticker.kpi_dilution"), "share_dilution"),
+        ]))
 
         if mets.get("market_cap") and mets.get("currency") == "USD":
             try:
@@ -1218,100 +1288,105 @@ def _valuation_section(ticker: str) -> None:
     / premium-vs-average KPIs recomputed for the selected range. A fragment:
     flipping the range redraws only this block."""
     st.subheader(tr("ticker.valuation_history"))
-    with st.spinner(tr("ticker.loading_pe", ticker=ticker)):
-        source, pe = _pe_history(ticker)
-    if pe.empty:
-        st.caption(tr("ticker.pe_insufficient"))
-        return
+    # Rebuilding the P/E series walks ten years of closes against the TTM EPS
+    # known on each of those days — slow enough on a cold cache that the card
+    # would otherwise sit as a bare heading. _pe_history swallows its own
+    # failures (empty series), so the slot below is always claimed.
+    box = skeletons.reserve("chart", height=260, title=True)
+    source, pe = _pe_history(ticker)
+    with box.container():
+        if pe.empty:
+            st.caption(tr("ticker.pe_insufficient"))
+            return
 
-    rng = (
-        st.segmented_control(
-            tr("ticker.pe_range"),
-            list(_PE_RANGES),
-            default="5y",
-            key="pe_range_sel",
-            label_visibility="collapsed",
+        rng = (
+            st.segmented_control(
+                tr("ticker.pe_range"),
+                list(_PE_RANGES),
+                default="5y",
+                key="pe_range_sel",
+                label_visibility="collapsed",
+            )
+            or "5y"
         )
-        or "5y"
-    )
-    row = window_stats(pe, windows={rng: _PE_RANGES[rng]}).loc[rng]
-    view = pe[pe.index >= pe.index.max() - pd.Timedelta(days=_PE_RANGES[rng])]
-    cur, avg = float(row["current"]), float(row["mean"])
-    prem, pctl = row["premium"] * 100, float(row["percentile"])
+        row = window_stats(pe, windows={rng: _PE_RANGES[rng]}).loc[rng]
+        view = pe[pe.index >= pe.index.max() - pd.Timedelta(days=_PE_RANGES[rng])]
+        cur, avg = float(row["current"]), float(row["mean"])
+        prem, pctl = row["premium"] * 100, float(row["percentile"])
 
-    c1, c2, c3 = metric_cells(3)
-    c1.metric(
-        tr("ticker.kpi_pe_current"),
-        f"{cur:.1f}",
-        help=tr("ticker.kpi_pe_current_help"),
-    )
-    c1.caption(verdict_md("pe_ttm", cur))
-    c2.metric(
-        tr("ticker.kpi_pe_avg", rng=rng),
-        f"{avg:.1f}",
-        help=tr("ticker.kpi_pe_avg_help"),
-    )
-    c3.metric(
-        tr("ticker.kpi_pe_premium"),
-        f"{prem:+.1f}%",
-        help=tr("ticker.kpi_pe_premium_help"),
-    )
-    # Own-history read off the percentile (same 80/20 bands as
-    # pe_history.interpret, but localized).
-    pctl_txt = tr("ticker.pe_percentile", p=f"{pctl:.0f}")
-    if pctl >= 80:
-        c3.caption(f":red[{tr('ticker.pe_above_avg')}] · {pctl_txt}")
-    elif pctl <= 20:
-        c3.caption(f":green[{tr('ticker.pe_below_avg')}] · {pctl_txt}")
-    else:
-        c3.caption(f":gray[{tr('ticker.pe_inline_avg')}] · {pctl_txt}")
-
-    # Around earnings the two P/Es legitimately diverge: Yahoo's TTM EPS picks
-    # up a press-released quarter weeks before its 10-Q/10-K lands in EDGAR,
-    # while this series only steps on filing dates. Flag gaps >20% so the
-    # mismatch reads as data vintage, not a bug.
-    try:
-        fund_pe = _metrics(ticker).get("pe_ttm")
-    except Exception:
-        fund_pe = None
-    if fund_pe and fund_pe > 0 and cur > 0 and abs(cur - fund_pe) / fund_pe > 0.20:
-        st.warning(
-            tr(
-                "ticker.pe_divergence",
-                cur=f"{cur:.1f}",
-                fund=f"{fund_pe:.1f}",
-                diff=f"{abs(cur - fund_pe) / fund_pe * 100:.0f}",
-            ),
-            icon="⚠️",
+        c1, c2, c3 = metric_cells(3)
+        c1.metric(
+            tr("ticker.kpi_pe_current"),
+            f"{cur:.1f}",
+            help=tr("ticker.kpi_pe_current_help"),
         )
-
-    fig = go.Figure()
-    fig.add_trace(
-        go.Scatter(
-            x=view.index,
-            y=view.values,
-            name="P/E",
-            mode="lines",
-            line=dict(color=BRAND_ACCENT, width=1.8),
-            hovertemplate="P/E  <b>%{y:.1f}</b><extra></extra>",
+        c1.caption(verdict_md("pe_ttm", cur))
+        c2.metric(
+            tr("ticker.kpi_pe_avg", rng=rng),
+            f"{avg:.1f}",
+            help=tr("ticker.kpi_pe_avg_help"),
         )
-    )
-    fig.add_hline(
-        y=avg,
-        line_dash="dash",
-        line_width=1,
-        line_color=TEXT_MUTED,
-        annotation_text=tr("ticker.pe_avg_line", avg=f"{avg:.1f}"),
-        annotation_position="top left",
-        annotation_font=dict(size=11, color=TEXT_MUTED),
-    )
-    fig.update_layout(
-        **chart_layout(title=tr("ticker.chart_pe_title"), height=260),
-        hovermode="x unified",
-        yaxis=dict(fixedrange=True),
-    )
-    show_chart(fig)
-    st.caption(tr("ticker.pe_caption", source=source))
+        c3.metric(
+            tr("ticker.kpi_pe_premium"),
+            f"{prem:+.1f}%",
+            help=tr("ticker.kpi_pe_premium_help"),
+        )
+        # Own-history read off the percentile (same 80/20 bands as
+        # pe_history.interpret, but localized).
+        pctl_txt = tr("ticker.pe_percentile", p=f"{pctl:.0f}")
+        if pctl >= 80:
+            c3.caption(f":red[{tr('ticker.pe_above_avg')}] · {pctl_txt}")
+        elif pctl <= 20:
+            c3.caption(f":green[{tr('ticker.pe_below_avg')}] · {pctl_txt}")
+        else:
+            c3.caption(f":gray[{tr('ticker.pe_inline_avg')}] · {pctl_txt}")
+
+        # Around earnings the two P/Es legitimately diverge: Yahoo's TTM EPS picks
+        # up a press-released quarter weeks before its 10-Q/10-K lands in EDGAR,
+        # while this series only steps on filing dates. Flag gaps >20% so the
+        # mismatch reads as data vintage, not a bug.
+        try:
+            fund_pe = _metrics(ticker).get("pe_ttm")
+        except Exception:
+            fund_pe = None
+        if fund_pe and fund_pe > 0 and cur > 0 and abs(cur - fund_pe) / fund_pe > 0.20:
+            st.warning(
+                tr(
+                    "ticker.pe_divergence",
+                    cur=f"{cur:.1f}",
+                    fund=f"{fund_pe:.1f}",
+                    diff=f"{abs(cur - fund_pe) / fund_pe * 100:.0f}",
+                ),
+                icon="⚠️",
+            )
+
+        fig = go.Figure()
+        fig.add_trace(
+            go.Scatter(
+                x=view.index,
+                y=view.values,
+                name="P/E",
+                mode="lines",
+                line=dict(color=BRAND_ACCENT, width=1.8),
+                hovertemplate="P/E  <b>%{y:.1f}</b><extra></extra>",
+            )
+        )
+        fig.add_hline(
+            y=avg,
+            line_dash="dash",
+            line_width=1,
+            line_color=TEXT_MUTED,
+            annotation_text=tr("ticker.pe_avg_line", avg=f"{avg:.1f}"),
+            annotation_position="top left",
+            annotation_font=dict(size=11, color=TEXT_MUTED),
+        )
+        fig.update_layout(
+            **chart_layout(title=tr("ticker.chart_pe_title"), height=260),
+            hovermode="x unified",
+            yaxis=dict(fixedrange=True),
+        )
+        show_chart(fig)
+        st.caption(tr("ticker.pe_caption", source=source))
 
 
 with st.container(border=True):
@@ -1324,14 +1399,20 @@ def _moat(t: str) -> MoatScore:
     return moat_score(_raw(t))
 
 
-with st.container(border=True):
+# One tile for the composite plus one per pillar — the count is known from
+# PILLAR_WEIGHTS before the score is, so the placeholder is the exact row.
+_moat_card = skeletons.reserve(
+    "metrics", border=True, title=True, n=len(PILLAR_WEIGHTS) + 1
+)
+try:
+    moat = _moat(ticker)
+except (YFRateLimitError, URLError) as exc:
+    notices.data_toast(exc)
+    moat = None
+except Exception:
+    moat = None
+with _moat_card.container(border=True):
     st.subheader(tr("ticker.moat"))
-    try:
-        moat = _moat(ticker)
-    except (YFRateLimitError, URLError):
-        raise  # app-level banner handles these with a retry button
-    except Exception:
-        moat = None
     if moat is None or moat.score is None:
         st.caption(tr("ticker.moat_insufficient"))
     else:
@@ -1358,12 +1439,14 @@ def _insiders(t: str):
     return insider_transactions(t)
 
 
-with st.container(border=True):
+# Form 4 filings come from EDGAR, not the yfinance cache, so this is its own
+# round trip — four summary tiles reserved while it runs.
+_ins_card = skeletons.reserve("metrics", border=True, title=True, n=4)
+txs = _insiders(ticker)
+
+with _ins_card.container(border=True):
     st.subheader(tr("ticker.insider_activity"))
     st.caption(tr("ticker.insider_caption"))
-    with st.spinner(tr("ticker.loading_form4", ticker=ticker)):
-        txs = _insiders(ticker)
-
     if not txs:
         st.caption(tr("ticker.no_form4"))
     else:
@@ -1487,8 +1570,10 @@ with st.container(border=True):
     peers += [p for p in picked if p not in peers]
     peers += [p.strip().upper() for p in extra.split(",") if p.strip() and p.strip().upper() not in peers]
     if peers:
-        with st.spinner(tr("ticker.loading_peers")):
-            rows = [mets] + [_metrics(p) for p in peers]
+        # One metrics pull per peer, serial — the table shimmers with a column
+        # per picked name so adding a peer doesn't blank the comparison.
+        _comp_slot = skeletons.reserve("table", rows=8, cols=len(peers) + 1)
+        rows = [mets] + [_metrics(p) for p in peers]
         # Tickers run across the columns here, so the logo+symbol cell goes in
         # the header (no company name — comps stay compact); KPI labels keep the
         # index column. Medals mark the best composite cross-sectional ranks.
@@ -1498,7 +1583,9 @@ with st.container(border=True):
             (f"{medals[t]}&nbsp;" if t in medals else "") + ticker_cell(t, name=False)
             for t in comp.columns
         ]
-        st.html(ticker_table_html(comp, ticker_col=None, show_index=True))
+        _comp_slot.container().html(
+            ticker_table_html(comp, ticker_col=None, show_index=True)
+        )
         if medals:
             st.caption(tr("ticker.medals_caption"))
     else:

@@ -26,8 +26,15 @@ from yfinance.exceptions import YFRateLimitError  # noqa: E402
 from stocks.web import auth  # noqa: E402
 from stocks.web import chat_core  # noqa: E402
 from stocks.web import i18n  # noqa: E402
+from stocks.web import notices  # noqa: E402
+from stocks.web import skeletons  # noqa: E402
 from stocks.web.i18n import t as tr  # noqa: E402
-from stocks.web.widgets import is_mobile, render_topbar, ticker_picker  # noqa: E402
+from stocks.web.widgets import (  # noqa: E402
+    ds_vars_css,
+    is_mobile,
+    render_topbar,
+    ticker_picker,
+)
 
 # Aguait — Catalan "estar a l'aguait": to be on the lookout.
 _ASSETS = Path(__file__).parent / "assets"
@@ -41,6 +48,12 @@ st.logo(
     icon_image=str(_ASSETS / "aguait-icon.svg"),
     size="large",
 )
+
+# Design tokens first: every stylesheet below (and on every page, and inside
+# the CCv2 shadow roots) reads its colors, radii, elevations and type steps
+# from the `--ag-*` custom properties this emits. widgets.py owns the values;
+# nothing downstream writes a raw hex. Must precede the blocks that use them.
+st.html(ds_vars_css())
 
 # Dense layout: kill Streamlit's default top padding and wide element gaps so
 # charts and metrics sit high and tight instead of floating in whitespace.
@@ -86,8 +99,8 @@ st.html(
            (z 999999, widgets.py) and chat launcher (z 1000000,
            chat_core.py) instead of sliding under them. */
         section[data-testid="stSidebar"] {z-index: 1000001 !important;}
-        [data-testid="stMetricLabel"] p {font-size: 0.8rem;}
-        [data-testid="stCaptionContainer"] p {font-size: 0.8rem;}
+        [data-testid="stMetricLabel"] p {font-size: var(--ag-fs-sm);}
+        [data-testid="stCaptionContainer"] p {font-size: var(--ag-fs-sm);}
         /* Phone metric rows (metric_cells) are wrapping horizontal containers of
            fixed-width tiles. Streamlit under-sizes each tile's flex box, so the
            verdict caption under the last wrapped row spills ~14px past the row
@@ -120,21 +133,23 @@ st.html(
          green/red Streamlit puts on the delta div. */
       [data-testid="stMetricValue"] {
         font-family: 'Epilogue', 'Instrument Sans', sans-serif;
-        font-weight: 700; font-size: 1.35rem; line-height: 1.1;
+        font-weight: 700; font-size: var(--ag-fs-xl); line-height: 1.1;
       }
-      [data-testid="stMetricLabel"] p {font-size: 0.72rem; font-weight: 500; color: #B3AFBD;}
+      [data-testid="stMetricLabel"] p {
+        font-size: var(--ag-fs-sm); font-weight: 500; color: var(--ag-text-secondary);
+      }
       [data-testid="stMetricDelta"] {
-        font-size: 0.78rem; font-weight: 600;
-        border-radius: 9999px; padding: 1px 8px; width: fit-content;
+        font-size: var(--ag-fs-xs); font-weight: 600;
+        border-radius: var(--ag-radius-pill); padding: 1px 8px; width: fit-content;
       }
       [data-testid="stMetricDelta"]:has([data-testid="stMetricDeltaIcon-Up"]) {
-        background: #2A8200; color: #DBFFD2 !important;
+        background: var(--ag-success-fill); color: var(--ag-up) !important;
       }
       [data-testid="stMetricDelta"]:has([data-testid="stMetricDeltaIcon-Down"]) {
-        background: #CC402F; color: #FEFEFF !important;
+        background: var(--ag-critical-fill); color: var(--ag-down) !important;
       }
-      [data-testid="stCaptionContainer"] p {font-size: 0.75rem; margin-bottom: 0;}
-      h1 {font-size: 1.7rem; padding: 0.2rem 0;}
+      [data-testid="stCaptionContainer"] p {font-size: var(--ag-fs-xs); margin-bottom: 0;}
+      h1 {font-size: var(--ag-fs-3xl); padding: 0.2rem 0;}
       h2, h3 {padding: 0.2rem 0; margin-top: 0.3rem;}
       hr {margin: 0.4rem 0;}
       /* Section cards (st.container(border=True)) follow the design's card
@@ -145,10 +160,10 @@ st.html(
          one only by computed style — the tagger script below stamps
          .aguait-card on main-area blocks that carry a border. */
       [data-testid="stMainBlockContainer"] [data-testid="stVerticalBlock"].aguait-card {
-        background: #28262D;
-        border-color: #3B3942;
-        border-radius: 16px;
-        box-shadow: 0px 2px 4px rgba(0, 0, 0, 0.35);
+        background: var(--ag-surface-card);
+        border-color: var(--ag-border);
+        border-radius: var(--ag-radius-lg);
+        box-shadow: var(--ag-shadow-card);
         padding: 1.1rem 1.2rem;
       }
       [data-testid="stElementToolbar"] {display: none;}
@@ -169,37 +184,39 @@ st.html(
          path bubble off the plot. NOTE: never write a left angle bracket
          anywhere inside this style block, not even in a comment — DOMPurify
          silently drops the WHOLE block when its text contains one. */
-      .js-plotly-plot .hoverlayer .hovertext > rect {rx: 12px; ry: 12px;}
+      .js-plotly-plot .hoverlayer .hovertext > rect {
+        rx: var(--ag-radius-md); ry: var(--ag-radius-md);
+      }
       .js-plotly-plot .hoverlayer .hovertext > rect,
       .js-plotly-plot .hoverlayer .hovertext > path {
-        filter: drop-shadow(0px 2px 6px rgba(0, 0, 0, 0.45));
+        filter: drop-shadow(var(--ag-shadow-hover));
       }
       /* Left-menu rows per the design: 6px radius, 13px/500 labels in muted
          neutral-400 with a 2px accent slot on the left; the active page gets
          the purple-900 fill, the purple-500 accent bar and full-strength
          text. aria-current marks the active link (Streamlit sets it). */
       [data-testid="stSidebarNavLink"] {
-        border-radius: 6px;
+        border-radius: var(--ag-radius-sm);
         border-left: 2px solid transparent;
         margin: 1px 8px 1px 0;
         padding-top: 0.3rem; padding-bottom: 0.3rem;
       }
       [data-testid="stSidebarNavLink"] span {
-        color: #B3AFBD; font-size: 13px; font-weight: 500;
+        color: var(--ag-text-secondary); font-size: var(--ag-fs-md); font-weight: 500;
       }
-      [data-testid="stSidebarNavLink"]:hover {background: #28262D;}
+      [data-testid="stSidebarNavLink"]:hover {background: var(--ag-surface-card);}
       [data-testid="stSidebarNavLink"][aria-current="page"] {
-        background: #301263;
-        border-left-color: #A98EF7;
+        background: var(--ag-purple-900);
+        border-left-color: var(--ag-brand-accent);
       }
       [data-testid="stSidebarNavLink"][aria-current="page"] span {
-        color: #F9F9FA; font-weight: 600;
+        color: var(--ag-text-primary); font-weight: 600;
       }
       /* Nav group labels (Cartera / Mercado / Cuenta): tiny tracked caps in
          neutral-600, like the design's section headers. */
       [data-testid="stNavSectionHeader"] {
-        font-size: 10px; font-weight: 500; letter-spacing: 0.06em;
-        text-transform: uppercase; color: #696673;
+        font-size: var(--ag-fs-2xs); font-weight: 500; letter-spacing: 0.06em;
+        text-transform: uppercase; color: var(--ag-text-faint);
       }
       /* Selector chips — the design's time-range buttons, applied to every
          segmented control and pills group: detached outlined chips instead of
@@ -209,33 +226,57 @@ st.html(
       [data-testid="stButtonGroup"] > div[data-orientation] {gap: 4px;}
       [data-testid="stButtonGroup"] button[data-variant="segmented_control"],
       [data-testid="stButtonGroup"] button[data-variant="pills"] {
-        border: 1px solid #3B3942;
-        border-radius: 8px;
+        border: 1px solid var(--ag-border);
+        border-radius: var(--ag-radius-sm);
         background: transparent;
         padding: 5px 14px;
         transition: border-color 100ms ease-in-out, background 100ms ease-in-out;
       }
       [data-testid="stButtonGroup"] button[data-variant="segmented_control"] p,
       [data-testid="stButtonGroup"] button[data-variant="pills"] p {
-        color: #B3AFBD; font-size: 13px; font-weight: 600;
+        color: var(--ag-text-secondary); font-size: var(--ag-fs-md); font-weight: 600;
       }
       [data-testid="stButtonGroup"] button[data-variant="segmented_control"]:hover,
       [data-testid="stButtonGroup"] button[data-variant="pills"]:hover {
-        border-color: #696673;
+        border-color: var(--ag-text-faint);
         background: transparent;
       }
       [data-testid="stButtonGroup"] button[data-variant="segmented_control"][data-selected="true"],
       [data-testid="stButtonGroup"] button[data-variant="pills"][data-selected="true"] {
-        background: #301263;
-        border-color: #A98EF7;
+        background: var(--ag-purple-900);
+        border-color: var(--ag-brand-accent);
       }
       [data-testid="stButtonGroup"] button[data-variant="segmented_control"][data-selected="true"] p,
       [data-testid="stButtonGroup"] button[data-variant="pills"][data-selected="true"] p {
-        color: #C6B7FB;
+        color: var(--ag-purple-400);
+      }
+      /* Toasts (stocks.web.notices — transient data-fetch notices) park
+         bottom-LEFT. Streamlit anchors the container top-right, where it lands
+         on the topbar search; bottom-right is the chat launcher's corner. The
+         container is position:fixed with top/right from the theme and an inline
+         top when the header is offset, so every side needs !important. The
+         3.5rem lift clears the Community Cloud "Manage app" badge, which the
+         script below parks bottom-left too (it lives in the parent shell
+         document, so it paints over this iframe regardless of z-index).
+         Toasts stack downward via margin-top; column-reverse keeps the newest
+         one nearest the bottom edge instead of drifting up the viewport. */
+      [data-testid="stToastContainer"] {
+        top: auto !important;
+        bottom: 3.5rem !important;
+        right: auto !important;
+        left: 0 !important;
+        flex-direction: column-reverse !important;
+        align-items: flex-start !important;
       }
     </style>
     """
 )
+
+# Loading skeletons (stocks.web.skeletons) — every fetching section shimmers a
+# placeholder in its own shape instead of a spinner. Its style block lives with
+# the shapes it paints; injected here so it is on the page before any page body
+# runs, and once per rerun rather than once per skeleton.
+st.html(skeletons.CSS)
 
 # Mobile KPI figures. metric_cells packs the headline numbers into ~110px
 # fixed-width tiles on phones, where the 1.35rem base value (€112,432) overruns
@@ -249,7 +290,9 @@ if is_mobile():
     st.html(
         """
         <style>
-          [data-testid="stMetricValue"] {font-size: 0.9rem !important; line-height: 1.15;}
+          [data-testid="stMetricValue"] {
+            font-size: var(--ag-fs-md) !important; line-height: 1.15;
+          }
           [data-testid="stMetricValue"],
           [data-testid="stMetricValue"] * {
             overflow: visible !important; text-overflow: clip !important;
@@ -285,6 +328,93 @@ st.html(
       };
       new MutationObserver(tag).observe(document.body, {subtree: true, childList: true});
       tag();
+    })();
+    </script>
+    """,
+    unsafe_allow_javascript=True,
+)
+
+# Click-to-sort for the HTML ticker tables (widgets.ticker_table_html with a
+# `sortable` id). Those tables are pandas Styler markup, not st.dataframe, so
+# they had no sorting at all — but every body cell ships a data-s attribute
+# holding its RAW value, so sorting is a pure DOM reorder here: no rerun, no
+# refetch, no re-render of the 20-row price burst behind it. The chosen
+# column/direction lives in sessionStorage per table id, so a rerun (tab
+# switch, widget change) re-applies it to the freshly rendered table instead
+# of snapping back to weight order. Numeric columns open on descending
+# (biggest position/gain first); text columns open A→Z. Blanks ("n/a" prices)
+# always sort last, whichever direction.
+st.html(
+    r"""
+    <script>
+    (function () {
+      if (window.__aguaitTableSort) return;  /* survive reruns — wire once */
+      window.__aguaitTableSort = true;
+      let store = null;
+      try { store = window.sessionStorage; } catch (e) { /* blocked — no memory */ }
+      const cell = (row, ci) => {
+        const td = row.querySelector("td.col" + ci);
+        return td ? (td.getAttribute("data-s") || "") : "";
+      };
+      const numeric = (rows, ci) => rows.every((r) => {
+        const v = cell(r, ci);
+        return v === "" || !isNaN(Number(v));
+      });
+      const apply = (table, ci, dir) => {
+        const body = table.tBodies[0];
+        if (!body) return;
+        const rows = Array.from(body.rows);
+        const num = numeric(rows, ci);
+        rows.sort((a, b) => {
+          const x = cell(a, ci), y = cell(b, ci);
+          if (x === "" || y === "") return x === y ? 0 : (x === "" ? 1 : -1);
+          const c = num ? Number(x) - Number(y) : x.localeCompare(y);
+          return dir === "desc" ? -c : c;
+        });
+        rows.forEach((r) => body.appendChild(r));
+        table.querySelectorAll("th[data-ag-dir]")
+             .forEach((th) => th.removeAttribute("data-ag-dir"));
+        table.querySelectorAll("th .ag-arrow").forEach((e) => e.remove());
+        const th = table.querySelector("thead th.col" + ci);
+        if (th) {
+          th.setAttribute("data-ag-dir", dir);
+          const arrow = document.createElement("span");
+          arrow.className = "ag-arrow";
+          arrow.textContent = dir === "desc" ? " \u2193" : " \u2191";
+          th.appendChild(arrow);
+        }
+      };
+      const wire = () => {
+        document
+          .querySelectorAll("[data-ag-sort] table:not([data-ag-wired])")
+          .forEach((table) => {
+            table.setAttribute("data-ag-wired", "1");
+            const key = "ag-sort:" +
+              table.closest("[data-ag-sort]").getAttribute("data-ag-sort");
+            const heads = table.querySelectorAll("thead th.col_heading");
+            heads.forEach((th) => {
+              const m = /\bcol(\d+)\b/.exec(th.className);
+              if (!m) return;
+              const ci = Number(m[1]);
+              th.addEventListener("click", () => {
+                const rows = Array.from(table.tBodies[0].rows);
+                const first = numeric(rows, ci) ? "desc" : "asc";
+                const prev = (store && store.getItem(key) || "").split(":");
+                const dir = (Number(prev[0]) === ci && prev[1] === first)
+                  ? (first === "desc" ? "asc" : "desc")
+                  : first;
+                if (store) store.setItem(key, ci + ":" + dir);
+                apply(table, ci, dir);
+              });
+            });
+            const saved = (store && store.getItem(key) || "").split(":");
+            if (saved.length === 2 && saved[0] !== "") {
+              apply(table, Number(saved[0]), saved[1]);
+            }
+          });
+      };
+      new MutationObserver(wire).observe(document.body, {subtree: true, childList: true});
+      wire();
     })();
     </script>
     """,
@@ -376,14 +506,14 @@ st.html(
       section[data-testid="stSidebar"][aria-expanded="false"] [data-testid="stSidebarContent"] {
         width: var(--rail-w);
         overflow-x: hidden;
-        background: #18161C;                 /* opaque panel tone over the page */
+        background: var(--ag-surface-page); /* opaque panel tone over the page */
         transition: width 180ms ease;
       }
       section[data-testid="stSidebar"][aria-expanded="false"]:hover [data-testid="stSidebarContent"] {
         width: var(--rail-open);
         overflow-y: auto;
-        box-shadow: 6px 0 2.5rem rgba(0,0,0,.5);
-        border-right: 1px solid #3B3942;
+        box-shadow: 6px 0 2.5rem var(--ag-shadow-color-strong);
+        border-right: 1px solid var(--ag-border);
       }
 
       /* ---- Rail glyph-only state (collapsed, not hovered) ---- */
@@ -438,7 +568,7 @@ st.html(
         justify-content: center;
         margin-left: -14px; margin-right: -14px;
         padding-right: 0; gap: 0;
-        font-size: 9px; letter-spacing: 0.04em;
+        font-size: var(--ag-fs-3xs); letter-spacing: 0.04em;
       }
       section[data-testid="stSidebar"][aria-expanded="false"]:not(:hover) [data-testid="stNavSectionHeader"] > div {
         display: none;
@@ -455,8 +585,9 @@ st.html(
       section[data-testid="stSidebar"] [data-testid="stSidebarNavLink"] [data-testid="stIconMaterial"],
       section[data-testid="stSidebar"] [data-testid="stSidebarNavLink"] > span:first-child,
       section[data-testid="stSidebar"] [data-testid="stSidebarNavLink"] > span:first-child span {
-        font-size: 1.6rem !important;
-        width: 1.6rem !important; height: 1.6rem !important;
+        font-size: var(--ag-icon-nav) !important;
+        width: var(--ag-icon-nav) !important;
+        height: var(--ag-icon-nav) !important;
       }
 
       /* Minimized rail carries only the app logo + nav glyphs. Hide the whole
@@ -613,13 +744,9 @@ if auth.is_logged_in():
 # while every cached section keeps rendering.
 try:
     page.run()
-except YFRateLimitError:
-    st.warning(tr("common.rate_limited"), icon=":material/hourglass_top:")
-    if st.button(tr("common.retry"), icon=":material/refresh:"):
-        st.rerun()
-except URLError:
-    # DNS/socket failure (offline, VPN drop, wake-from-sleep) from the plain
-    # urllib fetchers (FX, logos). Same degrade-to-banner treatment.
-    st.warning(tr("common.offline"), icon=":material/wifi_off:")
-    if st.button(tr("common.retry"), icon=":material/refresh:"):
-        st.rerun()
+except (YFRateLimitError, URLError) as exc:
+    # Backstop only: the fetching sections catch this pair themselves and
+    # degrade in place (they must — a fragment rerun never re-enters this
+    # file, see stocks.web.notices). What still lands here is a fetch in the
+    # non-fragment page body; the toast explains the gap in what did render.
+    notices.data_toast(exc)

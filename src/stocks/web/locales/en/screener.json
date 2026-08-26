@@ -3,7 +3,6 @@
   "screener.watchlist_empty": "Watchlist empty. Add tickers on the **Profile** page.",
   "screener.only_crypto": "Only crypto on the watchlist — the KPI screener needs stocks.",
   "screener.crypto_excluded": "{n} crypto asset(s) excluded — no fundamentals to screen.",
-  "screener.loading_fundamentals": "Loading fundamentals for the whole watchlist…",
   "screener.screen_filters": "Screen & filters",
   "screener.screen": "Screen",
   "screener.rank_by": "Rank by",

@@ -22,12 +22,200 @@ from yfinance.exceptions import YFRateLimitError
 from stocks.config import Alert, load_watchlist
 from stocks.data.logo import brand_logo_url, logo_url, mirror_brand, mirror_logo
 from stocks.fuzzy import FUZZY_CUTOFF, MIN_QUERY, fuzzy_ratio
-from stocks.web import auth
+from stocks.web import auth, notices, skeletons
 from stocks.web.i18n import t as tr
 
+# ─────────────────────────────────────────────────── Aguait design tokens
+# Single source of truth for every color, radius, elevation and type step the
+# Streamlit theme (.streamlit/config.toml) can't reach — our own HTML, CCv2
+# component CSS and Plotly figures. Values are Amphora Web DS tokens and MUST
+# stay in lockstep with config.toml, which paints Streamlit's own chrome from
+# the same ramp. Nothing outside this block may write a raw hex: Python code
+# imports these names, CSS reads the `--ag-*` custom properties DS_VARS_CSS
+# emits from them (see ds_vars_css), so a token change lands everywhere at once.
+
+# Semantic — market direction. Reserved for price change only; the light
+# success/critical fills are the variants that read on a dark surface.
+UP_COLOR = "#DBFFD2"    # alza — market gain (DS success fill)
+DOWN_COLOR = "#FFD2CB"  # baja — market loss (DS critical fill)
+SUCCESS_FILL = "#2A8200"    # DS success highlight — gain pill/badge background
+CRITICAL_FILL = "#CC402F"   # DS critical stroke — loss pill/badge background
+WARN_COLOR = "#F4C600"      # aviso — caution (DS caution highlight)
+WARN_ORANGE = "#EF752E"     # warning (DS orange) — secondary chart accent
+INFO_COLOR = "#7290F0"      # info — chart lines, informational (DS blue 500)
+INFO_DEEP = "#4667D0"       # DS chart blue 600 — second info step
+
+# Brand purple ramp. BRAND_CTA/BRAND_ACCENT keep their historic names; the
+# numbered steps match the DS scale the config.toml comments already cite.
+PURPLE_900 = "#301263"  # active nav row / active chip fill
+PURPLE_800 = "#4E2092"  # brand badge fill, active chip border
+PURPLE_700 = "#6A2EBF"  # hover state on purple fills
+BRAND_CTA = "#7F3FE8"   # purple 600 — CTAs, primary buttons, focus rings
+BRAND_ACCENT = "#A98EF7"  # purple 500 — accents, active iconography, links
+PURPLE_400 = "#C6B7FB"  # accent text on purple fills
+PURPLE_300 = "#DED7FD"  # primary text on purple fills, mono/code
+
+# Neutral ramp — surfaces, borders, text. Mirrors config.toml's
+# backgroundColor / secondaryBackgroundColor / borderColor / textColor.
+SURFACE_PAGE = "#18161C"    # neutral-950 — page and sidebar background
+SURFACE_CARD = "#28262D"    # neutral-900 — elevated surface (cards, inputs)
+BORDER = "#3B3942"          # neutral-800 — borders, dividers, table rules
+TEXT_PRIMARY = "#F9F9FA"    # neutral-50 — primary text (also the logo plate)
+TEXT_SECONDARY = "#B3AFBD"  # neutral-400 — widget labels, secondary body
+TEXT_MUTED = "#827F8C"      # neutral-500 — captions, chart axes, company names
+TEXT_FAINT = "#696673"      # neutral-600 — section headers, separators, rules
+
+# Back-compat aliases — every green/red profit-loss cue routes through these.
+PROFIT_COLOR, LOSS_COLOR = UP_COLOR, DOWN_COLOR
+
+# Price-chart series hues. The DS ships no mid-tone green/red (its pairs are a
+# dark fill plus a light text tint), and a candle body needs one that carries
+# on the neutral-950 plot floor without stealing UP/DOWN, which stay reserved
+# for text and badges. These two are therefore the one sanctioned extension —
+# every other chart hue below is a straight DS token.
+CANDLE_UP = "#7ED28C"    # bullish candles — DS success, mid step
+CANDLE_DOWN = "#F0897E"  # bearish candles — DS critical, mid step
+SMA_FAST = WARN_ORANGE   # SMA20 overlay — DS orange
+SMA_SLOW = INFO_COLOR    # SMA50 overlay + results markers — DS blue 500
+EVENT_LINE = TEXT_FAINT  # dashed corporate-event verticals — neutral-600
+
+# Alpha variants. Written as rgba() because Plotly's SVG attributes predate
+# 8-digit hex; the base hue is always the token named in the comment.
+PROFIT_COLOR_MUTED = "rgba(219,255,210,0.45)"  # UP_COLOR @ 45%
+LOSS_COLOR_MUTED = "rgba(255,210,203,0.45)"    # DOWN_COLOR @ 45%
+PROFIT_BAND = "rgba(42,130,0,0.35)"      # SUCCESS_FILL @ 35% — area fills
+LOSS_BAND = "rgba(204,64,47,0.25)"       # CRITICAL_FILL @ 25% — area fills
+ACCENT_BAND = "rgba(169,142,247,0.15)"   # BRAND_ACCENT @ 15% — forecast bands
+WARN_BAND = "rgba(244,198,0,0.18)"       # WARN_COLOR @ 18% — caution chip fill
+SURFACE_SUNKEN = "rgba(59,57,66,0.25)"   # BORDER @ 25% — out-of-range cells
+RULE_SOFT = "rgba(59,57,66,0.5)"         # BORDER @ 50% — dense row dividers
+SURFACE_CARD_HAZE = "rgba(40,38,45,0.97)"  # SURFACE_CARD @ 97% — Plotly hover
+SURFACE_PAGE_HAZE = "rgba(24,22,28,0.92)"  # SURFACE_PAGE @ 92% — sticky topbar
+CTA_GLOW = "rgba(127,63,232,0.25)"       # BRAND_CTA @ 25% — launcher shadow
+CTA_HALO = "rgba(127,63,232,0.4)"        # BRAND_CTA @ 40% — avatar shadow
+CTA_TINT = "rgba(127,63,232,0.16)"       # BRAND_CTA @ 16% — user bubble fill
+CTA_TINT_EDGE = "rgba(127,63,232,0.35)"  # BRAND_CTA @ 35% — user bubble border
+SKELETON_BASE = "rgba(105,102,115,0.25)"  # TEXT_FAINT @ 25% — shimmer trough
+SKELETON_HI = "rgba(105,102,115,0.45)"    # TEXT_FAINT @ 45% — shimmer crest
+TRANSPARENT = "rgba(0,0,0,0)"            # Plotly canvas — inherit the surface
+
+# Elevation. The DS has no shadow token, so the app defines three steps and
+# uses nothing else; all three are neutral black over the purple-tinted
+# surfaces, matching the design's soft-dark cards. The two bare colors exist
+# for the side-anchored panels (the sidebar rail, the chat drawer), whose
+# shadow must throw sideways — they compose their own offsets and take only
+# the tint from here, so every elevation in the app still shares one palette.
+SHADOW_COLOR = "rgba(0,0,0,0.35)"                # card-level tint
+SHADOW_COLOR_STRONG = "rgba(0,0,0,0.5)"          # overlay-level tint
+SHADOW_CARD = f"0px 2px 4px {SHADOW_COLOR}"      # section cards
+SHADOW_HOVER = "0px 2px 6px rgba(0,0,0,0.45)"    # Plotly hover box (as filter)
+SHADOW_OVERLAY = f"0 10px 28px {SHADOW_COLOR_STRONG}"  # dropdowns, popovers
+
+# Radius scale — config.toml's baseRadius (8px) is the middle step.
+RADIUS_XS = "4px"       # logo chips, calendar chips, small badges
+RADIUS_SM = "8px"       # inputs, buttons, nav rows, table cells
+RADIUS_MD = "12px"      # inset tiles, chat bubbles, Plotly hover box
+RADIUS_LG = "16px"      # section cards
+RADIUS_PILL = "9999px"  # delta pills
+
+# Type scale — config.toml's headingFontSizes (28/22/18/16/14/12) extended
+# down with the three chrome steps the app needs. px, like the DS scale, so a
+# baseFontSize change never silently rescales our own HTML.
+FS_3XS = "9px"    # dense calendar day numbers
+FS_2XS = "10px"   # tracked nav-section caps, chart tick labels
+FS_XS = "11px"    # captions, tile labels, small pills
+FS_SM = "12px"    # metric labels, muted secondary lines
+FS_MD = "13px"    # nav rows, selector chips, table cells
+FS_BASE = "14px"  # body (config.toml baseFontSize)
+FS_LG = "16px"    # tile values
+FS_XL = "18px"    # h3 / KPI figures
+FS_2XL = "22px"   # h2
+FS_3XL = "28px"   # h1
+FS_DISPLAY = "32px"  # hero price figure (Epilogue), one step above h1
+
+# Icon sizing is its own dimension, not a type step: a Material glyph takes
+# its size from font-size, and the wrapper spans' width/height must match it
+# exactly or the row height shifts. One token keeps all three in step.
+ICON_NAV = "1.6rem"  # sidebar nav glyphs, identical in every rail state
+
+# Diverging ramp for correlation heatmaps. config.toml ships a sequential
+# purple ramp (chartSequentialColors) but no diverging one, so this is built
+# from the DS semantic pair: brand blue for inverse, neutral-800 for
+# uncorrelated, critical for tightly correlated. Plotly colorscale form.
+DIVERGING_SCALE = [
+    [0.0, INFO_DEEP],      # strongly inverse
+    [0.25, INFO_COLOR],
+    [0.5, BORDER],         # uncorrelated
+    [0.75, CRITICAL_FILL],
+    [1.0, DOWN_COLOR],     # moves together
+]
+
+# Brand exception, deliberately NOT a DS neutral: Google's sign-in guidelines
+# require the "G" mark on pure white, so auth.py's button tile opts out of the
+# ramp. It is declared here so an audit finds it named instead of as a stray
+# literal, and so it stays the only such exception.
+BRAND_GOOGLE_TILE = "#FFFFFF"
+
+
+def ds_vars_css() -> str:
+    """`:root` custom properties for every token above, as a `<style>` block.
+
+    Our CSS lives in string literals scattered across pages, most of them plain
+    (non-f) triple-quoted blocks full of CSS braces — threading Python values
+    through them would mean escaping every `{`. Emitting the tokens once as
+    `--ag-*` custom properties instead lets that CSS read `var(--ag-border)`
+    and stay literal, while Python keeps a single source of truth. Custom
+    properties inherit into CCv2 shadow roots, so component `css=` blocks
+    resolve them too. app.py injects this before its own stylesheet.
+    """
+    tokens = {
+        # color — semantic
+        "up": UP_COLOR, "down": DOWN_COLOR,
+        "success-fill": SUCCESS_FILL, "critical-fill": CRITICAL_FILL,
+        "warn": WARN_COLOR, "warn-orange": WARN_ORANGE,
+        "info": INFO_COLOR, "info-deep": INFO_DEEP,
+        # color — brand
+        "purple-900": PURPLE_900, "purple-800": PURPLE_800,
+        "purple-700": PURPLE_700, "brand-cta": BRAND_CTA,
+        "brand-accent": BRAND_ACCENT, "purple-400": PURPLE_400,
+        "purple-300": PURPLE_300,
+        # color — neutral
+        "surface-page": SURFACE_PAGE, "surface-card": SURFACE_CARD,
+        "border": BORDER, "text-primary": TEXT_PRIMARY,
+        "text-secondary": TEXT_SECONDARY, "text-muted": TEXT_MUTED,
+        "text-faint": TEXT_FAINT,
+        # color — alpha variants
+        "profit-band": PROFIT_BAND, "loss-band": LOSS_BAND,
+        "surface-sunken": SURFACE_SUNKEN, "rule-soft": RULE_SOFT,
+        "surface-page-haze": SURFACE_PAGE_HAZE,
+        "cta-glow": CTA_GLOW, "cta-halo": CTA_HALO,
+        "cta-tint": CTA_TINT, "cta-tint-edge": CTA_TINT_EDGE,
+        "skeleton-base": SKELETON_BASE, "skeleton-hi": SKELETON_HI,
+        "brand-google-tile": BRAND_GOOGLE_TILE,
+        # elevation
+        "shadow-card": SHADOW_CARD, "shadow-hover": SHADOW_HOVER,
+        "shadow-overlay": SHADOW_OVERLAY,
+        "shadow-color": SHADOW_COLOR,
+        "shadow-color-strong": SHADOW_COLOR_STRONG,
+        # radius
+        "radius-xs": RADIUS_XS, "radius-sm": RADIUS_SM,
+        "radius-md": RADIUS_MD, "radius-lg": RADIUS_LG,
+        "radius-pill": RADIUS_PILL,
+        # type scale
+        "fs-3xs": FS_3XS, "fs-2xs": FS_2XS, "fs-xs": FS_XS, "fs-sm": FS_SM,
+        "fs-md": FS_MD, "fs-base": FS_BASE, "fs-lg": FS_LG, "fs-xl": FS_XL,
+        "fs-2xl": FS_2XL, "fs-3xl": FS_3XL, "fs-display": FS_DISPLAY,
+        # icon
+        "icon-nav": ICON_NAV,
+    }
+    body = "".join(f"--ag-{k}:{v};" for k, v in tokens.items())
+    return f"<style>:root{{{body}}}</style>"
+
+
+
 # One hover-label look for every chart — the DS card, echoed onto Plotly's SVG
-# tooltip: neutral-900 surface (#28262D, same as .aguait-card), neutral-800
-# border (#3B3942), Instrument Sans body face, neutral-50 text. namelength=-1 so
+# tooltip: SURFACE_CARD (same as .aguait-card), BORDER, Instrument Sans body
+# face, TEXT_PRIMARY text. namelength=-1 so
 # trace names never truncate to 15 chars. Radius + elevation (which Plotly's
 # hoverlabel can't set) come from CSS in app.py. Font size drops on mobile (see
 # show_chart) so a multi-row unified box fits a ~390px phone screen.
@@ -37,12 +225,12 @@ HOVER_FONT_MOBILE = 11
 # ~40px of a ~390px screen; 10px narrows the gutter and lightens the frame.
 TICK_FONT_MOBILE = 10
 HOVERLABEL = dict(
-    bgcolor="rgba(40,38,45,0.97)",  # neutral-900 — matches .aguait-card surface
-    bordercolor="#3B3942",          # neutral-800 — DS border
+    bgcolor=SURFACE_CARD_HAZE,      # neutral-900 — matches .aguait-card surface
+    bordercolor=BORDER,             # neutral-800 — DS border
     font=dict(
         family="'Instrument Sans', sans-serif",
         size=HOVER_FONT_DESKTOP,
-        color="#F9F9FA",            # neutral-50 — primary text
+        color=TEXT_PRIMARY,         # neutral-50 — primary text
     ),
     namelength=-1,
     align="left",
@@ -109,14 +297,14 @@ def show_chart(fig, *, key: str | None = None, container=None) -> None:
         else HOVERLABEL
     )
     # Transparent canvas so the chart takes on the surface behind it (the
-    # .aguait-card neutral-900, #28262D) instead of Streamlit's opaque
+    # .aguait-card SURFACE_CARD) instead of Streamlit's opaque
     # page-background paper — otherwise the plot reads as a darker box inset
     # in the card. Card-less contexts inherit the page bg, still correct.
     fig.update_layout(
         hoverlabel=hoverlabel,
-        paper_bgcolor="rgba(0,0,0,0)",
-        plot_bgcolor="rgba(0,0,0,0)",
-        modebar={"bgcolor": "rgba(0,0,0,0)"},
+        paper_bgcolor=TRANSPARENT,
+        plot_bgcolor=TRANSPARENT,
+        modebar={"bgcolor": TRANSPARENT},
     )
     if mobile:
         fig.update_xaxes(fixedrange=True, tickfont=dict(size=TICK_FONT_MOBILE))
@@ -268,50 +456,134 @@ def company_name(ticker: str) -> str | None:
     return _company_name(ticker, str(auth.watchlist_path()))
 
 
-# Aguait palette — single source of truth for every chart/HTML color the theme
-# (config.toml) can't reach. Amphora DS tokens; market up/down are reserved for
-# price change only (success/critical fills — the light variants read on dark).
-UP_COLOR = "#DBFFD2"    # alza — market gain (DS success fill)
-DOWN_COLOR = "#FFD2CB"  # baja — market loss (DS critical fill)
-WARN_COLOR = "#F4C600"  # aviso — caution (DS caution highlight)
-INFO_COLOR = "#7290F0"  # info — chart lines, informational (DS blue 500)
-BRAND_ACCENT = "#A98EF7"  # brand purple 500 — accents, active iconography
-BRAND_CTA = "#7F3FE8"   # brand purple 600 — CTAs
-TEXT_MUTED = "#827F8C"  # secondary text / chart axes (DS neutral 500)
-# Back-compat aliases — every green/red profit-loss cue routes through these.
-PROFIT_COLOR, LOSS_COLOR = UP_COLOR, DOWN_COLOR
-# Price-chart series hues (the "Aguait Valor" design): candle bodies and the
-# moving-average overlays carry their own softer tones so the UP/DOWN fills
-# above stay reserved for text and badges.
-CANDLE_UP = "#7ED28C"    # bullish candles
-CANDLE_DOWN = "#F0897E"  # bearish candles
-SMA_FAST = "#F2A33C"     # SMA20 overlay — orange
-SMA_SLOW = "#6E8FF0"     # SMA50 overlay + results markers — blue
-EVENT_LINE = "#5A5766"   # dashed corporate-event verticals
-# Dimmed profit/loss for off-session day changes: same hue at ~45% so the cell
-# reads as "market closed — last completed session's move", not a live tick.
-PROFIT_COLOR_MUTED = "rgba(219,255,210,0.45)"  # UP_COLOR @ 45%
-LOSS_COLOR_MUTED = "rgba(255,210,203,0.45)"    # DOWN_COLOR @ 45%
+# Earnings-calendar grid, shared by the Home mini-grid and the full Earnings
+# page. Both render the same component — logo chips in day cells, today
+# highlighted, out-of-range days sunken, past prints as beat/miss chips — and
+# each page previously carried its own copy of the stylesheet under a different
+# class prefix. The copies had already drifted: only one of them ordered
+# `.past:hover` after `.beat`/`.miss`, so a clickable result chip took the
+# purple hover on one page and ignored it on the other. One builder, two
+# density presets.
+CAL_DENSITIES = {
+    # Home's 4-week mini grid: five weekday columns in a narrow card column.
+    "compact": {
+        "head_size": FS_3XS, "head_pad": "0.2rem 0.4rem",
+        "daynum_size": FS_2XS, "daynum_gap": "0.15rem",
+        "chip_display": "inline-flex", "chip_margin": "0 0.15rem 0.15rem 0",
+        "chip_gap": "0.25rem", "chip_pad": "0.06rem 0.28rem",
+        "chip_size": FS_3XS, "chip_leading": "1.4", "logo_px": "13px",
+    },
+    # The Earnings page's full month grid: seven columns, page width.
+    "regular": {
+        "head_size": FS_2XS, "head_pad": "0.3rem 0.4rem",
+        "daynum_size": FS_XS, "daynum_gap": "0.2rem",
+        "chip_display": "flex", "chip_margin": "0.12rem 0",
+        "chip_gap": "0.3rem", "chip_pad": "0.1rem 0.28rem",
+        "chip_size": FS_2XS, "chip_leading": "1.3", "logo_px": "16px",
+    },
+}
+
+
+def calendar_css(
+    prefix: str, *, density: str, cell_height: str, cell_width: str
+) -> str:
+    """Stylesheet for one earnings-calendar grid, class-prefixed.
+
+    `prefix` namespaces every class (`mini` -> `.mini-cal`, `.mini-chip`), so
+    two grids can coexist on one page. `density` picks a preset from
+    CAL_DENSITIES; only the cell box differs per page beyond that, since the
+    column count drives it. Colors come from the tokens above — the grid is
+    rendered inside a CCv2 shadow root, which is why the font-family falls back
+    through Streamlit's own `--st-font` rather than inheriting.
+    """
+    d = CAL_DENSITIES[density]
+    return f"""
+  .{prefix}-cal {{
+    width:100%; border-collapse:separate; border-spacing:4px;
+    table-layout:fixed;
+  }}
+  .{prefix}-cal th {{
+    font-size:{d["head_size"]}; text-transform:uppercase; letter-spacing:.06em;
+    color:{TEXT_MUTED}; font-weight:600; padding:{d["head_pad"]};
+    text-align:left;
+  }}
+  .{prefix}-cal td {{
+    border:1px solid {BORDER}; border-radius:{RADIUS_SM}; vertical-align:top;
+    width:{cell_width}; height:{cell_height}; padding:0.3rem 0.35rem;
+  }}
+  .{prefix}-cal td.dim {{ background:{SURFACE_SUNKEN}; }}
+  .{prefix}-cal td.today {{
+    background:{PURPLE_900}; border-color:{BRAND_ACCENT};
+  }}
+  .{prefix}-daynum {{
+    font-size:{d["daynum_size"]}; color:{TEXT_FAINT}; font-weight:600;
+    margin-bottom:{d["daynum_gap"]};
+  }}
+  .{prefix}-cal td.today .{prefix}-daynum {{ color:{PURPLE_400}; }}
+  .{prefix}-chip {{
+    display:{d["chip_display"]}; align-items:center; gap:{d["chip_gap"]};
+    margin:{d["chip_margin"]}; padding:{d["chip_pad"]};
+    border-radius:{RADIUS_XS}; background:{PURPLE_800};
+    font-size:{d["chip_size"]}; font-weight:600;
+    line-height:{d["chip_leading"]}; max-width:100%; color:{PURPLE_300};
+    font-family:var(--st-font, inherit);
+  }}
+  .{prefix}-chip.soon {{ background:{LOSS_BAND}; color:{DOWN_COLOR}; }}
+  .{prefix}-chip.beat {{ background:{PROFIT_BAND}; color:{UP_COLOR}; }}
+  .{prefix}-chip.miss {{ background:{LOSS_BAND}; color:{DOWN_COLOR}; }}
+  .{prefix}-chip img {{
+    width:{d["logo_px"]}; height:{d["logo_px"]};
+    border-radius:{RADIUS_XS}; object-fit:contain;
+  }}
+  .{prefix}-chip span {{
+    white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
+  }}
+  /* Last, so the hover state wins on a clickable chip whichever verdict
+     class it also carries. */
+  .{prefix}-chip.past {{ cursor:pointer; }}
+  .{prefix}-chip.past:hover {{
+    background:{PURPLE_700}; color:{TEXT_PRIMARY};
+  }}
+"""
+
 
 # One look for every HTML-rendered ticker table (Positions, Realized & tax,
 # earnings lists, screener, import previews) — keep them identical.
 _TABLE_STYLES = [
     {"selector": "", "props": [
         ("width", "100%"), ("border-collapse", "collapse"),
-        ("font-size", "0.9rem"),
+        ("font-size", FS_MD),
     ]},
     {"selector": "th", "props": [
         ("text-align", "left"), ("padding", "8px 12px"),
-        ("border-bottom", "1px solid #3B3942"),
-        ("font-weight", "500"), ("font-size", "0.82rem"),
-        ("color", "#827F8C"),
+        ("border-bottom", f"1px solid {BORDER}"),
+        ("font-weight", "500"), ("font-size", FS_SM),
+        ("color", TEXT_MUTED),
     ]},
     {"selector": "td", "props": [
         ("padding", "7px 12px"), ("white-space", "nowrap"),
-        ("border-bottom", "1px solid rgba(59,57,66,.5)"),
+        ("border-bottom", f"1px solid {RULE_SOFT}"),
     ]},
     {"selector": "td a:hover b", "props": [
         ("text-decoration", "underline"),
+    ]},
+]
+
+
+# Extra look for click-to-sort tables: headers read as controls and the active
+# column carries its direction arrow (set by app.py's sorter as data-ag-dir).
+_SORT_STYLES = [
+    {"selector": "th.col_heading", "props": [
+        ("cursor", "pointer"), ("user-select", "none"),
+        ("white-space", "nowrap"),
+    ]},
+    {"selector": "th.col_heading:hover", "props": [("color", TEXT_PRIMARY)]},
+    # The active column brightens; its arrow is a real span the sorter adds,
+    # not a ::after — DOMPurify scrubs the style block st.html renders and a
+    # dropped `content` declaration would leave the sort direction invisible.
+    {"selector": "th[data-ag-dir]", "props": [("color", TEXT_PRIMARY)]},
+    {"selector": "th .ag-arrow", "props": [
+        ("color", BRAND_ACCENT), ("font-size", FS_SM),
     ]},
 ]
 
@@ -357,6 +629,179 @@ def _neutral_zero_formatter(template: str):
     return fmt
 
 
+def _value_formatter(fmt: dict[str, str] | None, signed: tuple[str, ...], col: str):
+    """Formatter for one column's raw value, matching what the Styler would
+    render for it (signed columns drop the "+" on an exact 0, NaN reads
+    "n/a") — pair cells are built as HTML before the Styler runs, so they
+    have to format their own numbers."""
+    template = (fmt or {}).get(col, "{}")
+    if col in signed:
+        return _neutral_zero_formatter(template)
+
+    def plain(v) -> str:
+        try:
+            if pd.isna(v):
+                return "n/a"
+        except (TypeError, ValueError):
+            pass
+        try:
+            return template.format(v)
+        except (TypeError, ValueError):
+            return str(v)
+
+    return plain
+
+
+def _delta_chip(v, text: str, *, muted: bool = False) -> str:
+    """Percentage as a tinted pill — green gain, red loss, grey flat, bare
+    text when there's no number. Pairs an absolute figure with its relative
+    one inside a single cell (see ticker_table_html's `pairs`)."""
+    try:
+        f = None if pd.isna(v) else float(v)
+    except (TypeError, ValueError):
+        f = None
+    if f is None:
+        return f'<span style="color:{TEXT_MUTED};font-size:{FS_XS}">{text}</span>'
+    if f == 0:
+        bg, fg = SURFACE_SUNKEN, TEXT_MUTED
+    elif f > 0:
+        bg, fg = PROFIT_BAND, (PROFIT_COLOR_MUTED if muted else PROFIT_COLOR)
+    else:
+        bg, fg = LOSS_BAND, (LOSS_COLOR_MUTED if muted else LOSS_COLOR)
+    return (
+        f'<span style="display:inline-block;padding:1px 6px;'
+        f"border-radius:{RADIUS_PILL};background:{bg};color:{fg};"
+        f'font-size:{FS_XS};font-weight:600;line-height:1.5">{text}</span>'
+    )
+
+
+def _pair_cell(value_html: str, chip_html: str) -> str:
+    """One cell holding "€+3,210  (+3.0%)" — the absolute figure and its pill,
+    kept on one line and pushed to the cell's right edge."""
+    return (
+        '<span style="display:inline-flex;align-items:center;gap:6px;'
+        'justify-content:flex-end;white-space:nowrap">'
+        f"{value_html}{chip_html}</span>"
+    )
+
+
+def _sort_key(v) -> str:
+    """One cell's machine-sortable value: a bare number for anything numeric,
+    lowercased text otherwise, "" for missing (the client sorts blanks last
+    either way). Read off the RAW frame, so the click-sort never has to parse
+    "€8,372" or a merged "€-97 (-1.1%)" cell back into a number."""
+    try:
+        if pd.isna(v):
+            return ""
+    except (TypeError, ValueError):
+        pass
+    if isinstance(v, bool):
+        return str(int(v))
+    if isinstance(v, (int, float)):
+        return repr(float(v))
+    try:
+        return repr(float(v))  # numpy scalars, Decimal, numeric strings
+    except (TypeError, ValueError):
+        return str(v).strip().lower()
+
+
+def _with_sort_keys(markup: str, uuid: str, keys: list[list[str]]) -> str:
+    """Stamp data-s="<raw value>" on every body cell of a Styler table.
+
+    Styler can set cell classes but not arbitrary attributes, so the keys are
+    injected into the rendered HTML by cell id (`T_<uuid>_row<r>_col<c>`, the
+    one handle pandas guarantees per cell). The client sorter reads data-s and
+    never sees the formatted text.
+    """
+    for r, row in enumerate(keys):
+        for c, key in enumerate(row):
+            token = f'id="T_{uuid}_row{r}_col{c}"'
+            markup = markup.replace(
+                token, f'{token} data-s="{html.escape(key, quote=True)}"', 1
+            )
+    return markup
+
+
+# Verdict chip palette: verdict() speaks in Streamlit color names, the DS in
+# tokens. One map, so a band's color lands the same in every chip.
+_VERDICT_FILL = {
+    "green": (PROFIT_BAND, UP_COLOR),
+    "orange": (WARN_BAND, WARN_COLOR),
+    "red": (LOSS_BAND, DOWN_COLOR),
+    "gray": (SURFACE_SUNKEN, TEXT_MUTED),
+}
+
+_KPI_CSS = f"""<style>
+.ag-kpis {{
+  display: grid; gap: 8px;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+}}
+.ag-kpi {{
+  background: {SURFACE_PAGE}; border: 1px solid {BORDER};
+  border-radius: {RADIUS_MD}; padding: 9px 11px;
+  display: flex; flex-direction: column; gap: 3px; min-width: 0;
+}}
+.ag-kpi-h {{ display: flex; align-items: center; gap: 4px; }}
+.ag-kpi-l {{
+  font-size: {FS_SM}; font-weight: 500; color: {TEXT_SECONDARY};
+  line-height: 1.25;
+}}
+.ag-kpi-q {{
+  flex: none; width: 14px; height: 14px; border-radius: {RADIUS_PILL};
+  border: 1px solid {BORDER}; color: {TEXT_MUTED}; cursor: help;
+  font-size: {FS_2XS}; line-height: 1;
+  display: inline-flex; align-items: center; justify-content: center;
+}}
+.ag-kpi-r {{ display: flex; align-items: baseline; gap: 7px; flex-wrap: wrap; }}
+.ag-kpi-v {{
+  font-family: 'Epilogue', 'Instrument Sans', sans-serif;
+  font-weight: 700; font-size: {FS_XL}; line-height: 1.1;
+  color: {TEXT_PRIMARY};
+}}
+.ag-kpi-c {{
+  font-size: {FS_XS}; font-weight: 600; white-space: nowrap;
+  padding: 1px 7px; border-radius: {RADIUS_PILL};
+}}
+</style>"""
+
+
+def kpi_grid_html(
+    tiles: list[tuple[str, str, tuple[str, str] | None, str | None]],
+) -> str:
+    """KPI tiles as ONE self-contained grid: label, value, verdict chip.
+
+    The Streamlit version of this block (st.metric + st.caption in a bordered
+    column) could not keep a verdict with its number: in a wrapping metric row
+    the caption printed above the NEXT tile's label, and Streamlit under-sizes
+    those fixed-width flex boxes, so even a bordered container had the caption
+    escaping below its own edge. Rendering the whole grid as one HTML element
+    takes Streamlit's layout out of the question — and puts the verdict on the
+    value's line, where it can't be read as belonging to anything else.
+
+    `tiles` are (label, formatted value, verdict, tooltip) — verdict as
+    returned by analysis.fundamentals.verdict (text, Streamlit color) or None
+    for a KPI with no band. The tooltip rides a native `title`, the one hover
+    hint that survives without Streamlit's help popover.
+    """
+    cells = []
+    for label, value, verdict, tip in tiles:
+        head = f'<span class="ag-kpi-l">{html.escape(label)}</span>'
+        if tip:
+            head += f'<span class="ag-kpi-q" title="{html.escape(tip, quote=True)}">?</span>'
+        row = f'<span class="ag-kpi-v">{html.escape(value)}</span>'
+        if verdict:
+            fill, ink = _VERDICT_FILL.get(verdict[1], (SURFACE_SUNKEN, TEXT_MUTED))
+            row += (
+                f'<span class="ag-kpi-c" style="background:{fill};color:{ink}">'
+                f"{html.escape(verdict[0])}</span>"
+            )
+        cells.append(
+            f'<div class="ag-kpi"><div class="ag-kpi-h">{head}</div>'
+            f'<div class="ag-kpi-r">{row}</div></div>'
+        )
+    return f'{_KPI_CSS}<div class="ag-kpis">{"".join(cells)}</div>'
+
+
 def ticker_cell(ticker: str, *, name: bool = True, link: bool = True) -> str:
     """Logo + bold ticker (+ dim company name) as one HTML table cell.
 
@@ -368,7 +813,7 @@ def ticker_cell(ticker: str, *, name: bool = True, link: bool = True) -> str:
     img = (
         f'<img src="{html.escape(src, quote=True)}" loading="lazy" '
         'style="height:22px;width:22px;object-fit:contain;'
-        'border-radius:4px;vertical-align:-6px;margin-right:8px">'
+        'border-radius:var(--ag-radius-xs);vertical-align:-6px;margin-right:8px">'
         if (src := logo(ticker))
         else '<span style="display:inline-block;width:30px"></span>'
     )
@@ -414,11 +859,13 @@ _LIVE_SEARCH = st.components.v2.component(
     css="""
     .lsi {
       width: 100%; box-sizing: border-box; height: 36px; padding: 0 0.75rem;
-      background: #28262D; color: #F9F9FA; border: 1px solid #3B3942;
-      border-radius: 8px; font-size: 0.85rem; outline: none;
+      background: var(--ag-surface-card); color: var(--ag-text-primary);
+      border: 1px solid var(--ag-border);
+      border-radius: var(--ag-radius-sm); font-size: var(--ag-fs-sm);
+      outline: none;
     }
-    .lsi::placeholder { color: #827F8C; }
-    .lsi:focus { border-color: #7F3FE8; }
+    .lsi::placeholder { color: var(--ag-text-muted); }
+    .lsi:focus { border-color: var(--ag-brand-cta); }
     """,
     js="""
 export default function (component) {
@@ -447,6 +894,7 @@ export default function (component) {
     input._retryN = 0
     input.value = ""
     setStateValue("value", "")
+    setStateValue("focused", false)
     input.blur()
   }
   if (!input.dataset.wired) {
@@ -498,8 +946,11 @@ export default function (component) {
   const doc = input.ownerDocument
   if (doc.__lsRowCloser) doc.removeEventListener("click", doc.__lsRowCloser)
   doc.__lsRowCloser = (e) => {
-    const results = doc.querySelector(".st-key-topbar_results")
-    if (!results || !results.contains(e.target)) return
+    // The container's key carries a generation counter (see _go_ticker), so
+    // match on the prefix and take whichever one holds the clicked row.
+    const results = [...doc.querySelectorAll('[class*="st-key-topbar_results"]')]
+      .find((el) => el.contains(e.target))
+    if (!results) return
     clearTimeout(input._timer)
     clearTimeout(input._retry)
     input._retryN = 0
@@ -507,6 +958,11 @@ export default function (component) {
     results.style.display = "none"
     input.value = ""
     setStateValue("value", "")
+    // The row's mousedown already blurred the field, so the blur listener's
+    // pending focused=false was the only one — and the clearTimeout above just
+    // killed it; input.blur() re-fires nothing. Say it outright, or "focused"
+    // stays true and the recents dropdown re-opens on the page we land on.
+    setStateValue("focused", false)
     input.blur()
   }
   doc.addEventListener("click", doc.__lsRowCloser)
@@ -577,12 +1033,14 @@ def _topbar_matches(raw: str):
     Mirrors the left-drawer `ticker_picker` exactly: the watchlist is matched by
     symbol, company name OR tag-group (favorites first, and open-but-unlisted
     positions from the ledger folded in), then coins, then the SEC ticker map,
+    then a worldwide Yahoo lookup for everything the US-only map can't see,
     plus an "Analyze <SYMBOL>" fallback for a symbol none of them know. Returns
-    `(watch, crypto, sec, analyze)` where watch rows carry their ⭐/💼 mark.
+    `(watch, crypto, sec, world, analyze)` where watch rows carry their ⭐/💼
+    mark and world rows carry their exchange.
     """
     q = raw.strip().upper()
     if not q:
-        return [], [], [], None
+        return [], [], [], [], None
     holdings = load_watchlist(auth.watchlist_path())
     labels = {h.ticker: (h.name or h.ticker) for h in holdings}
     fav_set = {h.ticker for h in holdings if h.favorite}
@@ -613,9 +1071,17 @@ def _topbar_matches(raw: str):
 
     crypto = [(t, n) for t, n in search_crypto(q) if t not in labels]
     sec = [(t, n) for t, n in sec_matches(q) if t not in labels]
-    known = set(labels) | {t for t, _ in crypto} | {t for t, _ in sec}
+    # Worldwide runs on every query, not just when the tiers above came up
+    # empty: their fuzzy fallbacks always produce SOMETHING, so "nothing found
+    # locally" is not a usable trigger — "MIPS" pulls VIPS/CMPS/MVIS out of the
+    # SEC map and would have suppressed the one real answer (MIPS.ST). It is
+    # deduped against them instead, and `_world_first` decides which of the two
+    # groups leads.
+    seen = set(labels) | {t for t, _ in crypto} | {t for t, _ in sec}
+    world = [(t, n, x) for t, n, x in world_matches(q) if t not in seen]
+    known = seen | {t for t, _, _ in world}
     analyze = q if (q not in known and re.fullmatch(r"[A-Z0-9.\-]{1,12}", q)) else None
-    return watch[:8], crypto[:4], sec[:6], analyze
+    return watch[:8], crypto[:4], sec[:6], world[:3], analyze
 
 
 def _recent_rows() -> list[tuple[str, str, str]]:
@@ -649,10 +1115,26 @@ def _go_ticker(ticker: str) -> None:
     clear the query so the dropdown closes.
     """
     st.session_state.pop("topbar_q", None)  # reset the live input (its state is a dict)
+    # The closer JS hides the open dropdown with an INLINE display:none (the
+    # server-side close lands seconds later). Streamlit reuses a keyed
+    # container's DOM node, and React never clears a style it didn't set, so
+    # reusing that node for the next query renders the rows invisible. Bump the
+    # generation: the next dropdown gets a new key, hence a new node.
+    st.session_state["topbar_res_gen"] = st.session_state.get("topbar_res_gen", 0) + 1
     st.session_state["topbar_q_blur"] = True  # blur the field so recents don't re-open
     auth.push_recent_search(ticker)  # remember it for the empty-field dropdown
     st.session_state["picker_selected"] = ticker.strip().upper()
     st.session_state["picker_clicked"] = True
+
+
+def _results_key() -> str:
+    """Key for the dropdown container, carrying the generation counter.
+
+    A row click hides the open dropdown from JS with an inline style; keying the
+    container per generation guarantees the next dropdown is a brand-new DOM
+    node, never the hidden one. CSS/JS match it with `[class*=...]`.
+    """
+    return f"topbar_results_{st.session_state.get('topbar_res_gen', 0)}"
 
 
 def _search_row(t: str, label: str, key: str) -> None:
@@ -664,12 +1146,12 @@ def _render_ticker_rows(rows: list[tuple[str, str, str]], *, key_prefix: str = "
     """Render `(symbol, name, mark)` rows as logo'd buttons in the dropdown.
 
     Each carries its watchlist logo (CSS background, like the picker) and its
-    ⭐/💼 mark. Logo rules are scoped under .st-key-topbar_results so they beat
+    ⭐/💼 mark. Logo rules are scoped under the results container so they beat
     the base row rule's specificity — otherwise its `background: transparent`
     shorthand wipes the logo back to none.
     """
     logo_rules = [
-        f".st-key-topbar_results .st-key-{key_prefix}_{_slug(t)} button {{"
+        f'[class*="st-key-topbar_results"] .st-key-{key_prefix}_{_slug(t)} button {{'
         f'background-image:url("{src}"); background-repeat:no-repeat;'
         " background-position:8px center; background-size:16px 16px;"
         " padding-left:30px;}"
@@ -706,18 +1188,36 @@ def _topbar_search_panel() -> None:
         if q:
             # Typed query: live matches. Recents never show here — searching
             # something else replaces them (they only stand in for an empty field).
-            watch, crypto, sec, analyze = _topbar_matches(q)
-            if watch or crypto or sec or analyze:
-                with st.container(key="topbar_results"):
+            watch, crypto, sec, world, analyze = _topbar_matches(q)
+            if watch or crypto or sec or world or analyze:
+                with st.container(key=_results_key()):
                     _render_ticker_rows(watch)
                     if crypto:
                         st.caption(tr("widgets.crypto"))
                         for t, name in crypto:
                             _search_row(t, f"🪙 **{t}**  {name}", f"tbrescx_{_slug(t)}")
-                    if sec:
-                        st.caption(tr("widgets.from_sec_search"))
-                        for t, name in sec:
-                            _search_row(t, f"🔎 **{t}**  {name}", f"tbressec_{_slug(t)}")
+                    def _world_group() -> None:
+                        if world:
+                            st.caption(tr("widgets.from_world_search"))
+                            for t, name, exch in world:
+                                _search_row(
+                                    t, _world_label(t, name, exch), f"tbresw_{_slug(t)}"
+                                )
+
+                    def _sec_group() -> None:
+                        if sec:
+                            st.caption(tr("widgets.from_sec_search"))
+                            for t, name in sec:
+                                _search_row(
+                                    t, f"🔎 **{t}**  {name}", f"tbressec_{_slug(t)}"
+                                )
+
+                    # Whichever of the two searched the query better goes first.
+                    groups = (_world_group, _sec_group)
+                    if not _world_first(q.strip().upper(), sec):
+                        groups = groups[::-1]
+                    for group in groups:
+                        group()
                     if analyze:
                         st.button(
                             tr("widgets.analyze", q=analyze),
@@ -729,7 +1229,7 @@ def _topbar_search_panel() -> None:
                         )
         elif focused and (recent := _recent_rows()):
             # Empty but focused: offer the last few explored tickers.
-            with st.container(key="topbar_results"):
+            with st.container(key=_results_key()):
                 st.caption(tr("widgets.recent"))
                 _render_ticker_rows(recent, key_prefix="tbrec")
 
@@ -803,22 +1303,23 @@ def render_topbar(page_title: str, ticker: str | None = None) -> None:
         .aguait-topbar {
           padding: 0 2.5rem; min-height: 64px;
           display: flex; align-items: center; gap: 0.5rem;
-          background: rgba(24,22,28,0.92); backdrop-filter: blur(7px);
-          border-bottom: 1px solid #3B3942;
-          font-size: 0.92rem; line-height: 1.2;
+          background: var(--ag-surface-page-haze); backdrop-filter: blur(7px);
+          border-bottom: 1px solid var(--ag-border);
+          font-size: var(--ag-fs-md); line-height: 1.2;
           white-space: nowrap; overflow: hidden;
         }
-        .aguait-topbar .tb-brand { color: #827F8C; font-weight: 400; }
-        .aguait-topbar .tb-sep { color: #696673; }
-        .aguait-topbar .tb-page { color: #F9F9FA; font-weight: 600; }
+        .aguait-topbar .tb-brand { color: var(--ag-text-muted); font-weight: 400; }
+        .aguait-topbar .tb-sep { color: var(--ag-text-faint); }
+        .aguait-topbar .tb-page { color: var(--ag-text-primary); font-weight: 600; }
         .aguait-topbar .tb-ticker {
-          color: #F9F9FA; font-weight: 600;
+          color: var(--ag-text-primary); font-weight: 600;
           display: inline-flex; align-items: center; gap: 6px;
           min-width: 0; overflow: hidden; text-overflow: ellipsis;
         }
-        .aguait-topbar .tb-name { color: #827F8C; font-weight: 400; }
+        .aguait-topbar .tb-name { color: var(--ag-text-muted); font-weight: 400; }
         .aguait-topbar .tb-logo {
-          height: 18px; width: 18px; object-fit: contain; border-radius: 4px;
+          height: 18px; width: 18px; object-fit: contain;
+          border-radius: var(--ag-radius-xs);
         }
 
         /* Fixed global search: top strip, right side, clearing the chat FAB so
@@ -841,42 +1342,44 @@ def render_topbar(page_title: str, ticker: str | None = None) -> None:
         .st-key-topbar_search [data-testid="stElementContainer"] { margin: 0; }
         /* Autocomplete dropdown: a floating result panel under the field. Rows
            are borderless list buttons; clicking one navigates to the ticker. */
-        .st-key-topbar_results {
-          background: #28262D; border: 1px solid #3B3942; border-radius: 8px;
+        [class*="st-key-topbar_results"] {
+          background: var(--ag-surface-card); border: 1px solid var(--ag-border);
+          border-radius: var(--ag-radius-sm);
           padding: 4px; max-height: 60vh; overflow-y: auto;
-          box-shadow: 0 10px 28px rgba(0,0,0,0.5);
+          box-shadow: var(--ag-shadow-overlay);
         }
-        .st-key-topbar_results [data-testid="stVerticalBlock"] { gap: 0.1rem; }
-        .st-key-topbar_results button {
+        [class*="st-key-topbar_results"] [data-testid="stVerticalBlock"] { gap: 0.1rem; }
+        [class*="st-key-topbar_results"] button {
           justify-content: flex-start; text-align: left;
-          border: 0; background: transparent; color: #F9F9FA;
-          padding: 0.3rem 0.5rem; font-size: 0.85rem; min-height: 0;
+          border: 0; background: transparent; color: var(--ag-text-primary);
+          padding: 0.3rem 0.5rem; font-size: var(--ag-fs-sm); min-height: 0;
         }
-        .st-key-topbar_results button:hover {
-          background: #3B3942; color: #F9F9FA;
+        [class*="st-key-topbar_results"] button:hover {
+          background: var(--ag-border); color: var(--ag-text-primary);
         }
         /* The button's inner flex wrapper centers its label; pin it left so the
            text sits right after the logo/emoji instead of mid-row. */
-        .st-key-topbar_results button > div { justify-content: flex-start; }
+        [class*="st-key-topbar_results"] button > div { justify-content: flex-start; }
         /* Streamlit centers button labels; force them left so the text sits
            flush after the logo/emoji instead of floating mid-row. */
-        .st-key-topbar_results button [data-testid="stMarkdownContainer"] {
+        [class*="st-key-topbar_results"] button [data-testid="stMarkdownContainer"] {
           width: 100%; text-align: left;
         }
-        .st-key-topbar_results button p {
+        [class*="st-key-topbar_results"] button p {
           font-weight: 400; text-align: left;
         }
-        .st-key-topbar_results button strong { color: #C6B7FB; }
+        [class*="st-key-topbar_results"] button strong { color: var(--ag-purple-400); }
         /* Section captions ("crypto" / "SEC search") — small, dim, tight. */
-        .st-key-topbar_results [data-testid="stCaptionContainer"] {
+        [class*="st-key-topbar_results"] [data-testid="stCaptionContainer"] {
           padding: 0.25rem 0.5rem 0.1rem; margin: 0;
         }
-        .st-key-topbar_results [data-testid="stCaptionContainer"] p {
-          font-size: 0.7rem; color: #827F8C; margin: 0;
+        [class*="st-key-topbar_results"] [data-testid="stCaptionContainer"] p {
+          font-size: var(--ag-fs-2xs); color: var(--ag-text-muted); margin: 0;
         }
         /* Analyze-new fallback keeps the brand primary fill to read as an action. */
-        .st-key-topbar_results button[kind="primary"] {
-          background: #301263; border-color: #4E2092; color: #DED7FD;
+        [class*="st-key-topbar_results"] button[kind="primary"] {
+          background: var(--ag-purple-900); border-color: var(--ag-purple-800);
+          color: var(--ag-purple-300);
         }
 
         /* Desktop: the search overlays the bar's right, so reserve room and keep
@@ -913,18 +1416,18 @@ _ROWS_CSS = f"""<style>
 .agr-row {{
   display: flex; align-items: center; gap: 10px;
   padding: 8px 2px;
-  border-bottom: 1px solid rgba(59,57,66,.5);
+  border-bottom: 1px solid {RULE_SOFT};
   text-decoration: none; color: inherit;
 }}
 .agr-logo {{
   width: 30px; height: 30px; object-fit: contain;
-  border-radius: 6px; flex: none; display: inline-block;
+  border-radius: {RADIUS_XS}; flex: none; display: inline-block;
 }}
 .agr-main {{ flex: 1 1 auto; min-width: 0; }}
 .agr-side {{ flex: none; text-align: right; max-width: 45%; }}
-.agr-l1 {{ font-size: .95rem; font-weight: 600; line-height: 1.4; }}
+.agr-l1 {{ font-size: {FS_MD}; font-weight: 600; line-height: 1.4; }}
 .agr-l2 {{
-  font-size: .8rem; color: {TEXT_MUTED}; line-height: 1.4;
+  font-size: {FS_XS}; color: {TEXT_MUTED}; line-height: 1.4;
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }}
 .agr-l2.agr-wrap {{ white-space: normal; overflow: visible; }}
@@ -946,8 +1449,8 @@ def _ticker_rows_html(
     """Phone rendering of a ticker table: one dense two-line row per ticker
     (Revolut-style) instead of columns, so nothing pans horizontally.
 
-        [logo]  TICKER                     €6,345
-                Company · 9% · P/L +54%     +1.2%
+        [logo]  TICKER  (+54%)             €6,345
+                Company · 9%                +1.2%
 
     `spec` maps columns onto the row slots (see ticker_table_html's `mobile`
     arg); fmt/signed/muted keep the exact semantics of the table renderer, so
@@ -955,6 +1458,7 @@ def _ticker_rows_html(
     """
     value_col = spec.get("value")
     delta_col = spec.get("delta")
+    badge_col = spec.get("badge")
     sub_cols = tuple(spec.get("sub", ()))
     sub_labels: dict[str, str] = spec.get("sub_labels", {})
 
@@ -1013,7 +1517,18 @@ def _ticker_rows_html(
                 item = f"{html.escape(lbl)} {item}"
             parts.append(item)
         wrap = " agr-wrap" if spec.get("wrap") else ""
-        left = f'<div class="agr-l1">{html.escape(tick)}</div>'
+        # A percentage next to the symbol beats one buried in the dim line: on
+        # a phone the sub line ellipsizes, so a labelled "P/L +46.5%" there was
+        # cut mid-number. As a pill on line 1 it always reads in full.
+        badge = ""
+        if badge_col and badge_col in frame.columns:
+            bv = r[badge_col]
+            badge = " " + _delta_chip(
+                bv,
+                text(badge_col, bv),
+                muted=(tick in muted and badge_col in muted_cols),
+            )
+        left = f'<div class="agr-l1">{html.escape(tick)}{badge}</div>'
         if parts:
             left += f'<div class="agr-l2{wrap}">{" · ".join(parts)}</div>'
         right = (
@@ -1044,6 +1559,8 @@ def ticker_table_html(
     labels: dict[str, str] | None = None,
     muted: set[str] | frozenset[str] = frozenset(),
     muted_cols: tuple[str, ...] = (),
+    pairs: tuple[tuple[str, str], ...] = (),
+    sortable: str | None = None,
     mobile: dict | None = None,
 ) -> str:
     """Positions-style table HTML: logo+name ticker cells, semantic P/L colors.
@@ -1069,11 +1586,24 @@ def ticker_table_html(
             day change is the last completed session's move, not a live tick.
         muted_cols: which signed columns dim for `muted` rows (e.g. the day
             change); other signed columns (total P/L) keep full color.
+        pairs: (absolute_col, pct_col) couples merged into ONE cell each —
+            "€+3,210  (+3.0%)", the percentage as a tinted pill. The pct
+            column is dropped; the cell keeps the absolute column's position
+            and its `labels` header. Both keep their own `fmt`; `signed` and
+            `muted_cols` still key on the original names. Desktop only —
+            the mobile rows below take their columns from `mobile`.
+        sortable: a stable id ("positions") turning the headers into
+            click-to-sort controls. Sorting runs client-side on the raw
+            values (see _sort_key), so it costs no rerun and no refetch, and
+            the chosen column/direction is remembered per id for the session
+            — a rerun re-renders the table already sorted. A merged `pairs`
+            column sorts by its absolute figure, the one it prints first.
         mobile: when set and the request comes from a phone, render dense
             Revolut-style rows (no horizontal panning) instead of a table.
             Maps columns onto row slots: {"value": col (line-1 right),
-            "delta": col (line-2 right, signed-colored), "sub": (cols,) for
-            the dim line under the ticker, "sub_labels": {col: prefix},
+            "delta": col (line-2 right, signed-colored), "badge": col (a
+            tinted pill on line 1, right after the symbol), "sub": (cols,)
+            for the dim line under the ticker, "sub_labels": {col: prefix},
             "wrap": True to let the sub line wrap instead of ellipsize}.
             fmt/signed/muted apply unchanged. Desktop ignores this arg.
     """
@@ -1089,6 +1619,9 @@ def ticker_table_html(
             muted_cols=muted_cols,
         )
     frame = frame.copy()
+    # Raw values, before formatting turns them into "€8,372" strings — the
+    # click-sort keys are stamped from these (see _with_sort_keys).
+    raw = {c: list(frame[c]) for c in frame.columns} if sortable else {}
     # Capture raw ticker ids before ticker_col is swapped for HTML cells, so
     # off-session muting can key rows by symbol regardless of the frame index.
     muted_mask = (
@@ -1109,15 +1642,43 @@ def ticker_table_html(
             ]
     if ticker_col and ticker_col in frame.columns:
         frame[ticker_col] = [ticker_cell(t, name=names) for t in frame[ticker_col]]
+    # Absolute + percentage couples collapse into one pre-rendered HTML cell,
+    # so they carry their own formatting and colors and drop out of the
+    # Styler's fmt/signed subsets below.
+    merged: set[str] = set()
+    for vcol, pcol in pairs:
+        if vcol not in frame.columns or pcol not in frame.columns:
+            continue
+        vfmt = _value_formatter(fmt, signed, vcol)
+        pfmt = _value_formatter(fmt, signed, pcol)
+        pair_dim = vcol in muted_cols or pcol in muted_cols
+        frame[vcol] = [
+            _pair_cell(
+                f'<span style="{signed_color(v, muted=m) if vcol in signed else ""}">'
+                f"{vfmt(v)}</span>",
+                _delta_chip(pct, pfmt(pct), muted=m),
+            )
+            for v, pct, m in zip(
+                frame[vcol],
+                frame[pcol],
+                (pair_dim and m for m in (muted_mask or [False] * len(frame))),
+                strict=True,
+            )
+        ]
+        frame = frame.drop(columns=[pcol])
+        merged.add(vcol)
     right = [c for c in frame.columns if c != ticker_col and c not in left_cols]
-    fmt_map = {k: v for k, v in (fmt or {}).items() if k in frame.columns}
+    fmt_map = {
+        k: v for k, v in (fmt or {}).items()
+        if k in frame.columns and k not in merged
+    }
     # Signed columns drop the "+" on an exact 0 so market-closed rows read
     # "0.0%"/"€0" (neutral), matching signed_color's grey.
     for c in signed:
         if c in fmt_map:
             fmt_map[c] = _neutral_zero_formatter(fmt_map[c])
     sty = frame.style.format(fmt_map or None, na_rep="n/a")
-    if colored := [c for c in signed if c in frame.columns]:
+    if colored := [c for c in signed if c in frame.columns and c not in merged]:
         # Rows whose market is closed dim only their day-change (muted_cols)
         # cells; total-P/L columns stay full color. Everything else keeps the
         # plain elementwise coloring.
@@ -1150,7 +1711,25 @@ def ticker_table_html(
             overwrite=False,
             axis=0,
         )
-    return f'<div style="overflow-x:auto">{sty.to_html()}</div>'
+    if sortable:
+        sty = sty.set_table_styles(_SORT_STYLES, overwrite=False)
+    markup = sty.to_html()
+    if not sortable:
+        return f'<div style="overflow-x:auto">{markup}</div>'
+    markup = _with_sort_keys(
+        markup,
+        sty.uuid,
+        [
+            [_sort_key(raw[c][i]) for c in frame.columns]
+            for i in range(len(frame))
+        ],
+    )
+    # The click handler is wired once per page by app.py, for every table
+    # carrying this hook — see the sorter script there.
+    return (
+        f'<div class="ag-sortable" data-ag-sort="{html.escape(sortable, quote=True)}"'
+        f' style="overflow-x:auto">{markup}</div>'
+    )
 
 
 @st.cache_data(ttl=86400, show_spinner=False)
@@ -1184,6 +1763,80 @@ def sec_matches(query: str) -> list[tuple[str, str]]:
         return search_companies(query, limit=6)
     except Exception:
         return []
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def world_matches(query: str) -> list[tuple[str, str, str]]:
+    """Worldwide symbol search (Yahoo), the last tier of the picker.
+
+    The tiers above it are all local tables and all partial — the watchlist,
+    the coin list, and the SEC map's US filers — so a foreign listing had no
+    way to be found by name. This one covers every venue Yahoo quotes and is
+    typo-tolerant, which is what makes "mips" reach MIPS.ST instead of falling
+    through to an Analyze button for a symbol Yahoo has no data for.
+
+    Unlike its siblings this is a network round-trip, so it is cached for an
+    hour per query (listings barely move) and hard-capped inside
+    `search_symbols` by a short timeout plus a cooldown after any failure.
+    """
+    from stocks.data.symbols import search_symbols
+
+    try:
+        return search_symbols(query, limit=6)
+    except Exception:
+        return []
+
+
+# How close a SEC company name must be to the query to count as "nailed it".
+# Above the general FUZZY_CUTOFF: this decides which group leads, so it should
+# admit a typo ("SANDISC" vs "SANDISK" .86) but not a near-miss neighbour
+# ("MIPS" vs "VIPSHOP" .55, "IWDA" vs "IDEA" .75).
+STRONG_MATCH = 0.8
+
+
+def _norm_name(s: str) -> str:
+    return "".join(c for c in s.upper() if c.isalnum())
+
+
+def _world_first(q: str, sec: list[tuple[str, str]]) -> bool:
+    """Whether the worldwide group should render above the SEC group.
+
+    The SEC tier degrades as it goes: after its exact and prefix hits it falls
+    back to substrings and then to fuzz, so "MIPS" answers with VIPS, CMPS and
+    MVIS — six wrong US tickers that would bury the one real match (MIPS.ST).
+    It keeps the top slot only when it actually nailed the query.
+
+    "Nailed it" is an exact symbol, a company name starting with the query, or
+    a company name whose OPENING words are a near-match for it. Only the
+    opening words, because the query being buried anywhere in a longer name
+    proves nothing — "hermes" scores .92 against "Federated Hermes, Inc." and
+    would hand the lead to an asset manager over Hermès itself. Matching word
+    for word from the start instead keeps "sandisc" on Sandisk Corp and
+    "nvidia" on Nvidia Corp (above the leveraged NVDA ETFs Yahoo returns),
+    while "bank of amrica" still lands on BANK OF AMERICA CORP.
+    """
+    key = _norm_name(q)
+    for t, n in sec:
+        if t == q or (key and _norm_name(n).startswith(key)):
+            return False
+        words = re.sub(r"[^A-Z0-9 ]", " ", n.upper()).split()
+        head = " ".join(words[: len(q.split())])
+        if head and fuzzy_ratio(q, head) >= STRONG_MATCH:
+            return False
+    return True
+
+
+def _world_label(t: str, name: str, exch: str) -> str:
+    """Dropdown label for a worldwide hit: 🌐 SYMBOL  Name · Exchange.
+
+    The exchange is what disambiguates this tier — several rows can be the
+    same brand on different venues, and it is also the hint that the symbol
+    is foreign (MIPS.ST · Stockholm). Long legal names ("Hermès International
+    Société en commandite par actions") are clipped so the row stays one line.
+    """
+    short = name if len(name) <= 34 else name[:33].rstrip() + "…"
+    tail = f"{short} · {exch}" if exch else short
+    return f"🌐 **{t}**  {tail}"
 
 
 @st.cache_data(ttl=900, show_spinner=False)
@@ -1455,13 +2108,18 @@ def ticker_picker(
         # Typo fallback ("oracel") — same fields, fuzzy, best score first.
         shown = _fuzzy_order(q, tickers, labels, tag_map)
 
-    # The picker renders before page.run(), outside the app-level rate-limit
-    # guard — a throttled Yahoo or dead network must dim the change chips, not
-    # crash the app (same exception pair the app-level guard catches). The miss
-    # isn't cached (st.cache_data skips exceptions), so a rerun retries.
+    # Rows shimmer from here until the scroll region below is built: the change
+    # chips need a live quote per ticker, so on a cold cache the sidebar would
+    # otherwise show a search box above empty space.
+    rows_slot = skeletons.reserve("rows", container=box, rows=8)
+    # The picker renders before page.run(), outside the app-level guard — a
+    # throttled Yahoo or dead network must dim the change chips, not crash the
+    # app. The miss isn't cached (st.cache_data skips exceptions), so a rerun
+    # retries; the toast (deduped app-wide) explains the blank chips once.
     try:
         changes = daily_changes(tuple(tickers)) if show_changes else {}
-    except (YFRateLimitError, URLError):
+    except (YFRateLimitError, URLError) as exc:
+        notices.data_toast(exc)
         changes = {}
 
     # Apply the sort chosen in the popover. "Watchlist" keeps the favorites-first
@@ -1510,10 +2168,11 @@ def ticker_picker(
         f"{_sel(primary + ':hover')},"
         f"{_sel(primary + ':active')},"
         f"{_sel(primary + ':focus')} "
-        " {background-color:#301263 !important; border-color:#4E2092 !important;"
-        " color:#DED7FD !important;}"
+        f" {{background-color:{PURPLE_900} !important;"
+        f" border-color:{PURPLE_800} !important;"
+        f" color:{PURPLE_300} !important;}}"
         f"{_sel(primary + ' *')}"
-        " {color:#DED7FD !important;}",
+        f" {{color:{PURPLE_300} !important;}}",
     ]
     for t in shown:
         src = logo(t)
@@ -1524,17 +2183,22 @@ def ticker_picker(
 
     # Beyond the watchlist: the query also searches the whole SEC ticker map
     # (symbol or company name), so typing "airbnb" surfaces ABNB even when it
-    # isn't listed or held. A raw "Analyze <SYMBOL>" fallback stays for exact
-    # symbols the map doesn't know (non-US listings like ASML.AS).
+    # isn't listed or held, and then Yahoo's worldwide lookup, which is what
+    # carries the non-US names the SEC map has never heard of ("mips" ->
+    # MIPS.ST). A raw "Analyze <SYMBOL>" fallback stays for exact symbols
+    # neither one knows.
     matches: list[tuple[str, str]] = []
     crypto_hits: list[tuple[str, str]] = []
+    world_hits: list[tuple[str, str, str]] = []
     if allow_custom and q:
         matches = [(t, n) for t, n in sec_matches(q) if t not in labels]
         # Coin codes and names too, so "bitcoin" or "btc" offers BTC-USD.
         from stocks.data.crypto import search_crypto
 
         crypto_hits = [(t, n) for t, n in search_crypto(q) if t not in labels]
-        known = set(labels) | {t for t, _ in matches} | {t for t, _ in crypto_hits}
+        seen = set(labels) | {t for t, _ in matches} | {t for t, _ in crypto_hits}
+        world_hits = [(t, n, x) for t, n, x in world_matches(q) if t not in seen][:3]
+        known = seen | {t for t, _, _ in world_hits}
         if q not in known and re.fullmatch(r"[A-Z0-9.\-]{1,12}", q):
             box.button(
                 tr("widgets.analyze", q=q),
@@ -1547,7 +2211,7 @@ def ticker_picker(
 
     selected = st.session_state.get(sel_key)
     # Fixed-height scroll region so a long watchlist stays a tidy, scrollable list.
-    with box.container(height=list_height):
+    with rows_slot.container(height=list_height):
         if not shown and not q:
             st.caption(tr("widgets.no_tickers"))
         for t in shown:
@@ -1584,21 +2248,43 @@ def ticker_picker(
                     width="stretch",
                     type="primary" if t == selected else "secondary",
                 )
-        # SEC-map hits below the watchlist rows. No logo background — resolving
-        # a logo hits the network per uncached ticker, too costly per keystroke;
-        # 🔎 marks these as searched, not listed. Picking one selects it like
-        # any row (and the favorite star can then pin it to the watchlist).
-        if matches:
-            st.caption(tr("widgets.from_sec_search"))
-            for t, name in matches:
-                st.button(
-                    f"🔎 **{t}** {name}",
-                    key=f"{key}_sec_{_slug(t)}",
-                    on_click=_select,
-                    args=(t,),
-                    width="stretch",
-                    type="primary" if t == selected else "secondary",
-                )
+        # Then the two searched tiers, 🌐 worldwide and 🔎 SEC map, in whichever
+        # order matched the query better (see _world_first). Neither carries a
+        # logo background — resolving one hits the network per uncached ticker,
+        # too costly per keystroke; the marks say "searched, not listed".
+        # Picking one selects it like any row (and the favorite star can then
+        # pin it to the watchlist).
+        def _world_group() -> None:
+            if world_hits:
+                st.caption(tr("widgets.from_world_search"))
+                for t, name, exch in world_hits:
+                    st.button(
+                        _world_label(t, name, exch),
+                        key=f"{key}_w_{_slug(t)}",
+                        on_click=_select,
+                        args=(t,),
+                        width="stretch",
+                        type="primary" if t == selected else "secondary",
+                    )
+
+        def _sec_group() -> None:
+            if matches:
+                st.caption(tr("widgets.from_sec_search"))
+                for t, name in matches:
+                    st.button(
+                        f"🔎 **{t}** {name}",
+                        key=f"{key}_sec_{_slug(t)}",
+                        on_click=_select,
+                        args=(t,),
+                        width="stretch",
+                        type="primary" if t == selected else "secondary",
+                    )
+
+        groups = (_world_group, _sec_group)
+        if not _world_first(q, matches):
+            groups = groups[::-1]
+        for group in groups:
+            group()
 
     ticker = st.session_state.get(sel_key)
     ticker = ticker.strip().upper() if ticker else ticker

@@ -3,7 +3,6 @@
   "earnings.no_stocks": "No hay valores en la lista (las criptos no tienen resultados). Añade valores en la página **Perfil**.",
   "earnings.filter_portfolio": "Cartera",
   "earnings.filter_favorites": "Favoritos",
-  "earnings.fetching_dates": "Obteniendo fechas de resultados…",
   "earnings.no_dates": "No se encontraron fechas de resultados para la lista.",
   "earnings.imminent_warning": "{n} publicación(es) en 7 días.",
   "earnings.chip_vs_est": " vs est {est}",

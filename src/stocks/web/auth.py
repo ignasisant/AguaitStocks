@@ -316,8 +316,13 @@ _LOGIN_CSS = f"""\
     width: 1.25rem;
     height: 1.25rem;
     margin-right: 0.4rem;
-    border-radius: 4px;
-    background-color: #fff;
+    border-radius: var(--ag-radius-xs);
+    /* Brand exception, not a DS neutral: Google's sign-in guidelines require
+       the "G" on pure white. Declared as widgets.BRAND_GOOGLE_TILE and read
+       here through the custom property — this module can't import widgets
+       (widgets imports auth), and app.py emits the tokens long before the
+       login gate renders. */
+    background-color: var(--ag-brand-google-tile, #fff);
     background-image: url("{_GOOGLE_G_SVG}");
     background-repeat: no-repeat;
     background-position: center;

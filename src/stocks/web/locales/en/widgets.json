@@ -14,6 +14,7 @@
   "widgets.crypto": "Crypto",
   "widgets.recent": "Recent",
   "widgets.from_sec_search": "From SEC ticker search",
+  "widgets.from_world_search": "Worldwide symbol search",
   "widgets.sign_in_favorite": "Sign in to favorite & tag",
   "widgets.toast_fav_added": "{ticker} added to favorites",
   "widgets.toast_fav_removed": "{ticker} removed from favorites",

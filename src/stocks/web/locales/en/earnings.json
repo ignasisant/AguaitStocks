@@ -3,7 +3,6 @@
   "earnings.no_stocks": "No stocks on the watchlist (crypto has no earnings). Add tickers on the **Profile** page.",
   "earnings.filter_portfolio": "Portfolio",
   "earnings.filter_favorites": "Favorites",
-  "earnings.fetching_dates": "Fetching earnings dates…",
   "earnings.no_dates": "No earnings dates found for the watchlist.",
   "earnings.imminent_warning": "{n} report(s) within 7 days.",
   "earnings.chip_vs_est": " vs est {est}",

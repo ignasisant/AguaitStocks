@@ -24,7 +24,7 @@ from stocks.config import Holding, load_watchlist
 from stocks.data.crypto import is_crypto
 from stocks.data.earnings import calendar_events
 from stocks.portfolio.ledger import all_transactions
-from stocks.web import auth
+from stocks.web import auth, notices, skeletons
 from stocks.web.earnings_ui import calendar_component, render_result_body
 from stocks.web.i18n import t as tr
 from stocks.web.portfolio_data import (
@@ -41,6 +41,8 @@ from stocks.web.widgets import (
     LOSS_COLOR,
     PROFIT_COLOR,
     TEXT_MUTED,
+    TRANSPARENT,
+    calendar_css,
     company_name,
     db_mtime,
     is_mobile,
@@ -215,8 +217,10 @@ if auth.is_logged_in():
     realized: list = []
     try:
         txs, positions, realized = ledger_state(DB, db_mtime(DB))
-    except (YFRateLimitError, URLError):
-        raise  # app-level banner handles these with retry
+    except (YFRateLimitError, URLError) as exc:
+        # Throttled/offline: toast it and leave the glance empty (txs/positions
+        # keep their empty defaults above). Not cached, so a rerun retries.
+        notices.data_toast(exc)
     except Exception:
         # Ledger replay / FX prefetch failed for a non-banner reason: skip the
         # whole glance (txs/positions/realized stay empty) instead of crashing.
@@ -226,16 +230,23 @@ if auth.is_logged_in():
     if positions or realized:
         st.subheader(tr("home.portfolio_title"))
     if positions:
+        # The live price burst behind the glance is the page's slowest block,
+        # so the card shimmers its two KPI rows in place while it runs: the
+        # "What's new" section below keeps its position instead of sliding up
+        # and dropping back down when the numbers land. Every branch out ends
+        # in the slot, so the shimmer is always replaced by what it stood for.
+        glance = skeletons.reserve("metrics", border=True, n=(4, 3))
         try:
             tbl = enriched_positions(DB, db_mtime(DB))
-        except (YFRateLimitError, URLError):
-            raise  # app-level banner handles these with retry
+        except (YFRateLimitError, URLError) as exc:
+            notices.data_toast(exc)
+            tbl = pd.DataFrame()  # empty (not None) -> the softer price caption
         except Exception:
             tbl = None  # price/FX enrichment failed — skip the glance card
         if tbl is None:
-            st.warning(tr("home.data_unavailable"))
+            glance.container().warning(tr("home.data_unavailable"))
         elif tbl.empty:
-            st.caption(tr("home.prices_unavailable"))
+            glance.container().caption(tr("home.prices_unavailable"))
         else:
             cost = tbl["cost_eur"].sum()
             value = tbl["value_eur"].dropna().sum()
@@ -248,8 +259,9 @@ if auth.is_logged_in():
             sym = auth.CURRENCY_SYMBOL[ccy]
             try:
                 hist = basket_history(DB, db_mtime(DB))
-            except (YFRateLimitError, URLError):
-                raise  # app-level banner handles these with retry
+            except (YFRateLimitError, URLError) as exc:
+                notices.data_toast(exc)
+                hist = pd.DataFrame()  # 1w/1m deltas read n/a
             except Exception:
                 # basket_change(empty, …) is None, so the 1w/1m deltas below
                 # degrade to their "n/a" cells instead of crashing the card.
@@ -259,22 +271,29 @@ if auth.is_logged_in():
             realized_cost = sum(s.cost_eur for s in realized)
 
             # KPIs + sparkline live in a bordered card, matching the "What's
-            # new" cards below. The card is `with`-scoped so bare st.* calls
+            # new" cards below — the same card the skeleton above was drawn
+            # inside, so filling the slot swaps shimmer for figures without
+            # moving the outline. `with`-scoped so bare st.* calls
             # (metric_cells, st.columns) land inside it.
-            with st.container(border=True):
+            with glance.container(border=True):
                 # Layout: desktop splits the glance into a 70%-wide KPI column
                 # and a 30%-wide sparkline column spanning both KPI rows — the
                 # chart no longer floats against the delta row alone. Mobile
                 # keeps the metric_cells wrap (tiles flow side by side instead
                 # of stacking below 640px) and drops the sparkline to a slot
                 # below.
+                # The sparkline's own fetch (ledger_history) runs at the bottom
+                # of the script, so its cell shimmers a chart-shaped slot until
+                # then rather than sitting blank beside finished KPIs.
                 if is_mobile():
                     b1, b2, b3, b4 = metric_cells(4)
                     d1, d2, d3 = metric_cells(3)
-                    _spark_slot = st.container()
+                    _spark_slot = skeletons.reserve("chart", height=132)
                 else:
                     kcol, ccol = st.columns([7, 3], vertical_alignment="center")
-                    _spark_slot = ccol.container()
+                    _spark_slot = skeletons.reserve(
+                        "chart", container=ccol, height=190
+                    )
                     b1, b2, b3, b4 = kcol.columns(4)
                     d1, d2, d3 = kcol.columns(3)
 
@@ -396,17 +415,9 @@ if auth.is_logged_in():
 
 _held = {p.ticker for p in positions}
 
-# Watchlist data loads here (the Big-moves card needs the closes); the group
-# tables render further down. No st.stop() on an empty watchlist: the deferred
-# cards at the bottom must still fill for a portfolio-only user.
+# No st.stop() on an empty watchlist: the deferred cards at the bottom must
+# still fill for a portfolio-only user.
 holdings = load_watchlist(auth.watchlist_path())
-# A throttled Yahoo must dim/blank the watchlist rows, not crash the page.
-# The miss isn't cached (st.cache_data skips exceptions), so a rerun retries;
-# URLError still propagates to the app-level banner.
-try:
-    closes = recent_closes(tuple(h.ticker for h in holdings)) if holdings else {}
-except YFRateLimitError:
-    closes = {}
 
 # ------------------------------------------------------------------ what's new
 # Bordered cards, two per row on desktop (st.columns stack on phones). The
@@ -415,10 +426,27 @@ except YFRateLimitError:
 # of the page paints first.
 st.subheader(tr("home.whats_new"))
 
+# Grid geometry, declared here because the skeleton below has to reserve the
+# calendar's exact footprint; the grid itself is built at the bottom of the
+# script (_mini_calendar_html) and its CSS carries the same cell height.
+_MINI_CAL_WEEKS = 4
+_MINI_CAL_COLS = 5  # weekdays only — equity prints never land on a weekend
+_MINI_CAL_CELL = 62  # px; passed to calendar_css as cell_height, and sizes
+                     # the loading skeleton so both stay one number
+
 # Upcoming earnings — a compact 3-week calendar, the full-width centerpiece of
 # this section. Reserve the slot here; its yfinance pass fills it at the bottom
 # of the script so the rest of the page paints first (deferred-slot pattern).
-_earn_slot = st.container()
+# The shimmer is the grid at full size, so the cards below never shift when the
+# real one drops in.
+_earn_slot = skeletons.reserve(
+    "calendar",
+    border=True,
+    title=True,
+    weeks=_MINI_CAL_WEEKS,
+    cols=_MINI_CAL_COLS,
+    cell=_MINI_CAL_CELL,
+)
 
 # Ledger/price cards below, bordered and two per row on desktop (st.columns
 # stack full-width on phones).
@@ -474,14 +502,19 @@ if txs:
             label=tr("home.link_import"),
             icon=":material/upload_file:",
         )
-    _xt_slot = _r1b.container()
+    _xt_col = _r1b
 else:
-    _xt_slot = _r1a.container()
+    _xt_col = _r1a
+# Second deferred card: its 52-week scan is a 1y bulk download, so it too
+# shimmers a table until the fill at the bottom of the script.
+_xt_slot = skeletons.reserve(
+    "table", container=_xt_col, border=True, title=True, rows=4, cols=3
+)
 
 
 # Defined above the refresh button so its clear() call can reference it; the
 # actual 1y fetch still only runs in the deferred fill at the bottom.
-@st.cache_data(ttl=6 * 3600, show_spinner=tr("home.loading_extremes"))
+@st.cache_data(ttl=6 * 3600, show_spinner=False)
 def _year_extremes(tickers: tuple[str, ...]) -> list[tuple[str, float, str, float | None]]:
     """(ticker, last close, "high"/"low", distance) for names within 2% of
     their 52-week high or low — one bulk 1y download, keyed by the ticker tuple
@@ -512,35 +545,49 @@ if not holdings:
         icon=":material/account_circle:",
     )
 
+# The watchlist close burst runs here rather than higher up so the two deferred
+# cards above are already shimmering while it waits on Yahoo. A throttled Yahoo
+# or dead network must dim/blank the watchlist rows, not crash the page. The
+# miss isn't cached (st.cache_data skips exceptions), so a rerun retries; the
+# toast tells the reader why the rows are blank.
+try:
+    closes = recent_closes(tuple(h.ticker for h in holdings)) if holdings else {}
+except (YFRateLimitError, URLError) as exc:
+    notices.data_toast(exc)
+    closes = {}
+
 
 def _watch_table(tickers: list[str]) -> None:
     """Ticker | last close | day % for one watchlist group."""
-    # Market closed → the close-to-close day % can be a flat premarket 0%, so
-    # pull the last regular-session move from fast_info for those names.
-    off = tuple(t for t in tickers if not market_live(t))
-    moves = last_session_moves(off) if off else {}
-    rows = []
-    for t in tickers:
-        c = closes.get(t) or []
-        last = c[-1] if c else float("nan")
-        day = (c[-1] / c[-2] - 1) if len(c) >= 2 and c[-2] else float("nan")
-        day = moves.get(t, day)
-        rows.append({"ticker": t, "price": last, "day_pct": day})
-    st.html(
-        ticker_table_html(
-            pd.DataFrame(rows),
-            fmt={"price": "{:,.2f}", "day_pct": "{:+.2%}"},
-            signed=("day_pct",),
-            labels={
-                "ticker": tr("home.col_ticker"),
-                "price": tr("home.col_last_close"),
-                "day_pct": tr("home.col_day_pct"),
-            },
-            muted={t for t in tickers if not market_live(t)},
-            muted_cols=("day_pct",),
-            mobile={"value": "price", "delta": "day_pct"},
+    # One row per ticker in the placeholder, so the expander opens at the
+    # height it will keep once the off-session moves come back.
+    with skeletons.slot("table", rows=len(tickers), cols=3) as box:
+        # Market closed → the close-to-close day % can be a flat premarket 0%,
+        # so pull the last regular-session move from fast_info for those names.
+        off = tuple(t for t in tickers if not market_live(t))
+        moves = last_session_moves(off) if off else {}
+        rows = []
+        for t in tickers:
+            c = closes.get(t) or []
+            last = c[-1] if c else float("nan")
+            day = (c[-1] / c[-2] - 1) if len(c) >= 2 and c[-2] else float("nan")
+            day = moves.get(t, day)
+            rows.append({"ticker": t, "price": last, "day_pct": day})
+        box.container().html(
+            ticker_table_html(
+                pd.DataFrame(rows),
+                fmt={"price": "{:,.2f}", "day_pct": "{:+.2%}"},
+                signed=("day_pct",),
+                labels={
+                    "ticker": tr("home.col_ticker"),
+                    "price": tr("home.col_last_close"),
+                    "day_pct": tr("home.col_day_pct"),
+                },
+                muted={t for t in tickers if not market_live(t)},
+                muted_cols=("day_pct",),
+                mobile={"value": "price", "delta": "day_pct"},
+            )
         )
-    )
 
 
 # Favorites first, then each tag group (a ticker can appear in several),
@@ -580,17 +627,17 @@ if holdings or positions:
 # Same fingerprint as the Portfolio page's calls, so the cache entry is
 # shared and hot after either page built it.
 if _spark_slot is not None:
-    # Called inside the slot so the cold-build spinner shows in the chart's
-    # cell instead of at the page bottom.
-    with _spark_slot:
-        try:
-            _hist, _, _ = ledger_history((len(txs), txs[-1].date, date.today()), DB)
-        except (YFRateLimitError, URLError):
-            raise  # app-level banner handles these with retry
-        except Exception:
-            # Price-span build failed — drop the sparkline, keep the page.
-            st.warning(tr("home.data_unavailable"))
-            _hist = pd.DataFrame()
+    # The chart skeleton reserved up in the glance card is on screen for this
+    # call; every path below either fills that slot or clears it.
+    try:
+        _hist, _, _ = ledger_history((len(txs), txs[-1].date, date.today()), DB)
+    except (YFRateLimitError, URLError) as exc:
+        notices.data_toast(exc)
+        _hist = pd.DataFrame()  # sparkline dropped, rest of the page stands
+    except Exception:
+        # Price-span build failed — drop the sparkline, keep the page.
+        _spark_slot.container().warning(tr("home.data_unavailable"))
+        _hist = pd.DataFrame()
     if not _hist.empty:
         # ffill BEFORE the 30-day slice so both lines enter the window
         # continuous instead of starting on the first in-window quote.
@@ -693,14 +740,19 @@ if _spark_slot is not None:
             hoverlabel=HOVERLABEL,
             # Transparent so the sparkline blends into its card surface
             # (same reason as show_chart), not Streamlit's darker page paper.
-            paper_bgcolor="rgba(0,0,0,0)",
-            plot_bgcolor="rgba(0,0,0,0)",
+            paper_bgcolor=TRANSPARENT,
+            plot_bgcolor=TRANSPARENT,
         )
-        _spark_slot.plotly_chart(fig, config={"displayModeBar": False})
+        _spark_slot.container().plotly_chart(fig, config={"displayModeBar": False})
+    elif not _spark_slot.resolved:
+        # Nothing to plot — a throttled fetch, or a book younger than the two
+        # points a line needs. Drop the shimmer rather than leave it sweeping
+        # over a cell that will never fill.
+        _spark_slot.clear()
 
 
 # --------------------------------------------- earnings calendar (slot fill)
-@st.cache_data(ttl=6 * 3600, show_spinner=tr("home.loading_earnings"))
+@st.cache_data(ttl=6 * 3600, show_spinner=False)
 def _cal_data(tickers: tuple[str, ...]):
     """(upcoming events, past reported results) for the calendar — one parallel
     yfinance pass, keyed by the ticker tuple so watchlist or portfolio edits
@@ -716,29 +768,13 @@ def _cal_data(tickers: tuple[str, ...]):
 # sit permanently empty and just waste width. Upcoming chips are neutral (red
 # when ≤7 days out); past prints are green/red beat/miss chips that open a
 # result overview on click — same behaviour as the full calendar page.
-_MINI_CAL_WEEKS = 4
-_MINI_CAL_CSS = """
-  .mini-cal {width:100%; border-collapse:separate; border-spacing:4px; table-layout:fixed;}
-  .mini-cal th {font-size:0.64rem; text-transform:uppercase; letter-spacing:.06em;
-                color:#827F8C; font-weight:600; padding:0.2rem 0.4rem; text-align:left;}
-  .mini-cal td {border:1px solid #3B3942; border-radius:8px; vertical-align:top;
-                width:20%; height:62px; padding:0.3rem 0.35rem;}
-  .mini-cal td.past {background:rgba(59,57,66,.25);}
-  .mini-cal td.today {background:#301263; border-color:#A98EF7;}
-  .mini-daynum {font-size:0.7rem; color:#696673; font-weight:600; margin-bottom:0.15rem;}
-  .mini-cal td.today .mini-daynum {color:#C6B7FB;}
-  .mini-chip {display:inline-flex; align-items:center; gap:0.25rem;
-              margin:0 0.15rem 0.15rem 0; padding:0.06rem 0.28rem; border-radius:4px;
-              background:#4E2092; font-size:0.66rem; font-weight:600;
-              line-height:1.4; max-width:100%; color:#DED7FD;}
-  .mini-chip.soon {background:rgba(204,64,47,.25); color:#FFD2CB;}
-  .mini-chip.beat {background:rgba(42,130,0,.35); color:#DBFFD2;}
-  .mini-chip.miss {background:rgba(204,64,47,.25); color:#FFD2CB;}
-  .mini-chip.past {cursor:pointer;}
-  .mini-chip.past:hover {background:#6A2EBF; color:#FEFEFF;}
-  .mini-chip img {width:13px; height:13px; border-radius:3px; object-fit:contain;}
-  .mini-chip span {white-space:nowrap; overflow:hidden; text-overflow:ellipsis;}
-"""
+# Five weekday columns in a narrow card — the shared grid, compact density.
+_MINI_CAL_CSS = calendar_css(
+    "mini",
+    density="compact",
+    cell_height=f"{_MINI_CAL_CELL}px",
+    cell_width="20%",
+)
 
 # Clickable grid, declared once at module scope (never inside a function — the
 # CCv2 registry keys on the name). Past chips carry data-ticker/data-date and
@@ -795,7 +831,7 @@ def _mini_calendar_html(start: date, by_date: dict[date, list], res_by_date: dic
         cells = []
         for wd in range(5):
             day = start + timedelta(days=week * 7 + wd)
-            cls = "today" if day == ref else ("past" if day < ref else "")
+            cls = "today" if day == ref else ("dim" if day < ref else "")
             cls_attr = f' class="{cls}"' if cls else ""
             chips = "".join(_mini_result_chip(r, names, logos) for r in res_by_date.get(day, []))
             chips += "".join(_mini_chip(e, names, logos) for e in by_date.get(day, []))
@@ -812,13 +848,18 @@ _earn_tickers = tuple(
     sorted(t for t in _held | set(favs) | _tagged if not is_crypto(t))
 )
 
-if _earn_tickers:
+if not _earn_tickers:
+    # Nothing to fetch (no stocks held or starred) — the card never comes,
+    # so retire its placeholder instead of shimmering forever.
+    _earn_slot.clear()
+else:
     with _earn_slot.container(border=True, height="stretch"):
         st.markdown(tr("home.earnings_upcoming"))
         try:
             _events, _results = _cal_data(_earn_tickers)
-        except (YFRateLimitError, URLError):
-            raise  # app-level banner handles these with retry
+        except (YFRateLimitError, URLError) as exc:
+            notices.data_toast(exc)
+            _events = _results = None  # card shows its unavailable stub
         except Exception:
             # Non-banner failure (payload/parser change): stub the card and
             # keep the page — the miss isn't cached, so a rerun retries.
@@ -876,13 +917,16 @@ if _earn_tickers:
 # no meaningful 52-week narrative here and are skipped.
 _xt_tickers = tuple(sorted(t for t in _held | set(favs) if not is_crypto(t)))
 
-if _xt_tickers:
+if not _xt_tickers:
+    _xt_slot.clear()  # nothing to scan — retire the placeholder
+else:
     with _xt_slot.container(border=True):
         st.markdown(tr("home.extremes_52w"))
         try:
             _extremes = _year_extremes(_xt_tickers)
-        except (YFRateLimitError, URLError):
-            raise  # app-level banner handles these with retry
+        except (YFRateLimitError, URLError) as exc:
+            notices.data_toast(exc)
+            _extremes = None  # card shows its unavailable stub
         except Exception:
             # None ≠ [] — an empty scan means "nothing at extremes", a failed
             # one shows the unavailable stub; the miss isn't cached, so a

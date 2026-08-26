@@ -25,7 +25,7 @@ from cryptography.fernet import Fernet
 from stocks.chat import engine
 from stocks.config import load_watchlist
 from stocks.secrets_env import secret
-from stocks.web import auth, chat_actions, chat_skills, chat_web, llm
+from stocks.web import auth, chat_actions, chat_skills, chat_web, llm, skeletons
 from stocks.web.i18n import t as tr
 from stocks.web.portfolio_data import enriched_positions
 from stocks.web.widgets import asset_logo, brand_logo, db_mtime
@@ -363,6 +363,25 @@ def _try_action(provider: llm.Provider, api_key: str,
     return act
 
 
+def _retire_on_first_chunk(pending, chunks):
+    """Yield `chunks`, dropping `pending`'s skeleton as the first one lands.
+
+    st.write_stream renders nothing until the provider returns its first
+    token, so the placeholder has to survive *into* the streaming call and be
+    retired from inside it — clearing beforehand would leave the bubble blank
+    for exactly the wait it exists to cover. The finally covers a stream that
+    ends without yielding anything at all.
+    """
+    try:
+        for i, chunk in enumerate(chunks):
+            if i == 0:
+                pending.clear()
+            yield chunk
+    finally:
+        if not pending.resolved:
+            pending.clear()
+
+
 # ------------------------------------------------------------- context
 
 
@@ -449,14 +468,18 @@ def render_conversation(ns: str, provider: llm.Provider, model: str, api_key: st
     # Generate whenever the last turn is a user turn still awaiting a reply
     # (covers both a fresh message and a Regenerate through one code path).
     if history and history[-1]["role"] == "user":
+        # The reply's bubble opens before any of the work behind it, holding a
+        # shimmer of answer-shaped lines: the action probe, the routing calls,
+        # the searches and the wait on the provider all pass with the bubble
+        # otherwise empty, and the reader can see where the answer will land.
+        pending = skeletons.reserve("text", container=box, lines=3, width="70%")
         # App actions first: an executed action (favorite / alert / group)
         # answers with a deterministic localized confirmation — no main model
         # call, no free-quota spend.
-        with st.spinner(tr("chat.thinking")):
-            act = _try_action(provider, api_key, history[-1]["content"])
+        act = _try_action(provider, api_key, history[-1]["content"])
         if act is not None:
             note = _action_reply(act)
-            with box, st.chat_message("assistant"):
+            with pending.container(), st.chat_message("assistant"):
                 st.markdown(note)
             history.append(
                 {"role": "assistant", "content": note, "action": act.kind}
@@ -464,23 +487,22 @@ def render_conversation(ns: str, provider: llm.Provider, model: str, api_key: st
             auth.save_chat(history)
         else:
             if provider.id == "free" and not _spend_free_quota():
+                pending.clear()
                 history.pop()  # drop the turn we won't answer
                 auth.save_chat(history)
                 st.error(tr("chat.free_cap", cap=_free_daily_cap()))
                 st.stop()
             with box, st.chat_message("assistant"):
+                # Routing and search run under the shimmer above; it survives
+                # into write_stream and is retired by _retire_on_first_chunk
+                # the moment the model's first token arrives (write_stream
+                # itself shows nothing until then).
                 try:
-                    # First spinner covers the skill + web routing calls; the
-                    # search one covers the DuckDuckGo round-trips; the last
-                    # covers the wait for the first token (write_stream shows
-                    # nothing until the model responds).
-                    with st.spinner(tr("chat.thinking")):
-                        skills = _resolve_skills(provider, api_key, history)
-                        queries = _plan_web(provider, api_key, history)
+                    skills = _resolve_skills(provider, api_key, history)
+                    queries = _plan_web(provider, api_key, history)
                     hits: list[chat_web.Result] = []
                     if queries:
-                        with st.spinner(tr("chat.searching")):
-                            hits = chat_web.search(queries)
+                        hits = chat_web.search(queries)
                     if skills:
                         st.caption(_lens_label(skills))
                     # Hits ride on the outgoing copy of the user turn, not the
@@ -490,15 +512,18 @@ def render_conversation(ns: str, provider: llm.Provider, model: str, api_key: st
                     if hits:
                         msgs[-1]["content"] = chat_web.augment(
                             msgs[-1]["content"], hits)
-                    with st.spinner(tr("chat.thinking")):
-                        answer = st.write_stream(
+                    answer = st.write_stream(
+                        _retire_on_first_chunk(
+                            pending,
                             provider.stream(api_key, model,
-                                            _system_prompt(skills), msgs)
+                                            _system_prompt(skills), msgs),
                         )
+                    )
                     web_sources = chat_web.sources(hits)
                     if web_sources:
                         st.caption(_sources_label(web_sources))
                 except Exception as exc:  # classified per provider; unknown -> re-raise
+                    pending.clear()
                     err = provider.error_key(exc)
                     if err is None:
                         raise
@@ -551,24 +576,26 @@ _PANEL_CSS = """
 /* Design's topbar AI button: square-ish 8px radius, brand purple 600 fill,
    purple glow shadow, purple 700 on hover. */
 .st-key-chatfab button {
-  border-radius: 8px; width: 36px; height: 36px; padding: 0;
-  box-shadow: 0px 4px 12px rgba(127, 63, 232, 0.25);
-  background: #7F3FE8 !important;
-  border-color: #7F3FE8 !important; color: #FEFEFF !important;
+  border-radius: var(--ag-radius-sm); width: 36px; height: 36px; padding: 0;
+  box-shadow: 0px 4px 12px var(--ag-cta-glow);
+  background: var(--ag-brand-cta) !important;
+  border-color: var(--ag-brand-cta) !important;
+  color: var(--ag-text-primary) !important;
 }
 .st-key-chatfab button:hover {
-  background: #6A2EBF !important;
-  border-color: #6A2EBF !important; color: #FEFEFF !important;
+  background: var(--ag-purple-700) !important;
+  border-color: var(--ag-purple-700) !important;
+  color: var(--ag-text-primary) !important;
 }
-.st-key-chatfab button * { color: #FEFEFF !important; }
+.st-key-chatfab button * { color: var(--ag-text-primary) !important; }
 .st-key-chatpanel {
   position: fixed; top: 0; right: 0; bottom: 0;   /* full height */
   /* width driven by the --chat-w var (set live by the width slider), never
      wider than the viewport. */
   width: min(var(--chat-w, 380px), 100vw); z-index: 1000000;
-  background: #18161C; border-left: 1px solid #3B3942;
+  background: var(--ag-surface-page); border-left: 1px solid var(--ag-border);
   padding: 0.75rem 1rem 1rem; overflow: hidden;
-  box-shadow: -10px 0 30px rgba(0, 0, 0, 0.35);
+  box-shadow: -10px 0 30px var(--ag-shadow-color);
   display: flex; flex-direction: column;
 }
 /* Drag-to-resize: a grab strip on the panel's left edge. The JS in
@@ -580,10 +607,13 @@ _PANEL_CSS = """
 }
 .st-key-chatpanel .chat-resize-handle::before {
   content: ""; position: absolute; left: 2px; top: 50%;
-  transform: translateY(-50%); width: 3px; height: 44px; border-radius: 3px;
-  background: #3B3942; transition: background 0.15s;
+  transform: translateY(-50%); width: 3px; height: 44px;
+  border-radius: var(--ag-radius-xs);
+  background: var(--ag-border); transition: background 0.15s;
 }
-.st-key-chatpanel .chat-resize-handle:hover::before { background: #A98EF7; }
+.st-key-chatpanel .chat-resize-handle:hover::before {
+  background: var(--ag-brand-accent);
+}
 @media (max-width: 640px) { .st-key-chatpanel .chat-resize-handle { display: none; } }
 /* Panel open = full-height drawer, so it would cover the fixed top-bar search
    (widgets.py .st-key-topbar_search) pinned top-right. Pull the search left of
@@ -603,7 +633,7 @@ body:has(.st-key-chatpanel) .st-key-topbar_search {
 }
 .st-key-panel_scroll { flex: 1 1 auto; min-height: 0; height: auto !important; }
 .st-key-chatpanel [data-testid="stChatInput"] {
-  background: #18161C; padding-top: 0.4rem;
+  background: var(--ag-surface-page); padding-top: 0.4rem;
 }
 /* Send button on the LEFT of the input. The input row is a flex container of
    [textarea wrapper (order 0), upload group (order -1), button group (order 0)];
@@ -623,24 +653,31 @@ body:has(.st-key-chatpanel) .st-key-topbar_search {
   background: transparent; gap: 0.6rem; padding: 0.15rem 0;
 }
 .st-key-chatpanel [data-testid="stChatMessageAvatarAssistant"] {
-  background: linear-gradient(135deg, #A98EF7, #6A2EBF) !important;
-  box-shadow: 0 2px 8px rgba(127, 63, 232, 0.4);
+  background: linear-gradient(
+    135deg, var(--ag-brand-accent), var(--ag-purple-700)
+  ) !important;
+  box-shadow: 0 2px 8px var(--ag-cta-halo);
 }
 .st-key-chatpanel [data-testid="stChatMessageAvatarUser"] {
-  background: #28262D !important; border: 1px solid #3B3942;
+  background: var(--ag-surface-card) !important;
+  border: 1px solid var(--ag-border);
 }
-.st-key-chatpanel [data-testid="stChatMessageAvatarAssistant"] * { color: #FEFEFF !important; }
-.st-key-chatpanel [data-testid="stChatMessageAvatarUser"] * { color: #C6B7FB !important; }
+.st-key-chatpanel [data-testid="stChatMessageAvatarAssistant"] * {
+  color: var(--ag-text-primary) !important;
+}
+.st-key-chatpanel [data-testid="stChatMessageAvatarUser"] * {
+  color: var(--ag-purple-400) !important;
+}
 .st-key-chatpanel [data-testid="stChatMessageContent"] {
-  border-radius: 14px; padding: 0.55rem 0.85rem;
+  border-radius: var(--ag-radius-md); padding: 0.55rem 0.85rem;
 }
 .st-key-chatpanel [data-testid="stChatMessage"]:has([data-testid="stChatMessageAvatarAssistant"])
   [data-testid="stChatMessageContent"] {
-  background: #28262D; border: 1px solid #3B3942;
+  background: var(--ag-surface-card); border: 1px solid var(--ag-border);
 }
 .st-key-chatpanel [data-testid="stChatMessage"]:has([data-testid="stChatMessageAvatarUser"])
   [data-testid="stChatMessageContent"] {
-  background: rgba(127, 63, 232, 0.16); border: 1px solid rgba(127, 63, 232, 0.35);
+  background: var(--ag-cta-tint); border: 1px solid var(--ag-cta-tint-edge);
 }
 /* Settings expander: captions (the skills-mode hint) spill a few px past
    their under-sized container — same Streamlit quirk as the metric-row

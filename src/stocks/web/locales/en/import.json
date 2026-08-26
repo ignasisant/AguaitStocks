@@ -18,7 +18,6 @@
   "import.last_import_help": "**Clear last import** deletes exactly these rows from the ledger — no re-upload needed. **Dismiss** only forgets this note; the ledger stays.",
   "import.no_rows_parsed": "No rows parsed — is this a {platform} statement? {hint}",
   "import.wipe_checkbox": "Wipe ledger before importing (clean re-import)",
-  "import.validating": "Validating tickers, dates and quantities…",
   "import.preview": "Preview — {summary}",
   "import.no_importable": "No importable rows survived validation.",
   "import.rows_with_warnings": "{n} rows import with warnings — review:",

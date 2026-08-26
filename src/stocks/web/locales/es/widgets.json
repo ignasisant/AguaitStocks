@@ -14,6 +14,7 @@
   "widgets.crypto": "Cripto",
   "widgets.recent": "Recientes",
   "widgets.from_sec_search": "De la búsqueda de símbolos de la SEC",
+  "widgets.from_world_search": "Búsqueda mundial de símbolos",
   "widgets.sign_in_favorite": "Inicia sesión para marcar favoritos y etiquetar",
   "widgets.toast_fav_added": "{ticker} añadido a favoritos",
   "widgets.toast_fav_removed": "{ticker} eliminado de favoritos",

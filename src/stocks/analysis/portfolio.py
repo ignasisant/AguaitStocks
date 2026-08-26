@@ -15,6 +15,7 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
 
 import pandas as pd
 
@@ -22,6 +23,9 @@ from stocks.config import Holding, load_watchlist
 from stocks.data.fetch import fetch_many
 from stocks.data.fx import ToEur
 from stocks.data.fx import to_eur as _default_to_eur
+
+if TYPE_CHECKING:
+    from datetime import datetime
 
 TRADING_DAYS = 252
 # Default benchmarks: US large-cap, US tech, emerging markets.
@@ -639,7 +643,7 @@ def _session_open(
     tz_name: str,
     open_hm: tuple[int, int],
     close_hm: tuple[int, int],
-    now_utc: "datetime | None" = None,
+    now_utc: datetime | None = None,
 ) -> bool:
     """Whether `now` is inside a Mon–Fri open→close window in `tz_name`.
 
@@ -654,13 +658,13 @@ def _session_open(
     return time(*open_hm) <= now.time() < time(*close_hm)
 
 
-def us_market_open(now_utc: "datetime | None" = None) -> bool:
+def us_market_open(now_utc: datetime | None = None) -> bool:
     """Whether the US equity regular session (Mon–Fri, 09:30–16:00 America/
     New_York) is open right now. See `_session_open` for the holiday caveat."""
     return _session_open("America/New_York", (9, 30), (16, 0), now_utc)
 
 
-def market_live(ticker: str, now_utc: "datetime | None" = None) -> bool:
+def market_live(ticker: str, now_utc: datetime | None = None) -> bool:
     """Whether `ticker` is in a live regular session on its own exchange now.
 
     Crypto trades 24/7 (always live). Equities key off the Yahoo symbol suffix

@@ -16,6 +16,8 @@
   "common.loading": "Cargando…",
   "common.rate_limited": "Yahoo Finance está limitando las peticiones ahora mismo. Los datos en caché siguen visibles; las cotizaciones frescas suelen volver en unos minutos.",
   "common.offline": "Sin conexión a internet. Los datos en caché siguen visibles; comprueba la red y reintenta.",
+  "common.toast_rate_limited": "Yahoo Finance está limitando las peticiones — faltan algunos datos. Suele resolverse en unos minutos.",
+  "common.toast_offline": "Sin conexión con el proveedor de datos — faltan algunos datos.",
   "common.retry": "Reintentar",
   "common.sync_failed": "Falló la sincronización con la nube; el cambio queda guardado en este dispositivo por ahora.",
   "common.storage_restore_failed": "No se puede acceder al almacenamiento en la nube; el inicio de sesión se ha detenido para proteger tus datos. Reintenta en unos minutos."

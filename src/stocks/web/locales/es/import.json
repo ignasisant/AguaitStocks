@@ -18,7 +18,6 @@
   "import.last_import_help": "**Borrar la última importación** elimina exactamente estas filas del libro — sin necesidad de volver a subir nada. **Descartar** solo olvida esta nota; el libro permanece.",
   "import.no_rows_parsed": "No se analizó ninguna fila — ¿es este un extracto de {platform}? {hint}",
   "import.wipe_checkbox": "Vaciar el libro antes de importar (reimportación limpia)",
-  "import.validating": "Validando tickers, fechas y cantidades…",
   "import.preview": "Vista previa — {summary}",
   "import.no_importable": "Ninguna fila importable superó la validación.",
   "import.rows_with_warnings": "{n} filas se importan con advertencias — revisa:",
