@@ -49,6 +49,10 @@ wheels/
 # Streamlit secrets (never commit)
 .streamlit/secrets.toml
 
+# VM deploy secrets (Oracle + Cloudflare Tunnel) — never commit
+/deploy/.env
+/deploy/secrets.toml
+
 # Agent tooling: local symlinks into .venv (per-machine, not for the repo)
 /.claude/
 /.agents/

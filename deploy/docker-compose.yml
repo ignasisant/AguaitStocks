@@ -1,0 +1,40 @@
+# Aguait Stocks — Oracle Cloud Always Free VM deploy.
+#
+# Two containers on a private compose network:
+#   app         — the Streamlit dashboard (built from the repo-root Dockerfile),
+#                 listening on 8501, NOT published to the host.
+#   cloudflared — Cloudflare Tunnel, the only thing that reaches `app`. It dials
+#                 out to Cloudflare (no inbound ports on the VM), so the Oracle
+#                 security list / iptables stay closed. TLS + the public
+#                 hostname are handled by Cloudflare.
+#
+# Secrets: bind-mount the real .streamlit/secrets.toml (below) — the app reads
+# it directly, so STREAMLIT_SECRETS_TOML is not needed here. TUNNEL_TOKEN comes
+# from deploy/.env (see .env.example).
+#
+# Run on the VM:  docker compose -f deploy/docker-compose.yml up -d --build
+
+services:
+  app:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    image: aguait-stocks:latest
+    restart: unless-stopped
+    expose:
+      - "8501" # reachable only inside the compose network (cloudflared -> app:8501)
+    volumes:
+      # Real secrets live on the VM, mounted read-only. Entrypoint finds the
+      # file already present (no STREAMLIT_SECRETS_TOML env), leaves it, and
+      # Streamlit reads it. Keep deploy/secrets.toml off git (see .gitignore).
+      - ./secrets.toml:/app/.streamlit/secrets.toml:ro
+
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    restart: unless-stopped
+    command: tunnel --no-autoupdate run
+    environment:
+      - TUNNEL_TOKEN=${TUNNEL_TOKEN:?set TUNNEL_TOKEN in deploy/.env}
+    depends_on:
+      app:
+        condition: service_healthy # gated on the Dockerfile HEALTHCHECK

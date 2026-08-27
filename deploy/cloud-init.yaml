@@ -1,0 +1,35 @@
+#cloud-config
+# Oracle Cloud first-boot provisioning for the Aguait Stocks VM.
+# Paste into the Instance -> Advanced -> Management -> "cloud-init script" box
+# when creating the VM (or `oci compute instance launch --user-data-file`).
+#
+# Installs Docker + compose plugin and opens nothing inbound (Cloudflare Tunnel
+# dials out). Ubuntu 24.04 ARM (Canonical-Ubuntu-24.04-aarch64) assumed.
+
+package_update: true
+package_upgrade: true
+
+packages:
+  - ca-certificates
+  - curl
+  - git
+
+runcmd:
+  # --- Docker Engine + compose plugin (official convenience script) ---
+  - curl -fsSL https://get.docker.com | sh
+  - usermod -aG docker ubuntu
+  # --- Oracle Ubuntu images ship a locked-down iptables; the tunnel is
+  #     outbound-only so no inbound rule is needed, but drop the default
+  #     REJECTs that also block Docker's own bridge return traffic on some
+  #     images. Docker manages its own chains; flush the leftover INPUT rejects.
+  - netfilter-persistent flush || true
+  - systemctl enable --now docker
+  # --- Clone the repo so `docker compose build` has the source ---
+  - git clone https://github.com/ignasisant/AguaitStocks.git /opt/aguait-stocks
+  - chown -R ubuntu:ubuntu /opt/aguait-stocks
+
+# After boot, SSH in as `ubuntu` and finish:
+#   cd /opt/aguait-stocks/deploy
+#   cp .env.example .env         # paste TUNNEL_TOKEN
+#   cp ~/secrets.toml secrets.toml   # your real .streamlit/secrets.toml
+#   docker compose up -d --build
