@@ -18,11 +18,13 @@ runcmd:
   # --- Docker Engine + compose plugin (official convenience script) ---
   - curl -fsSL https://get.docker.com | sh
   - usermod -aG docker ubuntu
-  # --- Oracle Ubuntu images ship a locked-down iptables; the tunnel is
-  #     outbound-only so no inbound rule is needed, but drop the default
-  #     REJECTs that also block Docker's own bridge return traffic on some
-  #     images. Docker manages its own chains; flush the leftover INPUT rejects.
-  - netfilter-persistent flush || true
+  # --- Open 80/443 on the host firewall for Caddy's ACME challenge + HTTPS.
+  #     Oracle Ubuntu images ship an iptables ruleset whose INPUT chain ends in
+  #     a REJECT; insert ACCEPTs above it (position 6 = after the established/
+  #     related rules) and persist. The VCN security list must ALSO allow them.
+  - iptables -I INPUT 6 -m state --state NEW -p tcp --dport 80 -j ACCEPT
+  - iptables -I INPUT 6 -m state --state NEW -p tcp --dport 443 -j ACCEPT
+  - netfilter-persistent save || true
   - systemctl enable --now docker
   # --- Clone the repo so `docker compose build` has the source ---
   - git clone https://github.com/ignasisant/AguaitStocks.git /opt/aguait-stocks
@@ -30,6 +32,6 @@ runcmd:
 
 # After boot, SSH in as `ubuntu` and finish:
 #   cd /opt/aguait-stocks/deploy
-#   cp .env.example .env         # paste TUNNEL_TOKEN
-#   cp ~/secrets.toml secrets.toml   # your real .streamlit/secrets.toml
+#   cp .env.example .env             # set SITE_ADDRESS + DUCKDNS_SUBDOMAIN/TOKEN
+#   cp ~/secrets.toml secrets.toml   # your real .streamlit/secrets.toml (scp'd up)
 #   docker compose up -d --build

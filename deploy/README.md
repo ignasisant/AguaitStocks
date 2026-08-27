@@ -1,87 +1,92 @@
-# Deploy — Oracle Cloud Always Free VM + Cloudflare Tunnel
+# Deploy — Oracle Cloud Always Free VM + DuckDNS + Caddy
 
-Runs the dashboard container on a free-forever Oracle ARM VM, exposed over a
-Cloudflare Tunnel (no open ports, no public IP, TLS handled by Cloudflare).
-Chosen after HF moved Docker Spaces behind PRO; the same `Dockerfile` runs
-here unchanged.
+Runs the dashboard container on a free-forever Oracle ARM VM, with a free
+DuckDNS hostname and automatic HTTPS via Caddy (Let's Encrypt). Chosen after
+HF moved Docker Spaces behind PRO, and because no owned domain is available
+(so Cloudflare Tunnel isn't an option). The same `Dockerfile` runs here
+unchanged.
 
 ```
-  Google login ─► stocks.<domain> ─► Cloudflare edge ─► Tunnel ─► cloudflared ─► app:8501
-                                                        (outbound from the VM only)
+  Google login ─► https://<name>.duckdns.org ─► Caddy :443 (auto-TLS) ─► app:8501
+                  (DNS: DuckDNS → VM public IP)
 ```
 
-## 1. Create the VM (Oracle console)
+## 1. Create the VM (Oracle console)   ✅ done
 
-1. Sign up / log in: <https://cloud.oracle.com> (Always Free needs a card for
-   identity verification; it is **not** charged while you stay on Always-Free
-   shapes).
-2. **Compute → Instances → Create instance**:
-   - **Image**: Canonical Ubuntu 24.04 (aarch64).
-   - **Shape**: `VM.Standard.A1.Flex` → 2 OCPU / 12 GB (or up to 4/24, all
-     free). If capacity is unavailable in your home region, retry or pick
-     another AD/region.
-   - **Networking**: keep the default VCN, assign a public IPv4.
-   - **SSH keys**: upload your public key (or let it generate one).
-   - **Advanced → Management → cloud-init script**: paste
-     [`cloud-init.yaml`](cloud-init.yaml) (installs Docker + clones the repo).
-3. Create. Note the **public IP**.
+`VM.Standard.A1.Flex`, 2 OCPU / 12 GB, Ubuntu 24.04 aarch64, cloud-init from
+[`cloud-init.yaml`](cloud-init.yaml) (installs Docker, opens 80/443 on the host
+firewall, clones the repo to `/opt/aguait-stocks`). Note the **public IP**.
 
-No ingress rule is needed — the tunnel is outbound. (If you skip cloud-init,
-SSH in and install Docker manually, then `git clone` the repo to
-`/opt/aguait-stocks`.)
+## 2. DuckDNS hostname
 
-## 2. Create the Cloudflare Tunnel
+1. <https://www.duckdns.org> → sign in (Google/GitHub).
+2. Add a subdomain, e.g. `aguait-stocks` → gives `aguait-stocks.duckdns.org`.
+3. Set its IP to the VM's **public IP** (the `duckdns` container also keeps
+   this updated automatically once running).
+4. Copy your **token** (top of the page — one per account).
 
-Requires a domain on your Cloudflare account (e.g. `amphoralogistics.com`).
+## 3. Open ports 80 + 443 in the VCN security list
 
-1. <https://one.dash.cloudflare.com> → **Networks → Tunnels → Create a tunnel**
-   → **Cloudflared** → name it `aguait-stocks`.
-2. On the install screen, copy the **token** (the long string after
-   `--token` in the shown command). That is `TUNNEL_TOKEN`.
-3. **Public Hostname → Add**:
-   - **Subdomain**: `stocks` · **Domain**: your domain → URL becomes
-     `https://stocks.<domain>`.
-   - **Service**: **HTTP** → `app:8501`  ← the compose service name/port.
-4. Save. Cloudflare creates the DNS record automatically.
+The host firewall is handled by cloud-init, but Oracle's cloud firewall (the
+VCN security list) still blocks inbound. In the console:
 
-## 3. Configure secrets on the VM
+**Networking → Virtual Cloud Networks →** your VCN **→ Security Lists →**
+the default list **→ Add Ingress Rules**, twice:
 
-SSH in as `ubuntu`, then:
+| Source CIDR | IP Protocol | Destination Port |
+|-------------|-------------|------------------|
+| `0.0.0.0/0` | TCP         | `80`             |
+| `0.0.0.0/0` | TCP         | `443`            |
+
+(Port 80 is required for the Let's Encrypt HTTP challenge and the redirect to
+443; leave both open.)
+
+## 4. Secrets on the VM
+
+From your Mac, copy the real Streamlit secrets up:
 
 ```bash
-cd /opt/aguait-stocks/deploy
-
-cp .env.example .env
-# edit .env → paste TUNNEL_TOKEN
-
-# copy your real Streamlit secrets to deploy/secrets.toml (scp from your Mac):
-#   scp .streamlit/secrets.toml ubuntu@<VM_IP>:/opt/aguait-stocks/deploy/secrets.toml
+scp .streamlit/secrets.toml ubuntu@<VM_IP>:/opt/aguait-stocks/deploy/secrets.toml
 ```
 
-In that `secrets.toml`, set the deployed URL:
+SSH in and set the env:
+
+```bash
+ssh ubuntu@<VM_IP>
+cd /opt/aguait-stocks && git pull        # get the latest deploy/ files
+cd deploy
+cp .env.example .env
+# edit .env → SITE_ADDRESS=<name>.duckdns.org, DUCKDNS_SUBDOMAIN=<name>, DUCKDNS_TOKEN=...
+nano .env
+```
+
+In `deploy/secrets.toml` set the deployed URL and keep R2 storage:
 
 ```toml
 [auth]
-redirect_uri = "https://stocks.<domain>/oauth2callback"
+redirect_uri = "https://<name>.duckdns.org/oauth2callback"
+
+[storage]   # keep this — the VM disk is not backed up; user data lives in R2
+# endpoint_url / bucket / access_key_id / secret_access_key ...
 ```
 
-Include `[storage]` (R2) so user data persists — the VM disk is not backed up.
+## 5. Update Google OAuth
 
-## 4. Update Google OAuth
+[Google console → Credentials](https://console.cloud.google.com/apis/credentials)
+→ your OAuth client → **Authorized redirect URIs** → add
+`https://<name>.duckdns.org/oauth2callback` (must equal `redirect_uri` above).
 
-Google console → your OAuth client → **Authorized redirect URIs** → add
-`https://stocks.<domain>/oauth2callback` (must equal `redirect_uri` above).
-
-## 5. Launch
+## 6. Launch
 
 ```bash
 cd /opt/aguait-stocks/deploy
 docker compose up -d --build      # first build ~3-5 min on ARM
-docker compose logs -f cloudflared # expect "Registered tunnel connection"
-docker compose logs -f app         # expect "You can now view your Streamlit app"
+docker compose logs -f caddy      # expect "certificate obtained successfully"
+docker compose logs -f app        # expect "You can now view your Streamlit app"
 ```
 
-Open `https://stocks.<domain>` — full page, no watermark, never sleeps.
+Open `https://<name>.duckdns.org` — full page, real HTTPS, no watermark,
+never sleeps.
 
 ## Updating later
 
@@ -90,14 +95,20 @@ cd /opt/aguait-stocks && git pull
 docker compose -f deploy/docker-compose.yml up -d --build
 ```
 
-(Optional: a GitHub Actions SSH-deploy job can automate this, like
-`deploy-hf.yml` did — ask if you want it.)
+## Troubleshooting
+
+- **Caddy can't get a cert** → ports 80/443 not reachable. Recheck the VCN
+  security-list ingress (step 3) and that DuckDNS points at the current IP
+  (`dig +short <name>.duckdns.org`).
+- **502 from Caddy** → app still building/unhealthy; `docker compose logs app`.
+- **Login loops / redirect_uri mismatch** → the three URLs must match exactly:
+  DuckDNS host, `[auth] redirect_uri`, Google console URI (all `https`, same
+  subdomain, `/oauth2callback`).
 
 ## Notes
 
-- **Own IP** — Yahoo/yfinance throttles shared cloud IPs (Streamlit Cloud);
-  a dedicated VM IP sidesteps that.
-- **Persistence** — nothing on the box is precious; `data/users/` is mirrored
-  to R2 (`[storage]`). A rebuild/redeploy restores from the bucket.
-- **Cost guardrail** — stay on `VM.Standard.A1.Flex` within 4 OCPU / 24 GB and
-  the boot volume within 200 GB total to remain on Always Free.
+- **Own IP** — sidesteps the yfinance throttling that hits shared cloud IPs.
+- **Persistence** — nothing on the box is precious; `data/users/` mirrors to
+  R2 (`[storage]`). A rebuild restores from the bucket.
+- **Always Free** — stay on `VM.Standard.A1.Flex` within 4 OCPU / 24 GB and
+  total boot volume ≤ 200 GB.
