@@ -1,18 +1,20 @@
-# Aguait Stocks — Oracle Cloud Always Free VM deploy (DuckDNS + Caddy).
+# Aguait Stocks — Oracle Cloud Always Free VM deploy (sslip.io + Caddy).
 #
-# Three containers on a private compose network:
-#   app     — the Streamlit dashboard (built from the repo-root Dockerfile),
-#             listening on 8501, NOT published to the host.
-#   caddy   — reverse proxy on :80/:443, auto-obtains a Let's Encrypt cert for
-#             $SITE_ADDRESS and proxies to app:8501 (WebSocket upgrade included).
-#   duckdns — keeps <subdomain>.duckdns.org pointed at the VM's current public
-#             IP (handles Oracle's ephemeral IP changing across stop/start).
+# Two containers on a private compose network:
+#   app   — the Streamlit dashboard (built from the repo-root Dockerfile),
+#           listening on 8501, NOT published to the host.
+#   caddy — reverse proxy on :80/:443, auto-obtains a Let's Encrypt cert for
+#           $SITE_ADDRESS and proxies to app:8501 (WebSocket upgrade included).
+#
+# Hostname = <vm-public-ip>.sslip.io (magic DNS, no signup, no updater). If the
+# VM's public IP changes, update SITE_ADDRESS + [auth] redirect_uri + the
+# Google console URI — or reserve a static IP (free) to avoid it.
 #
 # Requires ports 80 + 443 open: Oracle VCN security-list ingress AND host
 # iptables (see deploy/README.md). Caddy needs both for the ACME challenge.
 #
 # Secrets: bind-mount the real .streamlit/secrets.toml (app reads it directly).
-# All hostnames/tokens come from deploy/.env (see .env.example).
+# SITE_ADDRESS comes from deploy/.env (see .env.example).
 #
 # Run on the VM:  docker compose -f deploy/docker-compose.yml up -d --build
 
@@ -35,7 +37,7 @@ services:
       - "80:80"
       - "443:443"
     environment:
-      - SITE_ADDRESS=${SITE_ADDRESS:?set SITE_ADDRESS in deploy/.env, e.g. aguait-stocks.duckdns.org}
+      - SITE_ADDRESS=${SITE_ADDRESS:?set SITE_ADDRESS in deploy/.env, e.g. 152-70-1-2.sslip.io}
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy_data:/data # persists the issued cert across restarts (avoid LE rate limits)
@@ -43,14 +45,6 @@ services:
     depends_on:
       app:
         condition: service_healthy # gated on the Dockerfile HEALTHCHECK
-
-  duckdns:
-    image: lscr.io/linuxserver/duckdns:latest
-    restart: unless-stopped
-    environment:
-      - SUBDOMAINS=${DUCKDNS_SUBDOMAIN:?set DUCKDNS_SUBDOMAIN in deploy/.env}
-      - TOKEN=${DUCKDNS_TOKEN:?set DUCKDNS_TOKEN in deploy/.env}
-      - LOG_FILE=false
 
 volumes:
   caddy_data:

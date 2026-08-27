@@ -32,6 +32,6 @@ runcmd:
 
 # After boot, SSH in as `ubuntu` and finish:
 #   cd /opt/aguait-stocks/deploy
-#   cp .env.example .env             # set SITE_ADDRESS + DUCKDNS_SUBDOMAIN/TOKEN
+#   cp .env.example .env             # set SITE_ADDRESS=<ip-with-dashes>.sslip.io
 #   cp ~/secrets.toml secrets.toml   # your real .streamlit/secrets.toml (scp'd up)
 #   docker compose up -d --build

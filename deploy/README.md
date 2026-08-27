@@ -1,14 +1,14 @@
-# Deploy — Oracle Cloud Always Free VM + DuckDNS + Caddy
+# Deploy — Oracle Cloud Always Free VM + sslip.io + Caddy
 
 Runs the dashboard container on a free-forever Oracle ARM VM, with a free
-DuckDNS hostname and automatic HTTPS via Caddy (Let's Encrypt). Chosen after
-HF moved Docker Spaces behind PRO, and because no owned domain is available
-(so Cloudflare Tunnel isn't an option). The same `Dockerfile` runs here
-unchanged.
+hostname from sslip.io (no signup) and automatic HTTPS via Caddy (Let's
+Encrypt). Chosen after HF moved Docker Spaces behind PRO, with no owned domain
+(so Cloudflare Tunnel isn't an option) and DuckDNS being unreliable. The same
+`Dockerfile` runs here unchanged.
 
 ```
-  Google login ─► https://<name>.duckdns.org ─► Caddy :443 (auto-TLS) ─► app:8501
-                  (DNS: DuckDNS → VM public IP)
+  Google login ─► https://<ip-with-dashes>.sslip.io ─► Caddy :443 (auto-TLS) ─► app:8501
+                  (sslip.io resolves the hostname straight to the VM IP)
 ```
 
 ## 1. Create the VM (Oracle console)   ✅ done
@@ -17,13 +17,19 @@ unchanged.
 [`cloud-init.yaml`](cloud-init.yaml) (installs Docker, opens 80/443 on the host
 firewall, clones the repo to `/opt/aguait-stocks`). Note the **public IP**.
 
-## 2. DuckDNS hostname
+## 2. Hostname — sslip.io (no signup)
 
-1. <https://www.duckdns.org> → sign in (Google/GitHub).
-2. Add a subdomain, e.g. `aguait-stocks` → gives `aguait-stocks.duckdns.org`.
-3. Set its IP to the VM's **public IP** (the `duckdns` container also keeps
-   this updated automatically once running).
-4. Copy your **token** (top of the page — one per account).
+sslip.io is magic DNS: `<ip>.sslip.io` resolves to that IP, with no account or
+token. Take the VM's public IP and replace dots with dashes:
+
+    152.70.1.2  ->  152-70-1-2.sslip.io
+
+That is your `SITE_ADDRESS`. (Dotted form `152.70.1.2.sslip.io` also works.)
+
+To keep it stable across stop/start, reserve the IP: **Networking → the VNIC →
+the public IP → Edit → Reserved** (one reserved IP is free). Otherwise, if the
+IP ever changes, update `SITE_ADDRESS` + `[auth] redirect_uri` + the Google
+console URI to the new one.
 
 ## 3. Open ports 80 + 443 in the VCN security list
 
@@ -56,7 +62,7 @@ ssh ubuntu@<VM_IP>
 cd /opt/aguait-stocks && git pull        # get the latest deploy/ files
 cd deploy
 cp .env.example .env
-# edit .env → SITE_ADDRESS=<name>.duckdns.org, DUCKDNS_SUBDOMAIN=<name>, DUCKDNS_TOKEN=...
+# edit .env → SITE_ADDRESS=<ip-with-dashes>.sslip.io
 nano .env
 ```
 
@@ -64,7 +70,7 @@ In `deploy/secrets.toml` set the deployed URL and keep R2 storage:
 
 ```toml
 [auth]
-redirect_uri = "https://<name>.duckdns.org/oauth2callback"
+redirect_uri = "https://<ip-with-dashes>.sslip.io/oauth2callback"
 
 [storage]   # keep this — the VM disk is not backed up; user data lives in R2
 # endpoint_url / bucket / access_key_id / secret_access_key ...
@@ -74,7 +80,8 @@ redirect_uri = "https://<name>.duckdns.org/oauth2callback"
 
 [Google console → Credentials](https://console.cloud.google.com/apis/credentials)
 → your OAuth client → **Authorized redirect URIs** → add
-`https://<name>.duckdns.org/oauth2callback` (must equal `redirect_uri` above).
+`https://<ip-with-dashes>.sslip.io/oauth2callback` (must equal `redirect_uri`
+above).
 
 ## 6. Launch
 
@@ -85,8 +92,8 @@ docker compose logs -f caddy      # expect "certificate obtained successfully"
 docker compose logs -f app        # expect "You can now view your Streamlit app"
 ```
 
-Open `https://<name>.duckdns.org` — full page, real HTTPS, no watermark,
-never sleeps.
+Open `https://<ip-with-dashes>.sslip.io` — full page, real HTTPS, no
+watermark, never sleeps.
 
 ## Updating later
 
@@ -98,12 +105,12 @@ docker compose -f deploy/docker-compose.yml up -d --build
 ## Troubleshooting
 
 - **Caddy can't get a cert** → ports 80/443 not reachable. Recheck the VCN
-  security-list ingress (step 3) and that DuckDNS points at the current IP
-  (`dig +short <name>.duckdns.org`).
+  security-list ingress (step 3) and that the hostname resolves to the VM
+  (`dig +short <ip-with-dashes>.sslip.io` → your VM IP).
 - **502 from Caddy** → app still building/unhealthy; `docker compose logs app`.
 - **Login loops / redirect_uri mismatch** → the three URLs must match exactly:
-  DuckDNS host, `[auth] redirect_uri`, Google console URI (all `https`, same
-  subdomain, `/oauth2callback`).
+  the sslip.io host, `[auth] redirect_uri`, Google console URI (all `https`,
+  same host, `/oauth2callback`).
 
 ## Notes
 

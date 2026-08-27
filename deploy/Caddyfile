@@ -1,5 +1,5 @@
 # Caddy reverse proxy for Aguait Stocks.
-# SITE_ADDRESS (e.g. aguait-stocks.duckdns.org) comes from deploy/.env via
+# SITE_ADDRESS (e.g. 152-70-1-2.sslip.io) comes from deploy/.env via
 # compose. Caddy auto-provisions a Let's Encrypt cert for it (needs :80/:443
 # reachable) and proxies to the app container, upgrading the Streamlit
 # WebSocket (/_stcore/stream) transparently.
