@@ -3,8 +3,9 @@
 # Paste into the Instance -> Advanced -> Management -> "cloud-init script" box
 # when creating the VM (or `oci compute instance launch --user-data-file`).
 #
-# Installs Docker + compose plugin and opens nothing inbound (Cloudflare Tunnel
-# dials out). Ubuntu 24.04 ARM (Canonical-Ubuntu-24.04-aarch64) assumed.
+# Installs Docker + compose plugin, opens 80/443 on the host firewall (Caddy
+# auto-TLS), and clones the repo. Ubuntu 24.04 ARM (Canonical-Ubuntu-24.04-
+# aarch64) assumed.
 
 package_update: true
 package_upgrade: true
