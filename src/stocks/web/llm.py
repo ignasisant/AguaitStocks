@@ -213,7 +213,7 @@ def _gemini_error(exc):
     return None
 
 
-# ------------------------------------------------------- Aguait AI (free chain)
+# ------------------------------------------------------- TopStocks AI (free chain)
 # Keyless for the user: a fixed-order chain of free-tier backends billed to the
 # operator's keys ([free_llm] in secrets.toml). Each entry is (backend id,
 # default model, OpenAI-compatible base_url) — all backends speak the OpenAI
@@ -222,8 +222,16 @@ def _gemini_error(exc):
 
 _FREE_BACKEND_DEFAULTS: tuple[tuple[str, str, str], ...] = (
     ("groq", "llama-3.3-70b-versatile", "https://api.groq.com/openai/v1"),
-    ("cerebras", "llama-3.3-70b", "https://api.cerebras.ai/v1"),
-    ("openrouter", "meta-llama/llama-3.3-70b-instruct:free",
+    # Checked live 2026-08-31 against each backend's /models and a real
+    # completion. cerebras: key valid (/models is 200) but every model answers
+    # 402 payment_required — free quota is account-level and spent. openrouter:
+    # the google/* free slugs 429 with limit_source "upstream_provider_shared_pool"
+    # (Google AI Studio's pool, shared by all OpenRouter users — nothing this
+    # account can raise), so the default moved to a non-Google slug that
+    # streams today. A retired default is still a config fix — "<id>_model" in
+    # [free_llm] overrides these.
+    ("cerebras", "gpt-oss-120b", "https://api.cerebras.ai/v1"),
+    ("openrouter", "nvidia/nemotron-3-ultra-550b-a55b:free",
      "https://openrouter.ai/api/v1"),
 )
 

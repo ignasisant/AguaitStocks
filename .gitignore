@@ -46,8 +46,9 @@ wheels/
 # OS / editor
 .DS_Store
 
-# Streamlit secrets (never commit)
+# Streamlit secrets (never commit) — .bak* covers rotate-script backups
 .streamlit/secrets.toml
+.streamlit/secrets.toml.bak*
 
 # VM deploy secrets (Oracle + Cloudflare Tunnel) — never commit
 /deploy/.env
