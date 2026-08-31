@@ -3,31 +3,38 @@
 from __future__ import annotations
 
 import time
+from collections.abc import Callable
 from pathlib import Path
-from typing import Callable, TypeVar
 
 import pandas as pd
 import yfinance as yf
 from yfinance.exceptions import YFRateLimitError
 
+from stocks import obs
 from stocks.config import DATA_DIR, ticker_aliases
 
-T = TypeVar("T")
 
-
-def _retry(fn: Callable[[], T], attempts: int = 3, base_delay: float = 1.5) -> T:
+def _retry[T](fn: Callable[[], T], attempts: int = 3, base_delay: float = 1.5) -> T:
     """Run fn, retrying on Yahoo's 429 with exponential backoff (1.5s, 3s).
 
-    Streamlit Cloud shares egress IPs, so transient rate limits are routine;
-    a short backoff usually clears them. The final attempt re-raises so
+    Hosted deploys hit Yahoo from datacenter IPs, so transient rate limits
+    are routine; a short backoff usually clears them. The final attempt re-raises so
     callers (the app-level guard) can degrade gracefully.
     """
     for i in range(attempts - 1):
         try:
             return fn()
         except YFRateLimitError:
+            # How often the host is throttled — and whether the backoff clears
+            # it — is the difference between "Yahoo is flaky today" and "this
+            # deploy's egress IP is burnt". Neither is visible from the UI.
+            obs.warn("yahoo.rate_limited", attempt=i + 1, attempts=attempts)
             time.sleep(base_delay * 2**i)
-    return fn()
+    try:
+        return fn()
+    except YFRateLimitError:
+        obs.warn("yahoo.rate_limit_exhausted", attempts=attempts)
+        raise
 
 
 def resolve(ticker: str) -> str:
@@ -38,7 +45,9 @@ def resolve(ticker: str) -> str:
 
 def fetch_history(ticker: str, period: str = "1y", interval: str = "1d") -> pd.DataFrame:
     """Download OHLCV history for one ticker."""
-    df = _retry(lambda: yf.Ticker(resolve(ticker)).history(period=period, interval=interval))
+    df = _retry(
+        lambda: yf.Ticker(resolve(ticker)).history(period=period, interval=interval)
+    )
     df.index.name = "Date"
     return df
 

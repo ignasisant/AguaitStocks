@@ -1,0 +1,45 @@
+# Lint + tests on every push and PR. This is the gate the manual Cloud Run
+# deploy (gcloud run deploy --source) relies on: deploy only from a green main.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - run: uv sync --frozen
+      - run: uv run ruff check .
+
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - run: uv sync --frozen
+      - run: uv run pytest -q
+
+  # Known-vulnerability scan over the locked dependency set. Runs on main and
+  # weekly — not on PRs, so an upstream CVE never blocks unrelated work; the
+  # red run on main is the signal to bump the pinned dependency.
+  audit:
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - run: uv export --frozen --no-dev --no-emit-project -o requirements.txt
+      - run: uvx pip-audit --strict -r requirements.txt

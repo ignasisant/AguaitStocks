@@ -1,0 +1,15 @@
+{
+  "feedback.button": "Enviar comentarios",
+  "feedback.caption": "¿Un error? ¿Falta algo? Llega directamente al desarrollador.",
+  "feedback.kind": "Tipo",
+  "feedback.kind_bug": "Error",
+  "feedback.kind_idea": "Idea",
+  "feedback.kind_other": "Otro",
+  "feedback.text": "Tu comentario",
+  "feedback.placeholder": "¿Qué ha pasado, o qué lo mejoraría?",
+  "feedback.send": "Enviar",
+  "feedback.sent": "¡Gracias — recibido!",
+  "feedback.empty": "Escribe algo primero.",
+  "feedback.rate_limited": "Suficiente por ahora — inténtalo más tarde.",
+  "feedback.failed": "No se pudo guardar tu comentario. Inténtalo más tarde."
+}

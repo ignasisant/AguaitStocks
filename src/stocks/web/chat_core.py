@@ -30,7 +30,7 @@ from stocks.portfolio import autodetect, last_import, llm_map
 from stocks.portfolio.ledger import add_many, all_transactions
 from stocks.portfolio.validate import known_tickers, validate
 from stocks.secrets_env import secret
-from stocks.web import auth, chat_skills, chat_web, llm, skeletons
+from stocks.web import auth, chat_skills, chat_web, llm, ratelimit, skeletons
 from stocks.web.i18n import t as tr
 from stocks.web.portfolio_data import enriched_positions
 from stocks.web.widgets import asset_logo, brand_logo, data_table, db_mtime
@@ -777,7 +777,8 @@ def _render_pending_import(ns: str, history: list[dict], box) -> bool:
 _recent = engine.recent
 
 
-def render_conversation(ns: str, provider: llm.Provider, model: str, api_key: str) -> None:
+def render_conversation(ns: str, provider: llm.Provider, model: str,
+                        api_key: str) -> None:
     """Draw the history, take input, and stream the next answer.
 
     ns namespaces the widget keys so two surfaces can coexist. The
@@ -817,6 +818,17 @@ def render_conversation(ns: str, provider: llm.Provider, model: str, api_key: st
         max_upload_size=MAX_UPLOAD_MB,
     ))
     if text or files:
+        # Burst protection on top of the free chain's daily cap: every turn
+        # fans out into routing/search/provider calls, so a runaway client
+        # (or a pasted loop) must hit a wall before the providers do. Keyed
+        # by the account's data dir — reconnecting doesn't reset it.
+        rl_key = f"chat::{auth.user_paths().root}"
+        if not ratelimit.allow(rl_key):
+            st.warning(
+                tr("chat.rate_limited", seconds=ratelimit.retry_after(rl_key)),
+                icon=":material/hourglass_top:",
+            )
+            st.stop()
         turn: dict = {"role": "user", "content": text or tr("chat.import_ask")}
         if files:
             # Only the names go on the thread; the bytes ride in session state
@@ -1069,11 +1081,13 @@ body:has(.st-key-chatpanel) .st-key-topbar_search {
 .st-key-chatpanel [data-testid="stChatMessageContent"] {
   border-radius: var(--ag-radius-md); padding: 0.55rem 0.85rem;
 }
-.st-key-chatpanel [data-testid="stChatMessage"]:has([data-testid="stChatMessageAvatarAssistant"])
+.st-key-chatpanel [data-testid="stChatMessage"]\
+:has([data-testid="stChatMessageAvatarAssistant"])
   [data-testid="stChatMessageContent"] {
   background: var(--ag-surface-card); border: 1px solid var(--ag-border);
 }
-.st-key-chatpanel [data-testid="stChatMessage"]:has([data-testid="stChatMessageAvatarUser"])
+.st-key-chatpanel [data-testid="stChatMessage"]\
+:has([data-testid="stChatMessageAvatarUser"])
   [data-testid="stChatMessageContent"] {
   background: var(--ag-cta-tint); border: 1px solid var(--ag-cta-tint-edge);
 }

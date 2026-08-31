@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import argparse
+import json
 import subprocess
 import sys
 from datetime import UTC
 from pathlib import Path
+
+from stocks import obs
 
 
 def cmd_update(args: argparse.Namespace) -> None:
@@ -293,7 +296,10 @@ def cmd_tv(args: argparse.Namespace) -> None:
 
 
 def cmd_dashboard(args: argparse.Namespace) -> None:
-    app = Path(__file__).parent / "web" / "app.py"
+    # web/server.py is the ASGI entry point: the static landing page at / plus
+    # the Streamlit app behind it. `streamlit run` finds the module-level
+    # st.App and serves that instead of running the file as a script.
+    app = Path(__file__).parent / "web" / "server.py"
     subprocess.run([sys.executable, "-m", "streamlit", "run", str(app)], check=False)
 
 
@@ -445,7 +451,8 @@ def cmd_tx(args: argparse.Namespace) -> None:
             note=args.note,
         )
         tx_id = add(tx)
-        print(f"added #{tx_id}: {tx.date} {tx.ticker} {tx.action} {tx.quantity}@{tx.price}")
+        print(f"added #{tx_id}: {tx.date} {tx.ticker} {tx.action} "
+              f"{tx.quantity}@{tx.price}")
     elif args.tx_command == "import":
         n = import_csv(Path(args.file))
         print(f"imported {n} transactions from {args.file}")
@@ -495,7 +502,8 @@ def _tx_revolut(path: Path, *, commit: bool) -> None:
             tx_ids=ids,
         )
     )
-    print(f"committed {len(ids)} transactions; ledger now holds {len(all_transactions())}")
+    print(f"committed {len(ids)} transactions; "
+          f"ledger now holds {len(all_transactions())}")
 
 
 def cmd_positions(args: argparse.Namespace) -> None:
@@ -508,7 +516,8 @@ def cmd_positions(args: argparse.Namespace) -> None:
         print("no open positions")
         return
     values = market_values_eur(positions)  # concurrent price+FX lookups
-    print(f"{'TICKER':8s} {'QTY':>10s} {'COST EUR':>12s} {'VALUE EUR':>12s} {'P/L EUR':>12s}")
+    print(f"{'TICKER':8s} {'QTY':>10s} {'COST EUR':>12s} {'VALUE EUR':>12s} "
+          f"{'P/L EUR':>12s}")
     total_cost = total_value = 0.0
     for p in positions:
         value = values.get(p.ticker)
@@ -644,6 +653,102 @@ def _to_pdf(md_path: Path) -> None:
         print(f"pandoc failed: {result.stderr.strip()}")
 
 
+def cmd_logs(args: argparse.Namespace) -> None:
+    """Read, summarize or snapshot the production logs (see stocks.logs_query)."""
+    from stocks import logs_query as lq
+
+    src = Path(args.file) if getattr(args, "file", None) else None
+    level = getattr(args, "level", None)
+    if args.logs_command == "errors":
+        level = level or "ERROR"
+
+    def fetch(limit: int) -> list[dict]:
+        if src is not None:
+            return lq.read_file(src)
+        return lq.read(
+            lq.build_filter(
+                service=args.service, project=args.project, level=level,
+                event=getattr(args, "event", None), user=getattr(args, "user", None),
+                grep=getattr(args, "grep", None), http=getattr(args, "http", False),
+                revision=getattr(args, "revision", None),
+            ),
+            project=args.project, freshness=args.since, limit=limit,
+        )
+
+    try:
+        entries = fetch(args.limit)
+    except lq.LogsError as exc:
+        sys.exit(f"logs: {exc}")
+
+    if args.logs_command == "export":
+        out = lq.export(entries, Path(args.out) if args.out else None)
+        print(f"{len(entries)} entries -> {out}")
+        return
+    if args.logs_command == "stats":
+        print(lq.render_stats(lq.stats(entries, by=args.by), by=args.by))
+        return
+    if args.logs_command == "usage":
+        print(lq.render_usage(lq.usage(entries)))
+        return
+    if getattr(args, "json", False):
+        for e in entries[::-1]:
+            print(json.dumps(e))
+        return
+    if not entries:
+        print("(no entries in range)")
+        return
+    print(lq.render(entries, show_trace=args.trace))
+
+
+def cmd_feedback(args: argparse.Namespace) -> None:
+    """Print stored user feedback (local files + the bucket's copies)."""
+    from stocks.web import feedback
+
+    items = feedback.stored()
+    if not items:
+        print("(no feedback yet)")
+        return
+    for it in items:
+        head = f"{it.get('ts', '?')}  [{it.get('kind', '?'):<5}]"
+        head += f"  {it.get('user', '?')}  ({it.get('page', '-')})"
+        print(head)
+        for line in str(it.get("text", "")).splitlines():
+            print(f"    {line}")
+        print()
+    print(f"{len(items)} submissions")
+
+
+def cmd_backup(args: argparse.Namespace) -> None:
+    """Snapshot / list / restore the persistence bucket (see stocks.backup)."""
+    from stocks import backup
+
+    try:
+        if args.backup_command == "run":
+            stamp, count = backup.run(keep=args.keep)
+            print(f"snapshot {stamp}: {count} objects (keeping {args.keep})")
+        elif args.backup_command == "list":
+            stamps = backup.snapshots()
+            if not stamps:
+                print("(no snapshots)")
+            for s in stamps:
+                print(s)
+        elif args.backup_command == "restore":
+            target = f"keys under {args.only!r}" if args.only else "ALL live keys"
+            if not args.yes:
+                reply = input(
+                    f"Overwrite {target} in the bucket with snapshot "
+                    f"{args.stamp}? [y/N] "
+                )
+                if reply.strip().lower() not in ("y", "yes"):
+                    sys.exit("aborted")
+            count = backup.restore(args.stamp, only=args.only)
+            print(f"restored {count} objects from {args.stamp}")
+            print("Restart/redeploy the app so running processes drop their "
+                  "local copies and re-pull from the bucket.")
+    except (RuntimeError, ValueError) as exc:
+        sys.exit(f"backup: {exc}")
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="stocks", description="Stock tracking toolkit")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -775,7 +880,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_add = tx_sub.add_parser("add", help="record one transaction")
     p_add.add_argument("date", help="ISO date YYYY-MM-DD")
     p_add.add_argument("ticker")
-    p_add.add_argument("action", choices=sorted({"buy", "sell", "dividend", "fee", "split"}))
+    p_add.add_argument(
+        "action", choices=sorted({"buy", "sell", "dividend", "fee", "split"}))
     p_add.add_argument("--qty", type=float, default=0.0, help="shares (split: ratio)")
     p_add.add_argument("--price", type=float, default=0.0,
                        help="per-share native ccy (dividend: gross total)")
@@ -785,7 +891,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_add.add_argument("--note", default="")
 
     p_imp = tx_sub.add_parser("import", help="bulk import from CSV")
-    p_imp.add_argument("file", help="CSV: date,ticker,action,quantity,price,currency,fee,note")
+    p_imp.add_argument(
+        "file", help="CSV: date,ticker,action,quantity,price,currency,fee,note")
 
     p_rev = tx_sub.add_parser(
         "revolut", help="parse + validate a Revolut statement (CSV or PDF)"
@@ -847,10 +954,89 @@ def build_parser() -> argparse.ArgumentParser:
                        help="use a terminal FCF exit multiple instead of Gordon growth")
     p_val.set_defaults(func=cmd_value)
 
+    # ---- logs: production observability (Cloud Logging via gcloud) ----------
+    from stocks import logs_query as lq
+
+    p_logs = sub.add_parser(
+        "logs",
+        help="read/summarize the production logs (Cloud Run -> Cloud Logging)",
+    )
+    logs_sub = p_logs.add_subparsers(dest="logs_command", required=True)
+
+    def _common(sp, *, with_output: bool = True) -> None:
+        sp.add_argument("--since", default="1h",
+                        help="how far back (gcloud freshness: 30m, 6h, 7d)")
+        sp.add_argument("--limit", type=int, default=200, help="max entries to read")
+        sp.add_argument("--event", help="exact jsonPayload.event to match")
+        sp.add_argument("--user", help="exact jsonPayload.user (auth slug) to match")
+        sp.add_argument("--grep", help="substring in the log message")
+        sp.add_argument("--revision", help="only this Cloud Run revision")
+        sp.add_argument("--http", action="store_true",
+                        help="read the HTTP access log instead of app output")
+        sp.add_argument("--file", help="read an exported JSONL snapshot, not GCP")
+        sp.add_argument("--service", default=lq.SERVICE)
+        sp.add_argument("--project", default=lq.PROJECT)
+        if with_output:
+            sp.add_argument("--level", help="minimum severity (INFO/WARNING/ERROR)")
+            sp.add_argument("--trace", action="store_true",
+                            help="print full stack traces")
+            sp.add_argument("--json", action="store_true", help="raw JSON entries")
+
+    p_tail = logs_sub.add_parser("tail", help="recent log lines, oldest first")
+    _common(p_tail)
+    p_err = logs_sub.add_parser("errors", help="errors only (severity>=ERROR)")
+    _common(p_err)
+    p_err.set_defaults(since="24h", trace=True)
+    p_stats = logs_sub.add_parser("stats", help="counts + latency per event")
+    _common(p_stats, with_output=False)
+    p_stats.add_argument("--level", help="minimum severity (INFO/WARNING/ERROR)")
+    p_stats.add_argument("--by", default="event",
+                         help="jsonPayload field to group by (event, user, page...)")
+    p_use = logs_sub.add_parser(
+        "usage", help="product usage per day (users, page runs, chat, feedback)")
+    _common(p_use, with_output=False)
+    p_use.add_argument("--level", help="minimum severity (INFO/WARNING/ERROR)")
+    p_use.set_defaults(since="7d", limit=5000)
+    p_exp = logs_sub.add_parser(
+        "export", help="snapshot entries to JSONL (survives the 30d retention)")
+    _common(p_exp, with_output=False)
+    p_exp.add_argument("--level", help="minimum severity (INFO/WARNING/ERROR)")
+    p_exp.add_argument("--out", help="destination file (default data/logs/<stamp>.jsonl)")
+    p_logs.set_defaults(func=cmd_logs)
+
+    # ---- backup: snapshots of the persistence bucket (stocks.backup) --------
+    from stocks import backup as _backup
+
+    p_bak = sub.add_parser(
+        "backup",
+        help="snapshot/restore the persistence bucket (user data history)",
+    )
+    bak_sub = p_bak.add_subparsers(dest="backup_command", required=True)
+    p_bak_run = bak_sub.add_parser("run", help="snapshot every live object")
+    p_bak_run.add_argument("--keep", type=int, default=_backup.KEEP_DEFAULT,
+                           help="snapshots to retain after pruning")
+    bak_sub.add_parser("list", help="print existing snapshot stamps")
+    p_bak_res = bak_sub.add_parser(
+        "restore", help="copy one snapshot back over the live keys")
+    p_bak_res.add_argument("stamp", help="snapshot stamp (see: backup list)")
+    p_bak_res.add_argument("--only", default="",
+                           help="restore only keys under this prefix "
+                                "(e.g. data/users/<slug>/)")
+    p_bak_res.add_argument("--yes", action="store_true",
+                           help="skip the confirmation prompt")
+    p_bak.set_defaults(func=cmd_backup)
+
+    # ---- feedback: read what users sent through the in-app widget ----------
+    p_fb = sub.add_parser("feedback", help="print user feedback (in-app widget)")
+    p_fb.set_defaults(func=cmd_feedback)
+
     return parser
 
 
 def main() -> None:
+    # Structured logs for the scheduled runs too (alerts/digest fire from GitHub
+    # Actions); locally this is the compact human formatter.
+    obs.setup()
     args = build_parser().parse_args()
     args.func(args)
 

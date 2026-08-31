@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import streamlit as st
 
-from stocks.web.kpi_text import kpi_desc, kpi_label
 from stocks.analysis.screener import (
     DEFAULT_COLUMNS,
     LOWER_IS_BETTER,
@@ -20,15 +19,15 @@ from stocks.analysis.screener import (
     rank,
 )
 from stocks.config import tickers as watchlist_tickers
+from stocks.data.crypto import is_crypto
 from stocks.web import auth, skeletons
 from stocks.web.i18n import t as tr
+from stocks.web.kpi_text import kpi_desc, kpi_label
 from stocks.web.widgets import is_mobile, ticker_table_html
 
 _MOBILE = is_mobile()
 
 st.title(tr("screener.title"))
-
-from stocks.data.crypto import is_crypto
 
 all_tickers = watchlist_tickers(auth.watchlist_path())
 # Crypto has no fundamentals — pairs would only add all-NaN rows here.

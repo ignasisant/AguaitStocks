@@ -77,9 +77,9 @@ def test_registry_keys_unique_and_lookup():
 
 def test_registry_dispatch_revolut_csv_and_generic():
     revolut_csv = (
-        "Date,Ticker,Type,Quantity,Price per share,Total Amount,Currency\n"
-        "2025-01-02T10:00:00.000Z,AAPL,BUY - MARKET,10,$180.50,\"$1,806.00\",USD\n"
-    ).encode()
+        b"Date,Ticker,Type,Quantity,Price per share,Total Amount,Currency\n"
+        b"2025-01-02T10:00:00.000Z,AAPL,BUY - MARKET,10,$180.50,\"$1,806.00\",USD\n"
+    )
     result = platforms.by_key("revolut").parse("statement.csv", revolut_csv)
     assert len(result.transactions) == 1
     assert result.transactions[0].ticker == "AAPL"

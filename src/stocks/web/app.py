@@ -1,6 +1,8 @@
-"""Streamlit entry point — st.navigation over the app_pages/ modules.
+"""The Streamlit app — st.navigation over the app_pages/ modules.
 
-Run: uv run stocks dashboard   (or: uv run streamlit run src/stocks/web/app.py)
+Run: uv run stocks dashboard   (which serves stocks.web.server, the ASGI entry
+point that fronts this script with the static landing page; running this file
+directly with `streamlit run` still works and simply has no landing).
 
 Page config, the dense-layout CSS and the nav are defined once here; the page
 modules under app_pages/ carry only their own content. Colors and fonts live
@@ -14,8 +16,8 @@ import sys
 from pathlib import Path
 from urllib.error import URLError
 
-# Streamlit Community Cloud runs this file straight from the repo checkout;
-# make src/ importable there (and pin imports to the source tree locally).
+# Hosts that run this file straight from the repo checkout (no editable
+# install) need src/ on sys.path; locally it pins imports to the source tree.
 _SRC = str(Path(__file__).resolve().parents[2])
 if _SRC not in sys.path:
     sys.path.insert(0, _SRC)
@@ -23,12 +25,17 @@ if _SRC not in sys.path:
 import streamlit as st  # noqa: E402
 from yfinance.exceptions import YFRateLimitError  # noqa: E402
 
-from stocks.web import auth  # noqa: E402
-from stocks.web import chat_core  # noqa: E402
-from stocks.web import i18n  # noqa: E402
-from stocks.web import landing  # noqa: E402
-from stocks.web import notices  # noqa: E402
-from stocks.web import skeletons  # noqa: E402
+from stocks import obs  # noqa: E402
+from stocks.web import (  # noqa: E402
+    auth,
+    chat_core,
+    feedback,
+    i18n,
+    landing,
+    notices,
+    skeletons,
+    telemetry,
+)
 from stocks.web.i18n import t as tr  # noqa: E402
 from stocks.web.widgets import (  # noqa: E402
     ds_vars_css,
@@ -75,7 +82,8 @@ st.html(
            uniquely marked by the expand button; when it's present, give the page
            body room to clear the strip. Expanded, the logo sits in the sidebar,
            the top-left is clear, and the tight reclaim above stands. */
-        [data-testid="stApp"]:has([data-testid="stExpandSidebarButton"]) .block-container {
+        [data-testid="stApp"]:has([data-testid="stExpandSidebarButton"])
+        .block-container {
           padding-top: 3.5rem;
         }
       }
@@ -92,7 +100,8 @@ st.html(
            page flow.) Desktop swallows the stragglers under the breadcrumb
            bar's negative margin; phones have no bar, so hide them — scripts
            run on mount regardless of display. */
-        [data-testid="stElementContainer"]:has(> [data-testid="stHtml"] > script:only-child) {
+        [data-testid="stElementContainer"]:has(> [data-testid="stHtml"]
+            > script:only-child) {
           display: none;
         }
         /* Open drawer must cover the viewport-fixed topbar search
@@ -106,13 +115,16 @@ st.html(
            verdict caption under the last wrapped row spills ~14px past the row
            and the next element paints over it. Pad the row bottom to swallow the
            spill. :has(stMetric) targets exactly these rows, not button groups. */
-        [data-testid="stHorizontalBlock"]:has([data-testid="stMetric"]) {padding-bottom: 1.1rem;}
+        [data-testid="stHorizontalBlock"]:has([data-testid="stMetric"]) {
+          padding-bottom: 1.1rem;
+        }
         /* Full-bleed charts: the card's 1.2rem side padding costs ~38px of
            plot width on a ~390px screen. Negative margins let the chart span
            the card edge-to-edge (same bleed trick as the topbar); text and
            metrics keep the card padding. Plotly measures its container after
            CSS applies, so the widened box is picked up on first render. */
-        .topstocks-card [data-testid="stElementContainer"]:has(> [data-testid="stPlotlyChart"]) {
+        .topstocks-card
+        [data-testid="stElementContainer"]:has(> [data-testid="stPlotlyChart"]) {
           margin-left: -1.2rem; margin-right: -1.2rem;
         }
         /* Markdown tables — the one table shape the page can't restructure,
@@ -137,7 +149,9 @@ st.html(
          bottom-pad applies there (set in the mobile block above). */
       @media (min-width: 641px) {
         [data-testid="stMetric"] {padding-right: 1.5rem;}
-        [data-testid="stHorizontalBlock"]:has([data-testid="stMetric"]) {padding-bottom: 0.9rem;}
+        [data-testid="stHorizontalBlock"]:has([data-testid="stMetric"]) {
+          padding-bottom: 0.9rem;
+        }
       }
       /* KPI figures follow the design's stat block: Epilogue 700 value over a
          12px/500 muted label, delta rendered as a filled success/critical pill
@@ -180,14 +194,6 @@ st.html(
         padding: 1.1rem 1.2rem;
       }
       [data-testid="stElementToolbar"] {display: none;}
-      /* Community Cloud's "Manage app" pill (owner) / "Hosted with Streamlit"
-         badge (viewers) is fixed bottom-right above our z-stack and covers the
-         chat panel's send button. Park it bottom-LEFT instead — still usable,
-         off the chat input. These are the badge's known stable hooks; its
-         CSS-module class hashes churn per cloud deploy, so the badge-mover
-         script below is the real guarantee. */
-      [data-testid="manage-app-button"],
-      div[class*="viewerBadge"] {left: 0.75rem !important; right: auto !important;}
       /* Chart hover tooltips finish the DS card look. widgets.HOVERLABEL paints
          the neutral-900 surface, neutral-800 border and Instrument Sans text on
          Plotly's SVG box; radius and elevation have no hoverlabel equivalent, so
@@ -254,12 +260,14 @@ st.html(
         border-color: var(--ag-text-faint);
         background: transparent;
       }
-      [data-testid="stButtonGroup"] button[data-variant="segmented_control"][data-selected="true"],
+      [data-testid="stButtonGroup"]
+        button[data-variant="segmented_control"][data-selected="true"],
       [data-testid="stButtonGroup"] button[data-variant="pills"][data-selected="true"] {
         background: var(--ag-purple-900);
         border-color: var(--ag-brand-accent);
       }
-      [data-testid="stButtonGroup"] button[data-variant="segmented_control"][data-selected="true"] p,
+      [data-testid="stButtonGroup"]
+        button[data-variant="segmented_control"][data-selected="true"] p,
       [data-testid="stButtonGroup"] button[data-variant="pills"][data-selected="true"] p {
         color: var(--ag-purple-400);
       }
@@ -268,9 +276,8 @@ st.html(
          on the topbar search; bottom-right is the chat launcher's corner. The
          container is position:fixed with top/right from the theme and an inline
          top when the header is offset, so every side needs !important. The
-         3.5rem lift clears the Community Cloud "Manage app" badge, which the
-         script below parks bottom-left too (it lives in the parent shell
-         document, so it paints over this iframe regardless of z-index).
+         3.5rem lift keeps them off the very bottom edge, clear of any host
+         chrome pinned there.
          Toasts stack downward via margin-top; column-reverse keeps the newest
          one nearest the bottom edge instead of drifting up the viewport. */
       [data-testid="stToastContainer"] {
@@ -434,53 +441,6 @@ st.html(
     unsafe_allow_javascript=True,
 )
 
-# Badge mover for the Community Cloud "Manage app" / "Hosted with Streamlit"
-# pill: it sits fixed bottom-right over the chat panel's send button, so park
-# it bottom-left. On Community Cloud the app runs inside a same-origin iframe
-# (src //<host>/~/+/, sandbox includes allow-same-origin) under the cloud
-# shell SPA, and the badge lives in the PARENT shell document — querying our
-# own document never finds it. So walk up to window.parent when reachable and
-# operate there; falls back to our own document when embedded cross-origin or
-# running locally (where no badge exists anyway). The shell's class hashes
-# change per deploy, so match the stable data-testid plus label text, and
-# re-anchor the outermost fixed-position ancestor. The stApp guard only
-# matters in the own-document fallback. Badge mounts async, hence the
-# MutationObserver.
-st.html(
-    """
-    <script>
-    (function () {
-      if (window.__topstocksBadgeMover) return;  /* survive reruns — wire once */
-      window.__topstocksBadgeMover = true;
-      let doc = document;
-      try {
-        if (window.parent !== window && window.parent.document.body) {
-          doc = window.parent.document;
-        }
-      } catch (e) { /* cross-origin parent — keep own document */ }
-      const LABELS = ["manage app", "hosted with streamlit", "made with streamlit"];
-      const move = () => {
-        doc.querySelectorAll('[data-testid="manage-app-button"], button, a').forEach((el) => {
-          if (el.closest('[data-testid="stApp"]')) return;
-          if (el.getAttribute("data-testid") !== "manage-app-button" &&
-              !LABELS.includes((el.textContent || "").trim().toLowerCase())) return;
-          let fixed = null;
-          for (let n = el; n && n !== doc.body; n = n.parentElement) {
-            if (doc.defaultView.getComputedStyle(n).position === "fixed") fixed = n;
-          }
-          const target = fixed || el.closest("body > div") || el;
-          target.style.setProperty("left", "0.75rem", "important");
-          target.style.setProperty("right", "auto", "important");
-        });
-      };
-      new MutationObserver(move).observe(doc.body, {subtree: true, childList: true});
-      move();
-    })();
-    </script>
-    """,
-    unsafe_allow_javascript=True,
-)
-
 # Left-drawer rail (desktop only). Streamlit's collapsed sidebar slides fully
 # off-screen; instead keep it as a slim rail showing the app + page + ticker
 # glyphs, and expand the full panel on hover. The expand is an OVERLAY — the
@@ -513,16 +473,19 @@ st.html(
          fallback (the handle is the div sibling of stSidebarContent). Both are
          version-coupled like the testids in this block — revisit on upgrades. */
       section[data-testid="stSidebar"][aria-expanded="false"]:hover .eelgd2m3,
-      section[data-testid="stSidebar"][aria-expanded="false"]:hover [data-testid="stSidebarContent"] ~ div {
+      section[data-testid="stSidebar"][aria-expanded="false"]:hover
+        [data-testid="stSidebarContent"] ~ div {
         display: none !important;
       }
-      section[data-testid="stSidebar"][aria-expanded="false"] [data-testid="stSidebarContent"] {
+      section[data-testid="stSidebar"][aria-expanded="false"]
+        [data-testid="stSidebarContent"] {
         width: var(--rail-w);
         overflow-x: hidden;
         background: var(--ag-surface-page); /* opaque panel tone over the page */
         transition: width 180ms ease;
       }
-      section[data-testid="stSidebar"][aria-expanded="false"]:hover [data-testid="stSidebarContent"] {
+      section[data-testid="stSidebar"][aria-expanded="false"]:hover
+        [data-testid="stSidebarContent"] {
         width: var(--rail-open);
         overflow-y: auto;
         box-shadow: 6px 0 2.5rem var(--ag-shadow-color-strong);
@@ -539,16 +502,20 @@ st.html(
       /* App logo pinned at the top, centered; collapse arrow hidden until
          hover. 40px in BOTH states (hover used to fall back to the 2rem
          default, resizing the logo mid-slide). */
-      section[data-testid="stSidebar"][aria-expanded="false"] [data-testid="stSidebarHeader"] {
+      section[data-testid="stSidebar"][aria-expanded="false"]
+        [data-testid="stSidebarHeader"] {
         justify-content: center;
       }
-      section[data-testid="stSidebar"][aria-expanded="false"] [data-testid="stSidebarLogo"] {
+      section[data-testid="stSidebar"][aria-expanded="false"]
+        [data-testid="stSidebarLogo"] {
         height: 40px; width: auto;
       }
-      section[data-testid="stSidebar"][aria-expanded="false"]:not(:hover) [data-testid="stSidebarLogo"] {
+      section[data-testid="stSidebar"][aria-expanded="false"]:not(:hover)
+        [data-testid="stSidebarLogo"] {
         margin: 0 auto;
       }
-      section[data-testid="stSidebar"][aria-expanded="false"]:not(:hover) [data-testid="stSidebarCollapseButton"] {
+      section[data-testid="stSidebar"][aria-expanded="false"]:not(:hover)
+        [data-testid="stSidebarCollapseButton"] {
         display: none;
       }
 
@@ -556,14 +523,17 @@ st.html(
          line-height matches the forced glyph size below — without it the
          13px labels ride the theme's 2.0 menu-item line box on hover and
          every row grows, shifting the column. */
-      section[data-testid="stSidebar"][aria-expanded="false"] [data-testid="stSidebarNavLink"] {
+      section[data-testid="stSidebar"][aria-expanded="false"]
+        [data-testid="stSidebarNavLink"] {
         padding-top: 0.4rem; padding-bottom: 0.4rem;
         line-height: 1.6rem;
       }
-      section[data-testid="stSidebar"][aria-expanded="false"]:not(:hover) [data-testid="stSidebarNavLink"] {
+      section[data-testid="stSidebar"][aria-expanded="false"]:not(:hover)
+        [data-testid="stSidebarNavLink"] {
         justify-content: center;
       }
-      section[data-testid="stSidebar"][aria-expanded="false"]:not(:hover) [data-testid="stSidebarNavLink"] > span + span {
+      section[data-testid="stSidebar"][aria-expanded="false"]:not(:hover)
+        [data-testid="stSidebarNavLink"] > span + span {
         display: none;
       }
 
@@ -574,19 +544,23 @@ st.html(
          fit "PORTFOLIO". The chevron slot is removed in the rail but its
          1.25rem height is pinned on the header for both states, so the rows
          below never move on hover. */
-      section[data-testid="stSidebar"][aria-expanded="false"] [data-testid="stNavSectionHeader"] {
+      section[data-testid="stSidebar"][aria-expanded="false"]
+        [data-testid="stNavSectionHeader"] {
         min-height: 1.25rem;
       }
-      section[data-testid="stSidebar"][aria-expanded="false"]:not(:hover) [data-testid="stNavSectionHeader"] {
+      section[data-testid="stSidebar"][aria-expanded="false"]:not(:hover)
+        [data-testid="stNavSectionHeader"] {
         justify-content: center;
         margin-left: -14px; margin-right: -14px;
         padding-right: 0; gap: 0;
         font-size: var(--ag-fs-3xs); letter-spacing: 0.04em;
       }
-      section[data-testid="stSidebar"][aria-expanded="false"]:not(:hover) [data-testid="stNavSectionHeader"] > div {
+      section[data-testid="stSidebar"][aria-expanded="false"]:not(:hover)
+        [data-testid="stNavSectionHeader"] > div {
         display: none;
       }
-      section[data-testid="stSidebar"][aria-expanded="false"]:not(:hover) [data-testid="stNavSectionHeader"] * {
+      section[data-testid="stSidebar"][aria-expanded="false"]:not(:hover)
+        [data-testid="stNavSectionHeader"] * {
         overflow: visible !important; text-overflow: clip !important;
       }
       /* Streamlit sets the icon size inline, so !important is needed to grow it.
@@ -595,9 +569,12 @@ st.html(
          sits inside TWO wrapper spans that emotion pins at the theme's 1rem
          icon size — grow them too, or the row's layout height stays 1rem and
          the row shrinks whenever the label is hidden (the rail state). */
-      section[data-testid="stSidebar"] [data-testid="stSidebarNavLink"] [data-testid="stIconMaterial"],
-      section[data-testid="stSidebar"] [data-testid="stSidebarNavLink"] > span:first-child,
-      section[data-testid="stSidebar"] [data-testid="stSidebarNavLink"] > span:first-child span {
+      section[data-testid="stSidebar"] [data-testid="stSidebarNavLink"]
+        [data-testid="stIconMaterial"],
+      section[data-testid="stSidebar"] [data-testid="stSidebarNavLink"]
+        > span:first-child,
+      section[data-testid="stSidebar"] [data-testid="stSidebarNavLink"]
+        > span:first-child span {
         font-size: var(--ag-icon-nav) !important;
         width: var(--ag-icon-nav) !important;
         height: var(--ag-icon-nav) !important;
@@ -606,7 +583,8 @@ st.html(
       /* Minimized rail carries only the app logo + nav glyphs. Hide the whole
          ticker picker (sign-in button, "Valores" title, search + sort row and
          the watchlist itself) — it slides back in with the panel on hover. */
-      section[data-testid="stSidebar"][aria-expanded="false"]:not(:hover) [data-testid="stSidebarUserContent"] {
+      section[data-testid="stSidebar"][aria-expanded="false"]:not(:hover)
+        [data-testid="stSidebarUserContent"] {
         display: none !important;
       }
 
@@ -629,24 +607,27 @@ st.html(
 # widgets gate themselves with require_login()/is_logged_in().
 auth.resolve_user()
 
+# Observability: from here on every log record this run emits (from any module)
+# carries the session, the account and — once the nav resolves — the page. See
+# stocks.obs for the emit side and `stocks logs` for the query side.
+telemetry.bind_run()
+
 # Resolve the run's language (Profile pref > browser locale > English) before
 # the nav is built and any page runs, so page titles and page bodies read one
 # stable value. A Profile change lands on its rerun, which re-runs this first.
 i18n.set_active_language()
 
-# First visit while signed out: the marketing landing takes the whole viewport
-# and nothing else renders on this run. It has to come before the nav is built
-# because it consumes its own query parameters — its CTAs are links, not
-# buttons, so the designed layout can stay one HTML node. A ?ticker= deep link
-# always wins, so shared ticker URLs are never swallowed by the pitch.
-if landing.should_show():
-    landing.render_landing()
-    st.stop()
+# Arriving from the landing page (served outside this script by server.py, see
+# stocks.web.landing_static): its CTAs are links, so the click shows up here as
+# a query parameter — ?signin=1 starts the OIDC round-trip, ?lang= pins the
+# language the visitor was reading. After set_active_language(), so the
+# parameter wins over the resolved default; before the nav, because st.login()
+# redirects and nothing after it runs.
+landing.consume_params()
 
 # Signed-in first load: nudge the user to set up their investor profile so the
 # assistant tailors its analysis. Skippable; nags again next session until set
-# (or filled from the Profile page). No-op for guests — mutually exclusive with
-# the landing above, which only renders when logged out.
+# (or filled from the Profile page). No-op for guests.
 auth.maybe_prompt_profile()
 
 ticker_page = st.Page(
@@ -709,7 +690,7 @@ if "auth" in st.secrets and not auth.is_logged_in():
     st.sidebar.button(
         tr("common.sign_in_google"),
         icon=":material/login:",
-        on_click=st.login,
+        on_click=auth.login,
         width="stretch",
     )
 
@@ -731,6 +712,10 @@ ticker_picker(key="nav")
 _clicked = st.session_state.pop("picker_clicked", False)
 if _clicked and page.url_path != ticker_page.url_path:
     st.switch_page(ticker_page)
+
+# Feedback entry point, bottom of the sidebar on every page. Guests included:
+# a visitor who bounced off the pitch knowing why is worth more than a login.
+feedback.render_sidebar(page.title)
 
 # Sticky top bar + global ticker search. The breadcrumb "you are here" strip is
 # desktop-only (phones already carry the native header and the page's own
@@ -754,16 +739,23 @@ render_topbar(page.title, _focus)
 if auth.is_logged_in():
     chat_core.render_side_panel(page.title)
 
-# Yahoo throttles Streamlit Cloud's shared egress IPs; when the fetch layer's
+# Yahoo throttles datacenter egress IPs; when the fetch layer's
 # backoff (stocks.data.fetch._retry) is exhausted the error would otherwise
 # surface as Streamlit's opaque crash page. Degrade to a banner instead —
 # st.cache_data never caches exceptions, so a rerun retries the failed fetches
 # while every cached section keeps rendering.
-try:
-    page.run()
-except (YFRateLimitError, URLError) as exc:
-    # Backstop only: the fetching sections catch this pair themselves and
-    # degrade in place (they must — a fragment rerun never re-enters this
-    # file, see stocks.web.notices). What still lands here is a fetch in the
-    # non-fragment page body; the toast explains the gap in what did render.
-    notices.data_toast(exc)
+# `page.render` times the whole script body and, crucially, logs the exception
+# of any page that crashes — which used to reach the user as Streamlit's red
+# box and reach us not at all. Fragment reruns never re-enter this file, so the
+# timing covers full runs only.
+with obs.timed("page.render", passthrough=telemetry.CONTROL_FLOW, page=page.title):
+    try:
+        page.run()
+    except (YFRateLimitError, URLError) as exc:
+        # Backstop only: the fetching sections catch this pair themselves and
+        # degrade in place (they must — a fragment rerun never re-enters this
+        # file, see stocks.web.notices). What still lands here is a fetch in the
+        # non-fragment page body; the toast explains the gap in what did render.
+        obs.warn("data.degraded", error_type=type(exc).__name__,
+                 error=str(exc)[:200], page=page.title)
+        notices.data_toast(exc)

@@ -30,6 +30,10 @@ wheels/
 /data/fx_history.json
 /data/last_import.json
 
+# Production log snapshots (`stocks logs export`) — they carry account slugs
+# and user-typed queries, and they are a copy of Cloud Logging, not source.
+/data/logs/
+
 # Per-account data (watchlists, ledgers, prefs — private)
 /data/users/
 /data/prefs.json
@@ -58,3 +62,5 @@ wheels/
 /.claude/
 /.agents/
 .notify_secrets.env
+/data/feedback/
+/data/chat.json

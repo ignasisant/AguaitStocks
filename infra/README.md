@@ -6,7 +6,7 @@ Manages the parts of the deployment that have Terraform providers:
 |---|---|---|
 | Cloudflare R2 bucket | yes | persistent storage behind `stocks.storage` |
 | GitHub Actions secrets | yes | everything `.github/workflows/notify.yml` reads; replaces `scripts/setup_notify_secrets.sh` |
-| Streamlit Cloud app + secrets | no | no API — paste by hand, see `streamlit_cloud_secrets_reminder` output |
+| App secrets on the VM | no | no API — the app reads `deploy/secrets.toml`, see `deploy_secrets_reminder` output |
 | Telegram bot | no | @BotFather; never set a webhook (Profile linking polls `getUpdates`) |
 | Google OIDC client | no | Google Cloud console, OAuth consent screen |
 | R2 S3 credential pair | yes | `cloudflare_account_token` scoped to the bucket; S3 creds derived as access_key_id = token id, secret = `sha256(token value)` |
@@ -34,10 +34,10 @@ terraform plan
 terraform apply
 ```
 
-After apply, print the hand-paste block for Streamlit Cloud:
+After apply, print the block for the deploy's `secrets.toml`:
 
 ```sh
-terraform output streamlit_cloud_secrets_reminder
+terraform output deploy_secrets_reminder
 ```
 
 ## State is secret

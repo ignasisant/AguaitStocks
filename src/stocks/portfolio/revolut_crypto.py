@@ -120,7 +120,10 @@ def _skip_reason(rtype: str) -> str:
             "legs manually at the exchange-day prices"
         )
     if any(k in t for k in ("SEND", "RECEIVE", "TRANSFER", "WITHDRAW", "DEPOSIT")):
-        return "transfer — moves coins without a price; adjust manually if it was a disposal"
+        return (
+            "transfer — moves coins without a price; adjust manually if it "
+            "was a disposal"
+        )
     return "unrecognised type — not imported"
 
 

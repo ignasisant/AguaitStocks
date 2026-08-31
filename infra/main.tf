@@ -24,8 +24,8 @@ provider "github" {
 
 # --- Cloudflare R2: persistent storage behind stocks.storage ------------------
 #
-# The Streamlit Cloud filesystem is ephemeral; user data dirs are synced to
-# this bucket (see src/stocks/storage.py). The same bucket is read by the
+# Container filesystems are ephemeral (rebuilds/redeploys wipe them); user
+# data dirs are synced to this bucket (see src/stocks/storage.py). The same bucket is read by the
 # notifications cron in .github/workflows/notify.yml.
 #
 # Existing bucket? Import instead of recreating (jurisdiction segment required):
@@ -106,25 +106,4 @@ resource "github_actions_secret" "notify" {
   repository  = var.github_repo
   secret_name = each.key
   value       = each.value
-}
-
-# --- Hugging Face Space deploy (optional) --------------------------------------
-#
-# .github/workflows/deploy-hf.yml mirrors main to the Space on every push.
-# The Space itself is created manually (no official TF provider); runtime
-# secrets (STREAMLIT_SECRETS_TOML) live in the Space settings, not here.
-# Both variables empty = nothing created, workflow stays skipped.
-
-resource "github_actions_secret" "hf_token" {
-  count       = var.hf_token != "" ? 1 : 0
-  repository  = var.github_repo
-  secret_name = "HF_TOKEN"
-  value       = var.hf_token
-}
-
-resource "github_actions_variable" "hf_space" {
-  count         = var.hf_space != "" ? 1 : 0
-  repository    = var.github_repo
-  variable_name = "HF_SPACE"
-  value         = var.hf_space
 }

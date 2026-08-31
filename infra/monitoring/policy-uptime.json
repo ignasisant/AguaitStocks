@@ -1,0 +1,28 @@
+{
+  "displayName": "stocks: /healthz down",
+  "documentation": {
+    "content": "The uptime check on /healthz is failing from multiple regions — the service is not answering at all (crash loop, bad deploy, quota). Check `gcloud run services describe` and the Cloud Run revisions page; roll back to the previous revision if a deploy caused it.",
+    "mimeType": "text/markdown"
+  },
+  "combiner": "OR",
+  "conditions": [
+    {
+      "displayName": "healthz uptime check failing",
+      "conditionThreshold": {
+        "filter": "metric.type=\"monitoring.googleapis.com/uptime_check/check_passed\" AND resource.type=\"uptime_url\" AND metric.labels.check_id=has_substring(\"stocks-healthz\")",
+        "aggregations": [
+          {
+            "alignmentPeriod": "300s",
+            "perSeriesAligner": "ALIGN_FRACTION_TRUE",
+            "crossSeriesReducer": "REDUCE_MEAN"
+          }
+        ],
+        "comparison": "COMPARISON_LT",
+        "thresholdValue": 0.5,
+        "duration": "300s",
+        "trigger": { "count": 1 }
+      }
+    }
+  ],
+  "alertStrategy": { "autoClose": "86400s" }
+}

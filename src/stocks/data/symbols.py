@@ -27,7 +27,7 @@ SEARCH_URL = "https://query2.finance.yahoo.com/v1/finance/search"
 QUOTE_TYPES = {"EQUITY", "ETF"}
 
 # This runs per keystroke behind a cache, so it must fail FAST and then stay
-# quiet: Yahoo throttles shared Streamlit Cloud egress IPs, and a search field
+# quiet: Yahoo throttles datacenter egress IPs, and a search field
 # that blocks for 30s on every letter is worse than one that finds nothing.
 TIMEOUT = 6.0
 COOLDOWN = 300.0

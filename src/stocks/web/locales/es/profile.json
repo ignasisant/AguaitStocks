@@ -66,5 +66,10 @@
   "profile.tg_test_sent": "Mensaje de prueba enviado — mira Telegram.",
   "profile.tg_test_failed": "No se pudo enviar el mensaje de prueba: {error}",
   "profile.tg_unlink": "Desconectar",
-  "profile.tg_unlinked": "Telegram desconectado."
+  "profile.tg_unlinked": "Telegram desconectado.",
+  "profile.delete_title": "Eliminar cuenta",
+  "profile.delete_body": "Borra tu watchlist, transacciones importadas, preferencias y conversaciones del asistente — en local y en el almacenamiento en la nube. No se puede deshacer. Las copias de seguridad caducan por sí solas (unos 30 días).",
+  "profile.delete_confirm": "Entiendo que esto borra todos mis datos de forma permanente.",
+  "profile.delete_button": "Eliminar mi cuenta y mis datos",
+  "profile.delete_failed": "El borrado ha fallado — no se ha eliminado nada. Inténtalo de nuevo y contacta con el operador si persiste."
 }

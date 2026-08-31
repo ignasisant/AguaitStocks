@@ -17,6 +17,10 @@ if [ -n "${STREAMLIT_SECRETS_TOML:-}" ]; then
     umask 022
 fi
 
-exec .venv/bin/streamlit run src/stocks/web/app.py \
+# server.py, not app.py: it is the ASGI entry point that serves the static
+# landing page at / alongside the Streamlit app (`streamlit run` detects the
+# module-level st.App and serves it directly). Pointing this at app.py still
+# boots a working dashboard, just with no landing page and no robots/sitemap.
+exec .venv/bin/streamlit run src/stocks/web/server.py \
     --server.port "${PORT:-8501}" \
     --server.address 0.0.0.0

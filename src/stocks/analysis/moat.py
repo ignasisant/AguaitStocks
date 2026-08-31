@@ -112,7 +112,10 @@ def _margin_pillar(raw: RawFundamentals) -> MoatPillar:
             level = float(gm.median())
             std = float(gm.std()) if len(gm) >= 2 else 0.0
             score = max(0.0, _scale(level, 0.20, 0.60) - min(40.0, std * 400))
-            detail = f"median gross margin {level:.0%}, σ {std * 100:.1f}pp over {len(gm)} years"
+            detail = (
+                f"median gross margin {level:.0%}, "
+                f"σ {std * 100:.1f}pp over {len(gm)} years"
+            )
             return MoatPillar("gross_margin", "Margins", score, detail)
     snapshot = raw.info.get("grossMargins")
     if isinstance(snapshot, (int, float)) and not isinstance(snapshot, bool):
@@ -136,7 +139,10 @@ def _growth_pillar(raw: RawFundamentals) -> MoatPillar:
     growth = _series_cagr(rev)
     if growth is None:
         score = up * 100
-        detail = f"revenue up in {int((changes > 0).sum())}/{len(changes)} years (CAGR undefined)"
+        detail = (
+            f"revenue up in {int((changes > 0).sum())}/{len(changes)} years "
+            "(CAGR undefined)"
+        )
     else:
         score = 0.5 * _scale(growth, 0.0, 0.15) + 0.5 * up * 100
         detail = (

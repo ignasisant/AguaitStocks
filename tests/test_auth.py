@@ -160,7 +160,9 @@ def test_toggle_favorite_creates_entry_and_flips(tmp_path):
         yaml.safe_dump(
             {
                 "aliases": {"RCF": "TEP.PA"},
-                "watchlist": [{"ticker": "NVDA", "alerts": [{"type": "drawdown", "pct": 15}]}],
+                "watchlist": [
+                    {"ticker": "NVDA", "alerts": [{"type": "drawdown", "pct": 15}]}
+                ],
             }
         )
     )
@@ -188,3 +190,64 @@ def test_set_tags_and_all_tags(tmp_path):
     raw = yaml.safe_load(path.read_text())
     assert "tags" not in raw["watchlist"][0]
     assert all_tags(path) == ["EM"]
+
+
+# ------------------------------------------------------------ account deletion
+
+
+def _deletion_sandbox(monkeypatch, tmp_path):
+    """auth's world rooted at tmp_path, with a dict standing in for the bucket."""
+    from stocks.web import auth
+
+    users = tmp_path / "data" / "users"
+    monkeypatch.setattr(auth, "PROJECT_ROOT", tmp_path)
+    monkeypatch.setattr(auth, "USERS_DIR", users)
+    monkeypatch.setattr(auth, "GUEST_DIR", users / "_guest")
+
+    bucket: dict[str, bytes] = {}
+    monkeypatch.setattr(auth.storage, "enabled", lambda: True)
+    monkeypatch.setattr(
+        auth.storage,
+        "list_keys",
+        lambda prefix="": sorted(k for k in bucket if k.startswith(prefix)),
+    )
+    monkeypatch.setattr(auth.storage, "delete_key", bucket.pop)
+    return auth, users, bucket
+
+
+def test_delete_account_erases_disk_and_bucket(monkeypatch, tmp_path):
+    auth, users, bucket = _deletion_sandbox(monkeypatch, tmp_path)
+    p = paths_for("jane@example.com", users_dir=users)
+    p.root.mkdir(parents=True)
+    p.watchlist.write_text("watchlist: []")
+    p.prefs.write_text("{}")
+    me = f"data/users/{slug('jane@example.com')}"
+    other = f"data/users/{slug('bob@example.com')}"
+    bucket.update({
+        f"{me}/watchlist.yaml": b"x",
+        f"{me}/portfolio.db": b"x",
+        f"{other}/watchlist.yaml": b"bob",
+        "watchlist.yaml": b"root",
+    })
+
+    auth.delete_account(p)
+
+    assert not p.root.exists()
+    # Only this account's keys are gone; the neighbour and the root survive.
+    assert sorted(bucket) == [f"{other}/watchlist.yaml", "watchlist.yaml"]
+
+
+def test_delete_account_refuses_owner_and_guest(monkeypatch, tmp_path):
+    import pytest
+
+    auth, users, _ = _deletion_sandbox(monkeypatch, tmp_path)
+    owner = paths_for("me@x.com", owner_email="me@x.com", users_dir=users)
+    with pytest.raises(ValueError):
+        auth.delete_account(owner)
+    guest = auth.guest_paths()
+    with pytest.raises(ValueError):
+        auth.delete_account(guest)
+    # Nor anything outside the users dir, whatever it is named.
+    stray = type(guest)(**{**guest.__dict__, "root": tmp_path / "elsewhere"})
+    with pytest.raises(ValueError):
+        auth.delete_account(stray)

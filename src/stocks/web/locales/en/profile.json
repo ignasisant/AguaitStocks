@@ -66,5 +66,10 @@
   "profile.tg_test_sent": "Test message sent — check Telegram.",
   "profile.tg_test_failed": "Couldn't send the test message: {error}",
   "profile.tg_unlink": "Disconnect",
-  "profile.tg_unlinked": "Telegram disconnected."
+  "profile.tg_unlinked": "Telegram disconnected.",
+  "profile.delete_title": "Delete account",
+  "profile.delete_body": "Deletes your watchlist, imported transactions, preferences and assistant conversations — locally and in cloud storage. This cannot be undone. Backup snapshots expire on their own (about 30 days).",
+  "profile.delete_confirm": "I understand this permanently erases all my data.",
+  "profile.delete_button": "Delete my account and data",
+  "profile.delete_failed": "Deletion failed — nothing was removed. Try again, and contact the operator if it persists."
 }

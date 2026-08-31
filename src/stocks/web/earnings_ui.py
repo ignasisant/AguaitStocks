@@ -121,7 +121,9 @@ def calendar_component(name: str, css: str):
     `name` must be unique per mount site (the full calendar and the mini
     calendar use different names); `css` styles that grid's chips.
     """
-    return st.components.v2.component(name, html='<div id="root"></div>', js=_PICK_JS, css=css)
+    return st.components.v2.component(
+        name, html='<div id="root"></div>', js=_PICK_JS, css=css
+    )
 
 
 # ------------------------------------------------------------------ formatting

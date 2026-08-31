@@ -18,11 +18,11 @@ the whole page.
 from __future__ import annotations
 
 import importlib.util
-import logging
+import time
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 
-log = logging.getLogger(__name__)
+from stocks import obs
 
 MAX_TOKENS = 4096
 
@@ -294,21 +294,31 @@ def _free_stream(api_key, model, system, messages):
     if not backends:
         raise FreeTierExhausted("no free backend configured")
     started = False
-    for b in backends:
+    for attempt, b in enumerate(backends):
+        t0 = time.perf_counter()
         try:
             for chunk in b.stream(b.api_key, b.model, system, messages):
                 started = True
                 yield chunk
+            obs.event("llm.free.answered", backend=b.id, model=b.model,
+                      attempt=attempt,
+                      duration_ms=round((time.perf_counter() - t0) * 1000))
             return
         except Exception as exc:
             if started:
+                obs.error("llm.free.mid_answer_failure", exc, backend=b.id, model=b.model)
                 raise  # mid-answer failure: text already on screen, can't switch
             # rate limit / bad key / retired model — try the next one, but say
             # which one died and why: this is the operator's only signal that a
-            # free tier went paid or a model was retired.
-            log.warning("free backend %s (%s) failed: %s: %s",
-                        b.id, b.model, type(exc).__name__, exc)
+            # free tier went paid or a model was retired. Structured, because
+            # "which backend has been failing all week" is a query, not a read:
+            #   stocks logs stats --event llm.free.backend_failed --by backend
+            obs.warn("llm.free.backend_failed", backend=b.id, model=b.model,
+                     attempt=attempt, error_type=type(exc).__name__,
+                     error=str(exc)[:300],
+                     status=getattr(exc, "status_code", None))
             continue
+    obs.error("llm.free.exhausted", backends=[b.id for b in backends])
     raise FreeTierExhausted("all free backends failed")
 
 

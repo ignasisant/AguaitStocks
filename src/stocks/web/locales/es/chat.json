@@ -84,5 +84,6 @@
   "chat.skill.earnings-review": "Revisión de resultados",
   "chat.skill.portfolio-risk": "Riesgo de cartera",
   "chat.skill.spain-tax": "Fiscalidad España (IRPF)",
-  "chat.skill.bear-case": "Tesis bajista y red flags"
+  "chat.skill.bear-case": "Tesis bajista y red flags",
+  "chat.rate_limited": "Demasiados mensajes seguidos — vuelve a intentarlo en unos {seconds}s."
 }

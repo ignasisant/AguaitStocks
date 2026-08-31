@@ -21,6 +21,7 @@ import pandas as pd
 import streamlit as st
 
 from stocks.config import load_watchlist
+from stocks.data.crypto import is_crypto
 from stocks.data.earnings import (
     add_months,
     calendar_events,
@@ -40,8 +41,6 @@ from stocks.web.widgets import (
 from stocks.web.widgets import logo as _logo
 
 st.title(tr("earnings.title"))
-
-from stocks.data.crypto import is_crypto
 
 # Crypto never reports earnings — drop pairs before the calendar fetch.
 holdings = [
@@ -184,7 +183,9 @@ def _render_calendar(offset: int, events, results) -> None:
             chips = "".join(_result_chip(r) for r in res_by_date.get(day, []))
             chips += "".join(_chip(e) for e in by_date.get(day, []))
             cls_attr = f' class="{" ".join(cls)}"' if cls else ""
-            cells.append(f'<td{cls_attr}><div class="earn-daynum">{day.day}</div>{chips}</td>')
+            cells.append(
+                f'<td{cls_attr}><div class="earn-daynum">{day.day}</div>{chips}</td>'
+            )
         rows.append("<tr>" + "".join(cells) + "</tr>")
 
     grid = _calendar_grid(

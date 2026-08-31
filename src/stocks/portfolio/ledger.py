@@ -35,6 +35,41 @@ CREATE TABLE IF NOT EXISTS transactions (
 );
 """
 
+# Schema versioning via SQLite's own `PRAGMA user_version` (0 on any db that
+# predates this mechanism — identical in shape to version 1, so stamping is
+# the only "migration" it needs). To change the schema from here on:
+#   1. update SCHEMA above (what a brand-new db gets),
+#   2. bump SCHEMA_VERSION,
+#   3. add MIGRATIONS[new_version] = [SQL...] turning the previous shape into
+#      the new one (ALTER TABLE ... ADD COLUMN etc.).
+# connect() applies pending migrations in order inside one transaction per
+# step, so every reader/writer — web, CLI, cron — upgrades any db it touches
+# and none of them ever sees a half-migrated file. Backup snapshots keep the
+# pre-migration copies (see stocks.backup).
+SCHEMA_VERSION = 1
+MIGRATIONS: dict[int, list[str]] = {}
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    v = conn.execute("PRAGMA user_version").fetchone()[0]
+    if v >= SCHEMA_VERSION:
+        return
+    for target in range(v + 1, SCHEMA_VERSION + 1):
+        # Explicit BEGIN/COMMIT, not `with conn`: Python's sqlite3 runs DDL
+        # (ALTER TABLE — most of what a migration is) in autocommit mode, so
+        # the context manager would commit each statement as it goes and a
+        # failed step would leave the db half-migrated and unstamped.
+        conn.execute("BEGIN")
+        try:
+            for statement in MIGRATIONS.get(target, []):
+                conn.execute(statement)
+            # PRAGMA can't be parameterized; target is an int from range().
+            conn.execute(f"PRAGMA user_version = {target:d}")
+            conn.execute("COMMIT")
+        except BaseException:
+            conn.execute("ROLLBACK")
+            raise
+
 
 @dataclass
 class Transaction:
@@ -59,7 +94,16 @@ class Transaction:
 def connect(path: Path = DB_PATH) -> sqlite3.Connection:
     conn = sqlite3.connect(path)
     conn.row_factory = sqlite3.Row
+    fresh = not conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='transactions'"
+    ).fetchone()
     conn.execute(SCHEMA)
+    if fresh:
+        # A brand-new db is created in the current shape; the migrations
+        # describe how *old* shapes get here and must not replay over it.
+        conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION:d}")
+    else:
+        _migrate(conn)
     return conn
 
 

@@ -218,6 +218,37 @@ def ensure_user_data(paths: UserPaths, legacy_root: Path | None = None) -> None:
         _persist(paths.watchlist)
 
 
+def delete_account(paths: UserPaths) -> None:
+    """Erase one account's data everywhere: bucket copies first, then disk.
+
+    The GDPR-shaped promise on the legal page: everything under the account's
+    data dir goes, cloud copies included. Bucket keys are enumerated (not just
+    the fixed _USER_FILES) so nothing generated later survives. Bucket first
+    and loudly: if the cloud delete fails the local copies stay too, so a
+    retry still sees a consistent account instead of resurrecting the bucket
+    from a half-deleted disk on the next write.
+
+    Refuses the owner account (its "data dir" is the repo root — deleting it
+    would take the CLI's own book and reference data with it) and the shared
+    guest dir. Backup snapshots are immutable history and expire on their own
+    schedule; the legal copy says so.
+    """
+    root = paths.root.resolve()
+    if root in (PROJECT_ROOT.resolve(), GUEST_DIR.resolve()):
+        raise ValueError("refusing to delete the owner or guest data")
+    if USERS_DIR.resolve() not in root.parents:
+        raise ValueError(f"not an account dir: {root}")
+
+    if storage.enabled():
+        prefix = root.relative_to(PROJECT_ROOT.resolve()).as_posix()
+        for key in storage.list_keys(prefix + "/"):
+            storage.delete_key(key)
+    if root.exists():
+        import shutil
+
+        shutil.rmtree(root)
+
+
 def is_logged_in() -> bool:
     """True when an authenticated identity with a verified email is present.
 
@@ -253,6 +284,21 @@ def resolve_user() -> UserPaths:
     ensure_user_data(paths, legacy_root=legacy)
     st.session_state["user_paths"] = paths
     return paths
+
+
+def login() -> None:
+    """`st.login()` plus `st.stop()`, for sign-in buttons' on_click.
+
+    st.login() only enqueues the redirect message — the run then re-renders
+    the whole page while the browser is already leaving for Google, and every
+    lazy-loaded frontend chunk that navigation aborts flashes a red
+    "error loading dynamically imported module" box. Stopping right after the
+    enqueue sends the redirect with an empty delta, so the page stands still
+    until Google takes over. Safe in a callback: callbacks run in the script
+    thread and StopException is the normal early-exit there too.
+    """
+    st.login()
+    st.stop()
 
 
 def require_login() -> UserPaths:
@@ -357,7 +403,7 @@ def _login_screen() -> None:
                 tr("common.sign_in_google"),
                 type="primary",
                 key="google_signin",
-                on_click=st.login,
+                on_click=login,
                 width="stretch",
             )
             st.caption(

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Push every secret the notifications workflow needs to the GitHub repo, and
-# print the [telegram] block to paste into Streamlit Cloud's secrets.
+# print the [telegram] block to add to the deploy's secrets.toml.
 #
 # Usage:
 #   cp .notify_secrets.env.example .notify_secrets.env   # then paste values
@@ -78,15 +78,17 @@ set_secret FREE_LLM_OPENROUTER "$FREE_LLM_OPENROUTER"
 
 cat << EOF
 
-Done. Now paste this into Streamlit Cloud -> app -> Settings -> Secrets
-(keep everything already there, add this section):
+Done. Now add this section to the deploy's secrets.toml — locally
+.streamlit/secrets.toml, on the VM deploy/secrets.toml (keep everything
+already there):
 
 [telegram]
 bot_token = "$TELEGRAM_BOT_TOKEN"
 bot_username = "${TELEGRAM_BOT_USERNAME:-}"
 
 Then:
-  1. Reboot the Streamlit app so it picks up the new secrets.
+  1. Restart the app container so it picks up the new secrets
+     (docker compose -f deploy/docker-compose.yml up -d).
   2. Deploy the webhook Worker and set the bot's webhook — see
      workers/telegram-webhook/README.md (wrangler deploy + secrets, then
      TELEGRAM_WEBHOOK_SECRET=... uv run stocks telegram-chat --set-webhook <url>).

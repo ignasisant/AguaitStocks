@@ -1,0 +1,13 @@
+# Keep the Cloud Run source upload free of local secrets and junk.
+# The #!include pulls in .gitignore, which already covers secrets.toml,
+# its .bak* copies, portfolio.db, prefs.json and the statements folder.
+#!include:.gitignore
+.git
+.gcloudignore
+.venv
+__pycache__/
+# belt and braces — these must never reach the build context
+.streamlit/secrets.toml
+.streamlit/secrets.toml.bak*
+deploy/.env
+deploy/secrets.toml

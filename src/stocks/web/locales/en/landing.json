@@ -136,5 +136,10 @@
   "landing.faq_q8": "English or Spanish?",
   "landing.faq_a8": "Both, switchable anywhere in the app.",
   "landing.final_title": "Import a statement. See your real number.",
-  "landing.footer_disclaimer": "Not investment advice. Not tax advice. Provided as-is without warranty under the MIT licence. Market data may be delayed or incomplete. Past performance does not predict future results."
+  "landing.footer_disclaimer": "Not investment advice. Not tax advice. Provided as-is without warranty under the MIT licence. Market data may be delayed or incomplete. Past performance does not predict future results.",
+  "landing.seo_title": "TopStocks — real returns in EUR, FIFO and IRPF",
+  "landing.seo_description": "Free, open-source portfolio tracker. Import a broker statement for FIFO positions, EUR P/L at the ECB rate, portfolio risk and Spanish IRPF tax figures.",
+  "landing.seo_image_alt": "TopStocks dashboard: portfolio value in euros with FIFO positions and P/L",
+  "landing.footer_privacy": "Privacy",
+  "landing.footer_terms": "Terms"
 }

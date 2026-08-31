@@ -78,18 +78,3 @@ variable "free_llm_openrouter" {
   sensitive   = true
   default     = ""
 }
-
-# --- Hugging Face Space deploy -----------------------------------------------------
-
-variable "hf_token" {
-  description = "Optional. Hugging Face access token (write scope) used by deploy-hf.yml to mirror main to the Space. Empty = secret not created."
-  type        = string
-  sensitive   = true
-  default     = ""
-}
-
-variable "hf_space" {
-  description = "Optional. Space id as owner/name (e.g. ignasi/aguait-stocks). Empty = variable not created, deploy workflow skipped."
-  type        = string
-  default     = ""
-}

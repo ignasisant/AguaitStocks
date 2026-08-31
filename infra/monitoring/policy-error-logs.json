@@ -1,0 +1,20 @@
+{
+  "displayName": "stocks: ERROR logs",
+  "documentation": {
+    "content": "The app wrote ERROR-severity structured logs (stocks.obs). Triage: `uv run stocks logs errors --since 2h` shows the events with stack traces; `uv run stocks logs stats --since 2h --by event` shows what is failing most.",
+    "mimeType": "text/markdown"
+  },
+  "combiner": "OR",
+  "conditions": [
+    {
+      "displayName": "ERROR entries in the app log",
+      "conditionMatchedLog": {
+        "filter": "resource.type=\"cloud_run_revision\" AND resource.labels.service_name=\"__SERVICE__\" AND severity>=ERROR"
+      }
+    }
+  ],
+  "alertStrategy": {
+    "notificationRateLimit": { "period": "3600s" },
+    "autoClose": "86400s"
+  }
+}

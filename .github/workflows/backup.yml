@@ -1,0 +1,35 @@
+# Daily snapshot of the persistence bucket (see src/stocks/backup.py).
+#
+# The bucket is a live mirror of every account's data — a corrupt write or a
+# bad deploy syncs there immediately, so this cron is the only history. Each
+# run copies every live object under backups/<stamp>/ (server-side CopyObject,
+# no data leaves Cloudflare) and prunes to the last 30 stamps.
+#
+# Restore: `stocks backup list`, then `stocks backup restore <stamp>` (add
+# --only data/users/<slug>/ for one account), then redeploy/restart the app.
+name: backup
+
+on:
+  schedule:
+    - cron: "17 4 * * *" # daily, off the top-of-hour rush; UTC
+  workflow_dispatch:
+
+concurrency:
+  group: backup
+  cancel-in-progress: false
+
+env:
+  STOCKS_STORAGE_ENDPOINT_URL: ${{ secrets.STOCKS_STORAGE_ENDPOINT_URL }}
+  STOCKS_STORAGE_BUCKET: ${{ secrets.STOCKS_STORAGE_BUCKET }}
+  STOCKS_STORAGE_ACCESS_KEY_ID: ${{ secrets.STOCKS_STORAGE_ACCESS_KEY_ID }}
+  STOCKS_STORAGE_SECRET_ACCESS_KEY: ${{ secrets.STOCKS_STORAGE_SECRET_ACCESS_KEY }}
+
+jobs:
+  snapshot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - run: uv sync --frozen --no-dev
+      - run: uv run stocks backup run

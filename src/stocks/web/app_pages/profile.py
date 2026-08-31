@@ -98,6 +98,29 @@ with tab_prefs:
         st.toast(tr("profile.currency_set", ccy=ccy), icon=":material/check:")
     st.caption(tr("profile.currency_caption"))
 
+    # ------------------------------------------------------------ danger zone
+    # The deletion path the privacy policy promises. Owner account never gets
+    # the control: its "data dir" is the repo root (auth.delete_account would
+    # refuse it anyway).
+    if paths.root != auth.PROJECT_ROOT:
+        st.space("large")
+        with st.expander(f":material/delete_forever: {tr('profile.delete_title')}"):
+            st.markdown(tr("profile.delete_body"))
+            sure = st.checkbox(tr("profile.delete_confirm"), key="delete_sure")
+            if st.button(
+                tr("profile.delete_button"),
+                type="primary",
+                icon=":material/delete_forever:",
+                disabled=not sure,
+                key="delete_account",
+            ):
+                try:
+                    auth.delete_account(paths)
+                except Exception:
+                    st.error(tr("profile.delete_failed"), icon=":material/error:")
+                else:
+                    st.logout()
+
 # --------------------------------------------------------- investor profile
 # What the AI assistant is told about the user. Same form as the first-login
 # dialog (auth.render_profile_form); chat_core reads it to build the persona.

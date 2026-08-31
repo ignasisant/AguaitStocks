@@ -15,6 +15,7 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
+from datetime import UTC
 from typing import TYPE_CHECKING
 
 import pandas as pd
@@ -649,10 +650,10 @@ def _session_open(
 
     Time-based only — ignores exchange holidays (a holiday reads as "open"),
     fine for a soft display cue. `now_utc` is injectable for tests."""
-    from datetime import datetime, time, timezone
+    from datetime import datetime, time
     from zoneinfo import ZoneInfo
 
-    now = (now_utc or datetime.now(timezone.utc)).astimezone(ZoneInfo(tz_name))
+    now = (now_utc or datetime.now(UTC)).astimezone(ZoneInfo(tz_name))
     if now.weekday() >= 5:  # Sat/Sun
         return False
     return time(*open_hm) <= now.time() < time(*close_hm)

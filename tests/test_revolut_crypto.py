@@ -6,7 +6,9 @@ HEADER = "Symbol,Type,Quantity,Price,Value,Fees,Date\n"
 
 
 def test_buy_normalizes_to_pair_in_statement_currency():
-    csv = HEADER + 'BTC,Buy,"0.05000000","€60,000.00","€3,000.00",€44.85,2025-03-04T09:12:00.000Z\n'
+    csv = HEADER + (
+        'BTC,Buy,"0.05000000","€60,000.00","€3,000.00",€44.85,2025-03-04T09:12:00.000Z\n'
+    )
     result = parse_csv(csv)
     assert len(result.transactions) == 1
     tx = result.transactions[0]

@@ -1,6 +1,6 @@
 """Transient data-fetch notices, rendered as auto-dismissing toasts.
 
-Yahoo throttles Streamlit Cloud's shared egress IPs and plain urllib fetchers
+Yahoo throttles datacenter egress IPs and plain urllib fetchers
 (FX, logos) die on a dropped network, so a fetch failure is routine rather than
 exceptional. The section that failed degrades in place — empty state, dimmed
 cells — and calls `data_toast()` to say why. `st.toast` self-dismisses after 4s

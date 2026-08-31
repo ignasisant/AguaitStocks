@@ -1,13 +1,3 @@
----
-title: TopStocks
-emoji: 📈
-colorFrom: purple
-colorTo: gray
-sdk: docker
-app_port: 8501
-pinned: false
----
-
 # TopStocks
 
 <img src="src/stocks/web/assets/topstocks-logo.svg" alt="TopStocks logo" width="270">
@@ -91,8 +81,7 @@ deployed URL + `/oauth2callback` to both the Google client and
 
 ### Persistent user data (deploys)
 
-Hosts like Streamlit Community Cloud and most containers have an
-**ephemeral filesystem**: `data/users/` and every imported ledger vanish on
+Container hosts (and most PaaS) have an **ephemeral filesystem**: `data/users/` and every imported ledger vanish on
 restart or redeploy. To keep them, point the app at any S3-compatible
 bucket (Cloudflare R2 free tier is plenty) via the `[storage]` section of
 `secrets.toml` or the equivalent `STOCKS_STORAGE_*` env vars.
@@ -112,31 +101,27 @@ bucket), never an account-level key. Keep the bucket private (no public
 access / dev URL) and enable object versioning so a bad write can be
 rolled back.
 
-### Deploy — Hugging Face Space (Docker)
+### Deploy — Oracle Cloud Always Free VM (Docker + Caddy)
 
-The repo doubles as a HF Space: the YAML front matter at the top of this
-README is the Space config (`sdk: docker`, `app_port: 8501`), and the
-`Dockerfile` + `scripts/docker-entrypoint.sh` run the dashboard on any
-container host. Free CPU tier: 2 vCPU / 16 GB, sleeps after ~48 h without
-visits (the R2 sync makes restarts lossless).
+The live deploy runs the repo `Dockerfile` on a free-forever Oracle ARM VM,
+behind Caddy for automatic HTTPS on an `<ip>.sslip.io` hostname (no domain,
+no signup). Full walkthrough — VM creation, ports, secrets, updates — in
+[`deploy/README.md`](deploy/README.md); the compose file, Caddyfile and
+cloud-init live beside it in [`deploy/`](deploy).
 
-1. Create a blank **Docker** Space at <https://huggingface.co/new-space>.
-2. Space settings → *Variables and secrets* → add secret
-   `STREAMLIT_SECRETS_TOML` with the full contents of your deployed
-   `secrets.toml` (`[auth]`, `[app]`, `[storage]`, `[chat]`, `[free_llm]`,
-   `[telegram]`). The entrypoint writes it to `.streamlit/secrets.toml` at
-   boot.
-3. Google Cloud console → OAuth client → add
-   `https://<owner>-<space>.hf.space/oauth2callback` to the authorized
-   redirect URIs, and set that URL as `[auth] redirect_uri` in the secret.
-4. Repo secret `HF_TOKEN` (write-scope HF token) + repo variable `HF_SPACE`
-   (`owner/name`) — both managed by `infra/` (`hf_token` / `hf_space`
-   tfvars). Every push to `main` then mirrors to the Space via
-   `.github/workflows/deploy-hf.yml`; unset, the workflow stays dormant.
+Short version, on the VM:
 
-Share the direct `https://<owner>-<space>.hf.space` URL — it serves the app
-full-page with no host chrome. The `huggingface.co/spaces/...` page wraps
-it in an iframe where the Google login popup/cookies may misbehave.
+```bash
+scp .streamlit/secrets.toml ubuntu@<VM_IP>:/opt/aguait-stocks/deploy/secrets.toml
+echo "SITE_ADDRESS=<ip-with-dashes>.sslip.io" > deploy/.env
+docker compose -f deploy/docker-compose.yml up -d --build
+```
+
+Then add `https://<ip-with-dashes>.sslip.io/oauth2callback` to the Google
+OAuth client and set the same URL as `[auth] redirect_uri` in `secrets.toml`.
+The image also runs unchanged on any other container host; there,
+`STREAMLIT_SECRETS_TOML` (full `secrets.toml` contents) is written to disk by
+`scripts/docker-entrypoint.sh` at boot instead of bind-mounting the file.
 
 Local check of the same image:
 
@@ -425,7 +410,11 @@ src/stocks/
   analysis/screener.py      cross-sectional KPI rank/filter over the watchlist
   notify/alerts.py     evaluate alerts vs price history (price/RSI/drawdown/cross/52w)
   notify/deliver.py    push alerts to Telegram / email (env-gated, console fallback)
-  web/app.py           Streamlit entry point (st.navigation + page config/CSS + global ticker picker)
+  web/server.py        ASGI entry point: static landing at / + the app behind it
+  web/app.py           Streamlit app (st.navigation + page config/CSS + global ticker picker)
+  web/landing.py       landing markup (sections, CSS, i18n copy) — no Streamlit runtime
+  web/landing_static.py  the landing as a standalone HTML document
+  web/seo.py           title/description/canonical/hreflang/OG/JSON-LD, robots.txt, sitemap.xml
   web/auth.py          Google OIDC login gate + per-account data paths/prefs
   web/chat_core.py     portfolio-aware assistant panel: context + BYOK key + conversation
   web/llm.py           multi-provider LLM registry (Claude/ChatGPT/Gemini), streaming + error map
@@ -444,7 +433,194 @@ watchlist.yaml             stocks I follow + alert thresholds
 uv run pytest      # tests
 uv run ruff check  # lint
 uv run ruff format # format
+uv run scripts/make_og_card.py   # redraw the share card after a brand change
 ```
+
+## The landing page and the app share one port
+
+`stocks dashboard` serves `web/server.py`, an `st.App` that answers a few paths
+itself and hands everything else to the Streamlit app:
+
+| Path | Served by |
+|------|-----------|
+| `/` | the landing page — **unless** the request carries a query parameter or the `ts_app` cookie, in which case the app |
+| `/es/` | the landing page in Spanish |
+| `/lp/*` | the landing's assets (brand mark, `og.png` share card) |
+| `/robots.txt`, `/sitemap.xml` | generated for whichever host answered |
+| everything else | the Streamlit app, stamped `X-Robots-Tag: noindex` |
+
+The landing is a plain HTML response: the copy is in the document, so it is
+crawlable and paints without booting a websocket, and it can carry a `<title>`,
+a description, hreflang pairs and an Open Graph card — none of which a Streamlit
+page can set. `/` is shared because Streamlit always serves its default page at
+the root and `st.Page` ignores `url_path` there; a first visit (no parameter, no
+cookie) is the landing, every CTA click arrives with a parameter, and the cookie
+is set on every app response so returning visitors skip the pitch. Crawlers send
+no cookies, so they always see the landing.
+
+**Set `[app] public_url` in secrets (or `APP_PUBLIC_URL`) on any real deploy** —
+not only behind a custom domain. Cloud Run answers on more than one hostname by
+default, and unset, each one serves a full copy of the site that canonicalizes
+to *itself*: duplicate content, split link equity, and Google choosing which
+copy ranks. Set, it is the base for every canonical, hreflang, Open Graph and
+sitemap URL, and every other hostname 301s to it (GET/HEAD only, and never
+`/_stcore/` — moving a live websocket would break the session a visitor is
+already in). Nothing else needs configuring: no `baseUrlPath`, and the OIDC
+redirect URI is unchanged.
+
+Unknown paths return a real **404**. Streamlit's static mount answers anything
+it does not recognise with the app shell and a 200, which turns every typo and
+stale link into a soft 404. The gate in `server.py` knows the whole served
+surface — the marketing pages, Streamlit's own endpoints, and the app's pages
+derived from `app_pages/` so a new page needs no edit — and 404s the rest.
+
+## Observability — production logs
+
+The app logs one JSON object per event to stdout. Cloud Run forwards stdout to
+Cloud Logging, which indexes those keys as queryable fields, so production
+questions are queries rather than grep:
+
+```json
+{"severity":"ERROR","message":"page.render","event":"page.render","ok":false,
+ "duration_ms":812,"page":"Cartera","user":"a_b_c_1f2e3d4c","error_type":"KeyError"}
+```
+
+Emit side — `stocks.obs`, no dependencies, shared by the dashboard, the CLI and
+the scheduled jobs:
+
+```python
+from stocks import obs
+
+obs.event("chat.answered", provider="free", chars=120)   # a fact
+with obs.timed("page.render", page=title) as extra:      # + duration_ms, ok
+    extra["rows"] = len(df)
+with obs.swallow("logo.mirror", ticker=t):               # degrade, but leave a trace
+    mirror(t)
+```
+
+`stocks.web.telemetry.bind_run()` runs once per Streamlit script run and binds
+`session`, `user` and `page` onto every record the run emits — from any module
+— so one visit reads as one timeline. `user` is the account slug (the same key
+its data directory uses), never the raw address; `STOCKS_LOG_USER=0` drops it.
+Verbosity is `STOCKS_LOG_LEVEL` (default `INFO`), so a revision can be turned
+up to `DEBUG` without a code change. Locally the same calls print a compact
+human line instead of JSON.
+
+What is instrumented today: page renders and page crashes, sign-in, the free
+LLM chain (which backend answered, which failed and why), Telegram chat
+replies, and Yahoo rate limiting.
+
+Query side — `stocks logs`, which shells out to `gcloud` (whoever is logged in
+with `gcloud auth login` and can read the project's logs can run it):
+
+```bash
+uv run stocks logs tail --since 30m              # recent app output, oldest first
+uv run stocks logs errors --since 24h            # severity>=ERROR, with tracebacks
+uv run stocks logs tail --event llm.free.backend_failed --since 7d
+uv run stocks logs tail --user a_b_c_1f2e3d4c --since 2h   # one account's timeline
+uv run stocks logs tail --http --since 15m       # the HTTP access log instead
+uv run stocks logs stats --since 24h             # count/errors/p50/p95 per event
+uv run stocks logs stats --since 24h --by page   # ...or per page, per user, ...
+uv run stocks logs export --since 7d --level ERROR   # JSONL snapshot in data/logs/
+```
+
+Cloud Logging keeps 30 days; `export` writes a JSONL snapshot to `data/logs/`
+(git-ignored) for anything worth keeping longer, and every command takes
+`--file <snapshot>` to read it back with no network. Project and service
+default to the deploy in `stocks.logs_query`; `STOCKS_GCP_PROJECT` /
+`STOCKS_GCP_SERVICE` (or `--project` / `--service`) point them elsewhere.
+
+Errors also reach **Cloud Error Reporting** — records at `ERROR` carry the
+inline traceback and the `ReportedErrorEvent` type it groups on — so repeated
+crashes collapse into one issue with a count instead of scrolling past.
+
+### Product usage
+
+`stocks logs usage` (default: last 7 days) rolls the same structured events up
+into users / page runs / chat turns / feedback per day, plus per-page totals —
+product analytics with no tracker: everything comes from the logs the app
+already writes.
+
+### User feedback
+
+Every page carries a "Send feedback" popover at the bottom of the sidebar
+(guests included, burst-limited). Submissions land as JSON under
+`data/feedback/` (mirrored to the bucket) *and* as a `feedback` log event.
+Read them with `stocks feedback`, or in the timeline via
+`stocks logs tail --event feedback`.
+
+### Alerting & uptime
+
+`/healthz` answers on the shared port with no dependencies — the target for an
+uptime check. One-time setup of the whole alerting surface (email channel,
+uptime check, "healthz down" and "ERROR logs" policies, definitions in
+`infra/monitoring/`):
+
+```bash
+./scripts/setup_monitoring.sh you@example.com
+```
+
+## Backups & restore
+
+The R2 bucket behind `stocks.storage` is a **mirror, not a backup** — a corrupt
+write replaces the only copy immediately. `.github/workflows/backup.yml`
+snapshots every live object daily under `backups/<stamp>/…` (server-side
+copies, last 30 kept). The same secrets the notify workflow uses are enough.
+
+```bash
+uv run stocks backup run              # snapshot now (and prune to --keep)
+uv run stocks backup list             # what exists
+uv run stocks backup restore <stamp>  # copy a snapshot back over the live keys
+uv run stocks backup restore <stamp> --only data/users/<slug>/   # one account
+```
+
+Restore never deletes: keys the snapshot lacks are left alone. After a restore,
+**restart/redeploy the app** — a running container treats its local files as
+authoritative and would re-push them over what you just restored. Verify with
+`stocks backup list` + a spot-check (`stocks positions` for the owner book, or
+the account's Profile page) before deleting anything.
+
+## Schema migrations
+
+`portfolio.db` is versioned via SQLite's `PRAGMA user_version`
+(`stocks/portfolio/ledger.py`). To change the schema: update `SCHEMA`, bump
+`SCHEMA_VERSION`, add the upgrade SQL to `MIGRATIONS`. Every `connect()` —
+web, CLI, cron — applies pending steps in order, one transaction per step, so
+any process upgrades any db it touches and a failed step rolls back cleanly.
+Backups (above) keep the pre-migration copies.
+
+## Deploying (staging → prod)
+
+Prod runs on Cloud Run (`topstocks`, europe-west1); staging is a second,
+scale-to-zero service (`topstocks-staging`, free when idle). `scripts/deploy.sh`
+wraps the source deploy:
+
+```bash
+./scripts/deploy.sh                 # staging — try the change on a real URL
+./scripts/deploy.sh prod            # gated: clean tree + green CI + confirm
+./scripts/deploy.sh prod --min-instances 0   # accept cold starts, save money
+```
+
+Prod keeps one instance warm by default (`--min-instances 1`) so first paint
+never eats a container boot. `/status` on either service reports the serving
+revision, uptime and whether persistence is configured. Cost backstops: a GCP
+budget alert (`./scripts/setup_budget.sh <billing-account>`) and a global
+daily cap on the free LLM chain (`FREE_LLM_GLOBAL_DAILY_CAP`, default 400,
+on top of the per-account cap). Incidents: see `docs/RUNBOOK.md` — triage
+commands, rollback, restore, secrets rotation.
+
+## CI & security
+
+- `.github/workflows/ci.yml` — ruff + the full test suite on every push/PR;
+  `pip-audit` over `uv.lock` on main and weekly. Deploy only from a green main.
+- `.github/dependabot.yml` — weekly grouped dependency bumps, gated by CI.
+- `web/server.py` sends baseline security headers on every response (nosniff,
+  `frame-ancestors 'self'`, Referrer-Policy, HSTS on TLS); the chat panel is
+  burst-limited per account (`web/ratelimit.py`) on top of the free chain's
+  daily cap.
+- `/legal/privacy` and `/legal/terms` (EN/ES, linked from the landing footer)
+  state the data handling and the "not investment advice" disclaimer; account
+  deletion is self-serve on the Profile page and erases disk + bucket copies.
 
 ## Telegram notifications & chat
 
@@ -489,8 +665,8 @@ Setup (one-time):
    `STOCKS_STORAGE_*` values (same creds the Streamlit deploy uses).
 3. `./scripts/setup_notify_secrets.sh` — pushes every GitHub Actions secret
    (harvesting `CHAT_ENC_KEY` and the `FREE_LLM_*` keys from your local
-   `.streamlit/secrets.toml`) and prints the `[telegram]` block to paste into
-   Streamlit Cloud's secrets. Needs `gh auth login` once.
+   `.streamlit/secrets.toml`) and prints the `[telegram]` block to add to
+   the deploy's `secrets.toml`. Needs `gh auth login` once.
 4. Deploy the webhook Worker and point the bot at it — see
    `workers/telegram-webhook/README.md`. Rollback any time with
    `uv run stocks telegram-chat --delete-webhook` (restores `getUpdates`

@@ -1,44 +1,85 @@
 """Marketing landing page — the first thing an anonymous visitor sees.
 
-Ported from the Claude Design canvas file `Aguait Landing.dc.html`. It renders
-as a full-bleed takeover *before* `st.navigation` builds the app, so none of the
-usual chrome (sidebar rail, topbar, ticker picker, chat launcher) is on screen;
-`app.py` calls `st.stop()` straight after us.
+Ported from the Claude Design canvas file `Aguait Landing.dc.html`. This module
+owns only the *markup*: `landing_static` wraps these sections in a standalone
+HTML document (head, SEO tags, JSON-LD) that `server.py` serves at `/` and
+`/es/` straight from Starlette — no Streamlit script run, no websocket, no
+`st.html`. That is what makes the page crawlable and instant; the app itself
+starts at the first CTA click.
+
+`consume_params()` is the other half: the CTAs are links carrying query
+parameters, and `app.py` calls it once per rerun to act on them.
 
 Two things shape how this is written:
 
 * **The CTAs are links, not buttons.** A designed landing puts its calls to
-  action inside flex rows, sticky bars and centred hero blocks; Streamlit
-  buttons can only appear where an element boundary already exists, which would
-  mean chopping the layout into a dozen `st.columns` and approximating the
-  design. Instead every CTA is an anchor carrying a query parameter that
-  `should_show()` interprets on the next run — `?signin=1` calls `st.login()`,
-  `?guest=1` dismisses the page. The whole layout then stays one HTML node.
+  action inside flex rows, sticky bars and centred hero blocks; a static page
+  has no widget layer to put a button in anyway. Every CTA is an anchor
+  carrying a query parameter, and any query parameter on `/` is what tells
+  `server.py` to hand the request to Streamlit instead of the landing —
+  `?signin=1` then makes `consume_params()` call `st.login()`, `?guest=1`
+  drops the visitor straight into the app as a guest.
 * **Phones get a fixed CTA bar, not a squeezed header.** The page is very
   long, so the sign-in call to action leaves the top bar on narrow viewports
   and reappears as a fixed bottom bar (`.ag-l-mbar`) that follows the reader
   down. Everything else is width-driven CSS — see `_MOBILE_RULES`.
 * **No raw colour literals.** Everything reads `var(--ag-*)` from
-  `widgets.ds_vars_css()`, which `app.py` has already emitted by the time we
-  run. Tints the tokens don't ship are derived with `color-mix()` rather than
+  `widgets.ds_vars_css()`, which `landing_static` inlines into the document
+  head. Tints the tokens don't ship are derived with `color-mix()` rather than
   hard-coded rgba, so the palette stays single-source.
 """
 
 from __future__ import annotations
 
 import html
+from contextlib import contextmanager
+from contextvars import ContextVar
 
 import streamlit as st
 
 from stocks.web import auth
-from stocks.web.i18n import LANGUAGES, active_language
-from stocks.web.i18n import t as tr
-from stocks.web.widgets import _static_logo_src, is_mobile
+from stocks.web.i18n import DEFAULT_LANG, LANGUAGES, translate
 
-# Query parameters the in-page anchors set. Read and cleared by should_show().
+# Query parameters the in-page anchors set. Read by consume_params().
 PARAM_SIGNIN = "signin"
 PARAM_GUEST = "guest"
-_SEEN_KEY = "_landing_seen"
+
+# Browser paths this module hard-codes: the language pair the sections link
+# between, and the asset mount server.py serves the brand mark from. Absolute,
+# because /es/ is one segment deeper than / and a relative logo URL would
+# resolve against the wrong directory there.
+PATH_EN = "/"
+PATH_ES = "/es/"
+ASSET_BASE = "/lp/"
+
+# The language this render is for. A ContextVar rather than an argument because
+# every section below reads it through tr() — threading a code through fifteen
+# builders to reach a dict lookup would be all noise. Set by render_language().
+_LANG: ContextVar[str] = ContextVar("landing_lang", default=DEFAULT_LANG)
+
+
+@contextmanager
+def render_language(lang: str):
+    """Render the sections in `lang`. Wraps every landing_static build."""
+    token = _LANG.set(lang if lang in LANGUAGES else DEFAULT_LANG)
+    try:
+        yield
+    finally:
+        _LANG.reset(token)
+
+
+def active_language() -> str:
+    """The language this render is for — never Streamlit session state.
+
+    The page is built outside a script run (there is no session), so it cannot
+    go through `i18n.active_language()`.
+    """
+    return _LANG.get()
+
+
+def tr(key: str, /, **kwargs) -> str:
+    """`i18n.t()` bound to the render language instead of the session."""
+    return translate(key, _LANG.get(), **kwargs)
 
 # Illustrative figures for the product mocks. Plausible, obviously a sample —
 # never presented as anyone's real book.
@@ -47,6 +88,11 @@ _FISCAL_YEAR = 2026
 _CHART_YEARS = ("2023", "2024", "2025", "2026")
 
 _GITHUB_URL = "https://github.com/ignasi-sant/stocks"
+
+# Q/A pairs in the FAQ section (landing.faq_q1..q8 / faq_a1..a8). `seo.py`
+# reads the same range to emit the FAQPage structured data, so the rich result
+# and the visible section can never drift apart.
+FAQ_COUNT = 8
 
 # Brokers the Import page actually parses (stocks.portfolio.platforms), in the
 # order that page lists them. The last entry is the catch-all schema.
@@ -229,6 +275,14 @@ header[data-testid="stHeader"],
   font-size: var(--ag-fs-md); font-weight: 500; color: var(--ag-text-secondary);
 }
 .ag-l-ghlink:hover { color: var(--ag-text-primary); }
+
+/* --- keyboard focus --- */
+/* The default UA ring is near-invisible on this dark surface; keyboard users
+   get an explicit high-contrast ring instead. :focus-visible only — mouse
+   clicks stay ringless, as the UA heuristic intends. */
+a:focus-visible, button:focus-visible, summary:focus-visible {
+  outline: 2px solid var(--ag-brand-cta); outline-offset: 2px;
+}
 
 /* --- buttons --- */
 .ag-l-g { width: 17px; height: 17px; fill: var(--ag-brand-google-tile); }
@@ -982,36 +1036,47 @@ _CSS = (
 
 
 def _mark(width_class: str = "") -> str:
-    src = _esc(_static_logo_src("topstocks-icon.svg"))
+    src = _esc(f"{ASSET_BASE}topstocks-icon.svg")
     cls = f' class="{width_class}"' if width_class else ""
     return f'<img src="{src}" alt="TopStocks"{cls}>'
 
 
 def _lang_toggle(*, footer: bool = False) -> str:
-    """EN / ES switch. Anchors carry ?lang=, which should_show() applies."""
+    """EN / ES switch — one indexable URL each, paired by hreflang in the head."""
     es = _is_es()
+    en_part = '<span class="on">EN</span>' if not es else f'<a href="{PATH_EN}">EN</a>'
+    es_part = '<span class="on">ES</span>' if es else f'<a href="{PATH_ES}">ES</a>'
     if footer:
-        en_part = (
-            '<span class="on">EN</span>' if not es else '<a href="?lang=en">EN</a>'
-        )
-        es_part = (
-            '<span class="on">ES</span>' if es else '<a href="?lang=es">ES</a>'
-        )
         return f'<div class="ag-l-foot-lang">{en_part}<span>·</span>{es_part}</div>'
-    en_part = '<span class="on">EN</span>' if not es else '<a href="?lang=en">EN</a>'
-    es_part = '<span class="on">ES</span>' if es else '<a href="?lang=es">ES</a>'
     return f'<div class="ag-l-lang">{en_part}{es_part}</div>'
+
+
+def _legal_lang_q() -> str:
+    """Query string that keeps the legal pages in this page's language."""
+    return "?lang=es" if _is_es() else ""
+
+
+def _app_href(param: str) -> str:
+    """The app entry URL for a CTA.
+
+    Always root-absolute with the query parameter: `server.py` hands any
+    parameterised request for `/` to Streamlit, so this one link both leaves
+    the landing and tells the app what the visitor asked for. The Spanish page
+    carries its language along, since the app resolves that per session.
+    """
+    lang = "" if not _is_es() else "&lang=es"
+    return f"{PATH_EN}?{param}=1{lang}"
 
 
 def _signin_link(cls: str, label: str, *, with_mark: bool = True) -> str:
     mark = _G_MARK if with_mark else ""
-    return f'<a class="{cls}" href="?{PARAM_SIGNIN}=1">{mark}{_esc(label)}</a>'
+    href = _esc(_app_href(PARAM_SIGNIN))
+    return f'<a class="{cls}" href="{href}">{mark}{_esc(label)}</a>'
 
 
 def _guest_link(label: str) -> str:
-    return (
-        f'<a class="ag-l-cta-text" href="?{PARAM_GUEST}=1">{_esc(label)} →</a>'
-    )
+    href = _esc(_app_href(PARAM_GUEST))
+    return f'<a class="ag-l-cta-text" href="{href}">{_esc(label)} →</a>'
 
 
 def _top_bar() -> str:
@@ -1427,7 +1492,7 @@ def _faq() -> str:
     qs = "".join(
         f'<details class="ag-l-q"><summary>{_esc(tr(f"landing.faq_q{i}"))}</summary>'
         f'<p>{_esc(tr(f"landing.faq_a{i}"))}</p></details>'
-        for i in range(1, 9)
+        for i in range(1, FAQ_COUNT + 1)
     )
     return f"""
 <section class="ag-l-band"><div class="ag-l-faq">
@@ -1454,6 +1519,8 @@ def _footer() -> str:
     <div class="ag-l-brand">{_mark()}<span>TopStocks</span></div>
     <a href="{_esc(_GITHUB_URL)}" target="_blank"
        rel="noopener noreferrer">{_esc(tr("landing.nav_github"))}</a>
+    <a href="/legal/privacy{_legal_lang_q()}">{_esc(tr("landing.footer_privacy"))}</a>
+    <a href="/legal/terms{_legal_lang_q()}">{_esc(tr("landing.footer_terms"))}</a>
     {_lang_toggle(footer=True)}
   </div>
   <p class="ag-l-fine">{_esc(tr("landing.footer_disclaimer"))}</p>
@@ -1517,68 +1584,87 @@ _BAR_JS = """
 """
 
 
-def _mobile_css() -> str:
-    """The phone rules again, gated on the User-Agent instead of the viewport.
+def _mobile_css_body() -> str:
+    """The phone rules again, at a wider breakpoint, for User-Agent gating.
 
     `_CSS` already applies them under `max-width: 640px`, which is the right
     trigger — layout should follow width. But a phone can report a CSS
-    viewport wider than that (large handsets, landscape, a stale zoom), and
-    `widgets.is_mobile()` is the only signal that knows it is a phone at all.
-    Where the two disagree below 900px, believe the User-Agent: a touch device
-    wants the stacked layout and the thumb-reachable CTA either way. Emitted
+    viewport wider than that (large handsets, landscape, a stale zoom). Where
+    the two disagree below 900px, believe the User-Agent: a touch device wants
+    the stacked layout and the thumb-reachable CTA either way.
+
+    `landing_static` ships this in a `<style media="not all">` element and a
+    one-line script flips the attribute to `all` for phone User-Agents, which
+    is how a static document does a server-side check it no longer has. Placed
     after `_CSS`, so it wins on source order; `_TINY_CSS` rides along to stay
     last.
     """
-    return (
-        "<style>@media (max-width: 900px) {"
-        + _MOBILE_RULES
-        + "}"
-        + _TINY_CSS
-        + "</style>"
-    )
+    return "@media (max-width: 900px) {" + _MOBILE_RULES + "}" + _TINY_CSS
+
+
+def _mobile_css() -> str:
+    """`_mobile_css_body()` in its own style element."""
+    return "<style>" + _mobile_css_body() + "</style>"
 
 
 # --------------------------------------------------------------------- entry
 
 
-def should_show() -> bool:
-    """True when this run should render the landing instead of the app.
+def stylesheet() -> str:
+    """The page stylesheet: base rules, the 640px phone block, small-phone type."""
+    return _CSS
 
-    Also consumes the page's own query parameters, because the CTAs are links
-    rather than buttons: `?signin=1` starts the OIDC round-trip, `?guest=1`
-    dismisses the page for the session, and `?lang=` switches the copy in place.
-    A `?ticker=` deep link always wins — those URLs are handed out by the app
-    itself and must not be swallowed by a marketing page.
+
+def ua_mobile_rules() -> str:
+    """The phone rules at 900px, bare CSS — see `_mobile_css_body`."""
+    return _mobile_css_body()
+
+
+def bar_script() -> str:
+    """The mobile CTA bar's reveal script, in its `<script>` element."""
+    return _BAR_JS
+
+
+def consume_params() -> None:
+    """Act on the landing CTAs' query parameters. Called once per app rerun.
+
+    The CTAs are links, so arriving in the app *is* the click: `?signin=1`
+    starts the OIDC round-trip, `?lang=` pins the copy to the language the
+    visitor was reading, and `?guest=1` means "in as a guest" — nothing to do
+    beyond clearing it out of the URL. Left alone otherwise, so the app's own
+    `?ticker=` deep links pass straight through.
+
+    `?lang=` stays in the URL on purpose: `app.py` re-resolves the language
+    from prefs on every rerun, and the parameter is what keeps re-applying the
+    visitor's choice for the rest of a signed-out session.
     """
-    if "auth" not in st.secrets or auth.is_logged_in():
-        return False
-
     params = st.query_params
 
     lang = (params.get("lang") or "").strip().lower()
     if lang in LANGUAGES:
         st.session_state["active_lang"] = lang
 
-    if params.get(PARAM_SIGNIN):
-        st.login()  # redirects; nothing after this runs
-        return False
-
     if params.get(PARAM_GUEST):
-        st.session_state[_SEEN_KEY] = True
-        del params[PARAM_GUEST]  # in-session rerun, so the flag survives
-        return False
+        del params[PARAM_GUEST]  # in-session rerun; nothing else to keep
 
-    if st.session_state.get(_SEEN_KEY):
-        return False
-    return not (st.query_params.get("ticker") or "").strip()
+    # Guarded on the session, not just the parameter: st.login() redirects, and
+    # the parameter can survive the round trip — an unguarded call would then
+    # bounce an already-signed-in visitor back to Google on every rerun.
+    if params.get(PARAM_SIGNIN) and "auth" in st.secrets and not auth.is_logged_in():
+        st.login()
+        # st.login() only enqueues the redirect; without the stop, the rest of
+        # the run keeps rendering into a page the browser is abandoning, and
+        # the aborted chunk loads flash module-import errors until Google
+        # takes over.
+        st.stop()
 
 
-def render_landing() -> None:
-    """Emit the whole page. `app.py` calls `st.stop()` straight after."""
-    st.html(_CSS)
-    if is_mobile():
-        st.html(_mobile_css())
-    st.html(
+def page_body() -> str:
+    """The whole page as one element — every section, in order.
+
+    Wrap the call in `render_language()`; `landing_static` does.
+    """
+    return (
         '<div class="ag-l">'
         + _top_bar()
         + _hero()
@@ -1596,4 +1682,3 @@ def render_landing() -> None:
         + _mobile_bar()
         + "</div>"
     )
-    st.html(_BAR_JS, unsafe_allow_javascript=True)

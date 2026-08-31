@@ -170,7 +170,9 @@ def _build_tx(raw: dict, col: dict[str, str], action: str) -> Transaction:
     )
 
 
-def _build_dividend(raw: dict, col: dict[str, str], date: str, ticker: str) -> Transaction:
+def _build_dividend(
+    raw: dict, col: dict[str, str], date: str, ticker: str
+) -> Transaction:
     qty = _money(_cell(raw, col, "shares"))
     per_share = _money(_cell(raw, col, "price"))
     inst_ccy = _cell(raw, col, "price_ccy").upper()

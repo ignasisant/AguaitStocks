@@ -66,7 +66,7 @@ def parse_csv(text: str) -> ParseResult:
             continue
         if kind != "Data" or section not in headers:
             continue
-        cells = dict(zip(headers[section], rest))
+        cells = dict(zip(headers[section], rest, strict=False))
         if section == "Trades":
             _trade_row(i, cells, result)
         elif section == "Dividends":
@@ -118,7 +118,9 @@ def _trade_row(line: int, cells: dict[str, str], result: ParseResult) -> None:
             )
         )
     except ValueError as exc:
-        result.skipped.append(_skip(line, category or "trade", str(exc), cells, ticker, qty))
+        result.skipped.append(
+            _skip(line, category or "trade", str(exc), cells, ticker, qty)
+        )
 
 
 def _dividend_row(line: int, cells: dict[str, str], result: ParseResult) -> None:

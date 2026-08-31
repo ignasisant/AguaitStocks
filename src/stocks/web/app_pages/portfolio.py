@@ -117,6 +117,13 @@ def _positions_section() -> None:
         st.subheader(tr("portfolio.open_positions_pl"))
         if tbl.empty:
             st.caption(tr("portfolio.no_open_positions"))
+            # Empty book = the next step is importing one; say so in place
+            # instead of leaving a dead end.
+            st.page_link(
+                "app_pages/import_transactions.py",
+                label=tr("nav.import"),
+                icon=":material/upload_file:",
+            )
         else:
             cost = tbl["cost_eur"].sum()
             value = tbl["value_eur"].dropna().sum()

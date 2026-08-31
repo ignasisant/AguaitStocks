@@ -105,7 +105,9 @@ def test_rejects_negative_purchase_and_bad_price():
 
 def test_zero_price_sell_imports_as_worthless_disposal():
     # Real GTIJF row: OTC position written off — realizes the full loss.
-    csv = _HDR + "2026-05-04T13:30:25Z,GTIJF,SELL - MARKET,36.36363636,USD 0,USD 0,USD,1.17\n"
+    csv = _HDR + (
+        "2026-05-04T13:30:25Z,GTIJF,SELL - MARKET,36.36363636,USD 0,USD 0,USD,1.17\n"
+    )
     res = revolut.parse_csv(csv)
     assert len(res.transactions) == 1
     assert res.transactions[0].price == 0.0
@@ -127,13 +129,17 @@ def test_rejects_inconsistent_qty_price_total():
 
 def test_sell_fee_implied_from_total():
     # 20 × 123.96 = 2479.20 gross, 2473.07 received -> 6.13 commission (real row).
-    csv = _HDR + "2026-06-10T14:51:03Z,SEZL,SELL - MARKET,20,USD 123.96,USD 2473.07,USD,1.15\n"
+    csv = _HDR + (
+        "2026-06-10T14:51:03Z,SEZL,SELL - MARKET,20,USD 123.96,USD 2473.07,USD,1.15\n"
+    )
     tx = revolut.parse_csv(csv).transactions[0]
     assert tx.fee == 6.13
 
 
 def test_buy_fee_zero_when_total_matches():
-    csv = _HDR + "2024-12-24T15:05:11Z,NVO,BUY - MARKET,34.2896331,USD 87.49,USD 3000,USD,1.04\n"
+    csv = _HDR + (
+        "2024-12-24T15:05:11Z,NVO,BUY - MARKET,34.2896331,USD 87.49,USD 3000,USD,1.04\n"
+    )
     tx = revolut.parse_csv(csv).transactions[0]
     assert tx.fee == 0.0
 

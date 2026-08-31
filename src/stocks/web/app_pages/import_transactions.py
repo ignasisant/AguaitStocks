@@ -22,7 +22,7 @@ quantity at the split date makes the ratio unambiguous.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pandas as pd
 import streamlit as st
@@ -57,11 +57,15 @@ if st.session_state.pop("imports_cleared", False):
 with st.container(horizontal=True, vertical_alignment="center"):
     st.metric(tr("import.metric_in_ledger"), len(ledger))
     with st.popover(
-        tr("import.clear_all_imports"), icon=":material/delete_forever:", disabled=not ledger
+        tr("import.clear_all_imports"),
+        icon=":material/delete_forever:",
+        disabled=not ledger,
     ):
         st.markdown(tr("import.clear_all_confirm", n=len(ledger)))
         if st.button(
-            tr("import.delete_everything"), type="primary", icon=":material/delete_forever:"
+            tr("import.delete_everything"),
+            type="primary",
+            icon=":material/delete_forever:",
         ):
             clear(paths.db)
             last_import.forget(paths.last_import)
@@ -282,7 +286,7 @@ if st.button(tr("import.commit_button"), type="primary", disabled=not importable
     last_import.save(
         last_import.ImportRecord(
             filename=uploaded.name,
-            imported_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            imported_at=datetime.now(UTC).isoformat(timespec="seconds"),
             tx_ids=ids,
             wiped=wipe,
             platform=platform.key,

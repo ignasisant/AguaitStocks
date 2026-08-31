@@ -1,7 +1,7 @@
 """Thin Telegram Bot API client — stdlib urllib, no SDK.
 
 One bot serves every account: the token lives in TELEGRAM_BOT_TOKEN (env,
-GitHub Actions) or [telegram] bot_token (secrets.toml, Streamlit Cloud); each
+GitHub Actions) or [telegram] bot_token (secrets.toml, on the deploy); each
 user's chat id lives in their prefs.json after the deep-link `/start` flow.
 
 Inbound messages arrive via a webhook (set_webhook): Telegram POSTs each

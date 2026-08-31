@@ -1,0 +1,15 @@
+{
+  "feedback.button": "Send feedback",
+  "feedback.caption": "Found a bug? Missing something? It lands directly with the developer.",
+  "feedback.kind": "Type",
+  "feedback.kind_bug": "Bug",
+  "feedback.kind_idea": "Idea",
+  "feedback.kind_other": "Other",
+  "feedback.text": "Your feedback",
+  "feedback.placeholder": "What happened, or what would make this better?",
+  "feedback.send": "Send",
+  "feedback.sent": "Thanks — received!",
+  "feedback.empty": "Write something first.",
+  "feedback.rate_limited": "That's plenty for now — try again in a while.",
+  "feedback.failed": "Could not save your feedback. Please try again later."
+}

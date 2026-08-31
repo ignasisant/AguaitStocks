@@ -136,5 +136,10 @@
   "landing.faq_q8": "¿Inglés o español?",
   "landing.faq_a8": "Los dos, y se cambia desde cualquier punto de la app.",
   "landing.final_title": "Sube un extracto. Mira tu número real.",
-  "landing.footer_disclaimer": "No es asesoramiento de inversión. No es asesoramiento fiscal. Se ofrece tal cual, sin garantía, bajo licencia MIT. Los datos de mercado pueden estar retrasados o incompletos. La rentabilidad pasada no predice la futura."
+  "landing.footer_disclaimer": "No es asesoramiento de inversión. No es asesoramiento fiscal. Se ofrece tal cual, sin garantía, bajo licencia MIT. Los datos de mercado pueden estar retrasados o incompletos. La rentabilidad pasada no predice la futura.",
+  "landing.seo_title": "TopStocks — rentabilidad real en euros, FIFO e IRPF",
+  "landing.seo_description": "Seguimiento de cartera gratis y de código abierto. Sube el extracto de tu bróker: posiciones por FIFO, P/L en euros al tipo del BCE, riesgo e IRPF.",
+  "landing.seo_image_alt": "Panel de TopStocks: valor de la cartera en euros con posiciones FIFO y P/L",
+  "landing.footer_privacy": "Privacidad",
+  "landing.footer_terms": "Condiciones"
 }

@@ -2,7 +2,7 @@
 
 import pytest
 
-from stocks.portfolio import dividends
+from stocks.portfolio import dividends, ledger
 from stocks.portfolio.ledger import (
     Transaction,
     add,
@@ -154,3 +154,72 @@ def test_dividend_reclaimable_above_treaty_cap():
     d = dividends.by_year(txs, to_eur=flat_fx)[2025]
     assert d.creditable_eur == pytest.approx(15)
     assert d.reclaimable_eur == pytest.approx(10)
+
+
+def test_new_db_is_stamped_with_the_current_schema_version(tmp_path):
+    import sqlite3
+
+    db = tmp_path / "p.db"
+    with ledger.connect(db) as conn:
+        assert (
+            conn.execute("PRAGMA user_version").fetchone()[0]
+            == ledger.SCHEMA_VERSION
+        )
+    # A pre-versioning db (same shape, user_version 0) is stamped on connect.
+    legacy = tmp_path / "old.db"
+    with sqlite3.connect(legacy) as conn:
+        conn.execute(ledger.SCHEMA)
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 0
+    with ledger.connect(legacy) as conn:
+        assert (
+            conn.execute("PRAGMA user_version").fetchone()[0]
+            == ledger.SCHEMA_VERSION
+        )
+
+
+def test_pending_migrations_run_in_order_and_stamp(tmp_path, monkeypatch):
+    import sqlite3
+
+    db = tmp_path / "p.db"
+    with sqlite3.connect(db) as conn:  # a db of today's shape, version 0
+        conn.execute(ledger.SCHEMA)
+
+    monkeypatch.setattr(ledger, "SCHEMA_VERSION", 3)
+    monkeypatch.setattr(ledger, "MIGRATIONS", {
+        2: ["ALTER TABLE transactions ADD COLUMN venue TEXT NOT NULL DEFAULT ''"],
+        3: ["ALTER TABLE transactions ADD COLUMN lot TEXT NOT NULL DEFAULT ''"],
+    })
+    with ledger.connect(db) as conn:
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(transactions)")}
+        assert {"venue", "lot"} <= cols
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 3
+    # Idempotent: a second connect sees the stamp and re-runs nothing.
+    with ledger.connect(db) as conn:
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 3
+
+
+def test_a_failing_migration_rolls_back_its_whole_step(tmp_path, monkeypatch):
+    import sqlite3
+
+    import pytest as _pytest
+
+    db = tmp_path / "p.db"
+    with sqlite3.connect(db) as conn:
+        conn.execute(ledger.SCHEMA)
+
+    monkeypatch.setattr(ledger, "SCHEMA_VERSION", 2)
+    monkeypatch.setattr(ledger, "MIGRATIONS", {
+        2: [
+            "ALTER TABLE transactions ADD COLUMN venue TEXT NOT NULL DEFAULT ''",
+            "THIS IS NOT SQL",
+        ],
+    })
+    with _pytest.raises(sqlite3.OperationalError):
+        ledger.connect(db).close()
+    with sqlite3.connect(db) as conn:
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(transactions)")}
+        assert "venue" not in cols  # the half-applied step rolled back
+        # Steps before the failing one keep their stamps (step 1 is empty and
+        # committed); the failed step 2 left no trace, so a fixed migration
+        # resumes exactly there.
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 1

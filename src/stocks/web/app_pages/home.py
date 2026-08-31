@@ -80,7 +80,7 @@ def _first_run_banner() -> None:
                 tr("common.sign_in_google"),
                 key="guest_banner_login",
                 icon=":material/login:",
-                on_click=st.login,
+                on_click=auth.login,
             )
         else:
             st.info(
@@ -163,7 +163,7 @@ def _setup_card() -> None:
         else:
             row.button(_label(False, "account_circle", tr("home.setup_google")),
                        key="setup_card_login", type="tertiary",
-                       on_click=st.login, disabled="auth" not in st.secrets)
+                       on_click=auth.login, disabled="auth" not in st.secrets)
 
         if row.button(_label(imported, "upload_file", tr("home.setup_import")),
                       key="setup_card_import", type="tertiary",
@@ -545,7 +545,9 @@ _xt_slot = skeletons.reserve(
 # Defined above the refresh button so its clear() call can reference it; the
 # actual 1y fetch still only runs in the deferred fill at the bottom.
 @st.cache_data(ttl=6 * 3600, show_spinner=False)
-def _year_extremes(tickers: tuple[str, ...]) -> list[tuple[str, float, str, float | None]]:
+def _year_extremes(
+    tickers: tuple[str, ...],
+) -> list[tuple[str, float, str, float | None]]:
     """(ticker, last close, "high"/"low", distance) for names within 2% of
     their 52-week high or low — one bulk 1y download, keyed by the ticker tuple
     so watchlist or portfolio edits invalidate it. Distance is None when the
@@ -851,8 +853,10 @@ def _mini_result_chip(r, names: dict[str, str], logos: dict[str, str | None]) ->
     )
 
 
-def _mini_calendar_html(start: date, by_date: dict[date, list], res_by_date: dict[date, list],
-                        ref: date, names: dict[str, str], logos: dict[str, str | None]) -> str:
+def _mini_calendar_html(start: date, by_date: dict[date, list],
+                        res_by_date: dict[date, list], ref: date,
+                        names: dict[str, str],
+                        logos: dict[str, str | None]) -> str:
     """`_MINI_CAL_WEEKS` × 5 weekdays as an HTML table. `start` is a Monday; each
     cell holds that day's past-result chips then upcoming chips, with today
     highlighted and past days dimmed."""
@@ -864,7 +868,9 @@ def _mini_calendar_html(start: date, by_date: dict[date, list], res_by_date: dic
             day = start + timedelta(days=week * 7 + wd)
             cls = "today" if day == ref else ("dim" if day < ref else "")
             cls_attr = f' class="{cls}"' if cls else ""
-            chips = "".join(_mini_result_chip(r, names, logos) for r in res_by_date.get(day, []))
+            chips = "".join(
+                _mini_result_chip(r, names, logos) for r in res_by_date.get(day, [])
+            )
             chips += "".join(_mini_chip(e, names, logos) for e in by_date.get(day, []))
             cells.append(
                 f'<td{cls_attr}><div class="mini-daynum">{day.day}</div>{chips}</td>'

@@ -215,6 +215,21 @@ def delete_key(key: str) -> None:
     _client().delete_object(Bucket=cfg["bucket"], Key=key)
 
 
+def copy_key(src: str, dst: str) -> None:
+    """Server-side copy of one object (no download). No-op when storage is off.
+
+    Used by stocks.backup to snapshot and restore whole key trees without
+    pulling user data through the machine running the job.
+    """
+    if not enabled():
+        return
+    cfg = _config() or {}
+    _client().copy_object(
+        Bucket=cfg["bucket"], Key=dst,
+        CopySource={"Bucket": cfg["bucket"], "Key": src},
+    )
+
+
 def list_keys(prefix: str = "") -> list[str]:
     """All bucket keys under `prefix` ([] when storage is unconfigured).
 

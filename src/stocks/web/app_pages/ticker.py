@@ -190,7 +190,9 @@ def _rangebreaks(df: pd.DataFrame, interval: str) -> list[dict]:
         day = t.dt.normalize()
         hours = t.dt.hour + t.dt.minute / 60
         open_h = hours.groupby(day).min().median()
-        close_h = (hours.groupby(day).max() + pd.Timedelta(interval) / pd.Timedelta(hours=1)).median()
+        close_h = (
+            hours.groupby(day).max() + pd.Timedelta(interval) / pd.Timedelta(hours=1)
+        ).median()
         if close_h != open_h:
             breaks.append(dict(bounds=[close_h % 24, open_h], pattern="hour"))
     return breaks
@@ -706,7 +708,11 @@ def _price_section(ticker: str) -> None:
                     x=[x for _, x in pts],
                     y=[t.price for t, _ in pts],
                     mode="markers",
-                    name=tr("ticker.my_buys") if action == "buy" else tr("ticker.my_sells"),
+                    name=(
+                        tr("ticker.my_buys")
+                        if action == "buy"
+                        else tr("ticker.my_sells")
+                    ),
                     marker=dict(
                         symbol=symbol, size=12, color=color,
                         line=dict(width=1.5, color=SURFACE_PAGE),
@@ -1425,7 +1431,7 @@ with _moat_card.container(border=True):
             help=kpi_desc("moat"),
         )
         moat_cols[0].caption(verdict_md("moat", moat.score))
-        for col, pillar in zip(moat_cols[1:], moat.pillars):
+        for col, pillar in zip(moat_cols[1:], moat.pillars, strict=False):
             col.metric(
                 pillar.label,
                 tr("ticker.na") if pillar.score is None else f"{pillar.score:.0f}",
@@ -1464,7 +1470,9 @@ with _ins_card.container(border=True):
             str(summ.sell_count),
             delta=f"-{_fmt_money(summ.sell_value)}" if summ.sell_value else None,
         )
-        i3.metric(tr("ticker.net_window", days=summ.window_days), _fmt_money(summ.net_value))
+        i3.metric(
+            tr("ticker.net_window", days=summ.window_days), _fmt_money(summ.net_value)
+        )
         i4.metric(tr("ticker.distinct_buyers_sellers"), f"{summ.buyers} / {summ.sellers}")
 
         if summ.cluster_buy:
@@ -1477,7 +1485,9 @@ with _ins_card.container(border=True):
         if om:
             flow = pd.DataFrame(
                 {
-                    "month": [pd.Timestamp(t.date).to_period("M").to_timestamp() for t in om],
+                    "month": [
+                        pd.Timestamp(t.date).to_period("M").to_timestamp() for t in om
+                    ],
                     "side": ["Buy" if t.code == BUY_CODE else "Sell" for t in om],
                     "value": [t.value for t in om],
                 }
@@ -1495,7 +1505,10 @@ with _ins_card.container(border=True):
                         go.Bar(
                             x=pivot.index, y=pivot[side], name=side_labels[side],
                             marker_color=color,
-                            hovertemplate=f"{side_labels[side]}  <b>$%{{y:.3s}}</b><extra></extra>",
+                            hovertemplate=(
+                                f"{side_labels[side]}  <b>$%{{y:.3s}}</b>"
+                                "<extra></extra>"
+                            ),
                         )
                     )
             bar.update_layout(
@@ -1527,10 +1540,18 @@ with _ins_card.container(border=True):
             hide_index=True,
             height=280,
             column_config={
-                "Date": st.column_config.DateColumn(tr("ticker.col_date"), format="YYYY-MM-DD"),
-                "Shares": st.column_config.NumberColumn(tr("ticker.col_shares"), format="%d"),
-                "Price": st.column_config.NumberColumn(tr("ticker.col_price"), format="$%.2f"),
-                "Value": st.column_config.NumberColumn(tr("ticker.col_value"), format="$%.0f"),
+                "Date": st.column_config.DateColumn(
+                    tr("ticker.col_date"), format="YYYY-MM-DD"
+                ),
+                "Shares": st.column_config.NumberColumn(
+                    tr("ticker.col_shares"), format="%d"
+                ),
+                "Price": st.column_config.NumberColumn(
+                    tr("ticker.col_price"), format="$%.2f"
+                ),
+                "Value": st.column_config.NumberColumn(
+                    tr("ticker.col_value"), format="$%.0f"
+                ),
             },
         )
         st.caption(tr("ticker.signed_caption"))
@@ -1581,7 +1602,11 @@ with st.container(border=True):
     )
     extra = st.text_input(tr("ticker.extra_peers"), "")
     peers += [p for p in picked if p not in peers]
-    peers += [p.strip().upper() for p in extra.split(",") if p.strip() and p.strip().upper() not in peers]
+    peers += [
+        p.strip().upper()
+        for p in extra.split(",")
+        if p.strip() and p.strip().upper() not in peers
+    ]
     if peers:
         # One metrics pull per peer, serial — the table shimmers with a column
         # per picked name so adding a peer doesn't blank the comparison.

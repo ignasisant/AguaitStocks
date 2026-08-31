@@ -1,11 +1,11 @@
-# TopStocks — container image for Hugging Face Spaces (Docker SDK) or any
-# container host (Cloud Run, a VM...). Serves the Streamlit dashboard on $PORT
-# (default 8501, matching app_port in the README front matter).
+# TopStocks — container image for any container host. The live deploy runs it
+# on an Oracle Always Free VM behind Caddy (see deploy/). Serves the Streamlit
+# dashboard on $PORT (default 8501).
 #
-# Secrets: set STREAMLIT_SECRETS_TOML to the full contents of
-# .streamlit/secrets.toml (Space settings -> Variables and secrets); the
-# entrypoint writes it to disk at boot. [storage] may alternatively come in
-# as individual STOCKS_STORAGE_* env vars (see src/stocks/storage.py).
+# Secrets: bind-mount the real .streamlit/secrets.toml (what deploy/ does), or
+# set STREAMLIT_SECRETS_TOML to its full contents and the entrypoint writes it
+# to disk at boot. [storage] may alternatively come in as individual
+# STOCKS_STORAGE_* env vars (see src/stocks/storage.py).
 
 FROM python:3.12-slim
 

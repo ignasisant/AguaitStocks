@@ -16,7 +16,6 @@ last-write-wins — accepted, the overlap window is a single turn.
 
 from __future__ import annotations
 
-import logging
 import time
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
@@ -25,11 +24,10 @@ from datetime import date
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from stocks import obs
 from stocks.chat import market
 from stocks.secrets_env import secret
 from stocks.web import chat_skills, chat_web
-
-log = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     import pandas as pd
@@ -187,17 +185,48 @@ def free_daily_cap() -> int:
         return FREE_DAILY_CAP
 
 
+# Cost backstop across ALL accounts: the per-account cap bounds one user, this
+# bounds the process — N signed-up accounts times the account cap is otherwise
+# the real daily ceiling on shared free-tier keys. In-memory on purpose: the
+# web app is one container (the bot process gets its own, much smaller, run),
+# and a restart forgetting the counter only ever errs generous.
+FREE_GLOBAL_DAILY_CAP = 400
+_global_free: dict = {"day": "", "used": 0}
+
+
+def free_global_daily_cap() -> int:
+    try:
+        return int(secret("FREE_LLM_GLOBAL_DAILY_CAP", "free_llm", "global_daily_cap")
+                   or FREE_GLOBAL_DAILY_CAP)
+    except (TypeError, ValueError):
+        return FREE_GLOBAL_DAILY_CAP
+
+
+def _spend_global_free() -> bool:
+    day = time.strftime("%Y-%m-%d")
+    if _global_free["day"] != day:
+        _global_free["day"], _global_free["used"] = day, 0
+    if _global_free["used"] >= free_global_daily_cap():
+        obs.event("llm.free.global_cap")
+        return False
+    _global_free["used"] += 1
+    return True
+
+
 def spend_free_quota(prefs: dict) -> bool:
     """Consume one unit of today's free allowance; False when it's spent.
 
     Mutates `prefs` in place — the caller saves, so the web panel and the
     Telegram bot share one counter ("free_msgs::<date>"). Keys from previous
-    days are dropped on spend so prefs.json never accumulates.
+    days are dropped on spend so prefs.json never accumulates. The account
+    counter is checked first so a capped-out user can't drain the global pot.
     """
     day = time.strftime("%Y-%m-%d")
     key = f"free_msgs::{day}"
     used = int(prefs.get(key, 0))
     if used >= free_daily_cap():
+        return False
+    if not _spend_global_free():
         return False
     for stale in [k for k in prefs if k.startswith("free_msgs::") and k != key]:
         prefs.pop(stale)
@@ -703,8 +732,9 @@ def answer(*, prefs: dict, prefs_path: Path, chat_path: Path,
             # timeout, bad key, rate limit — next candidate. Logged because the
             # user only ever sees chat.api_error; without this the reason for a
             # dead chain (retired model, free tier gone paid) is unrecoverable.
-            log.warning("provider %s (%s) failed: %s: %s", provider.id,
-                        model or provider.default_model, type(exc).__name__, exc)
+            obs.warn("chat.provider_failed", provider=provider.id,
+                     model=model or provider.default_model,
+                     error_type=type(exc).__name__, error=str(exc)[:300])
             continue
         finally:
             pool.shutdown(wait=False, cancel_futures=True)
@@ -718,7 +748,13 @@ def answer(*, prefs: dict, prefs_path: Path, chat_path: Path,
             auth.save_chat(history, chat_path)
             autotitle(chat_path, provider, key, history)
             _keep_byok(prefs, prefs_path, provider.id)
+            obs.event("chat.answered", provider=provider.id,
+                      model=model or provider.default_model,
+                      chars=len(text), skills=list(skills),
+                      web_sources=len(web_sources))
             return Reply(text=text, skills=tuple(skills),
                          sources=tuple(web_sources), provider_id=provider.id)
 
+    obs.warn("chat.failed", reason="free_cap" if capped else "api_error",
+             providers=[p.id for p, _k, _m in atts])
     return Reply(error="chat.free_cap" if capped else "chat.api_error")

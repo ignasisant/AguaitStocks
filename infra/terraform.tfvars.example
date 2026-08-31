@@ -23,8 +23,3 @@ chat_enc_key        = "" # must equal Streamlit [chat] enc_key
 free_llm_groq       = ""
 free_llm_cerebras   = ""
 free_llm_openrouter = ""
-
-# Optional — Hugging Face Space deploy (deploy-hf.yml). Token: hf.co settings
-# -> Access Tokens -> write scope. Space id like "ignasi/aguait-stocks".
-hf_token = ""
-hf_space = ""

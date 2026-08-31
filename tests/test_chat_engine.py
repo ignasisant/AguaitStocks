@@ -199,6 +199,7 @@ def test_free_daily_cap_env_override(monkeypatch):
 
 def test_spend_free_quota_counts_and_sweeps(monkeypatch):
     monkeypatch.setenv("FREE_LLM_DAILY_CAP", "2")
+    monkeypatch.setattr(engine, "_global_free", {"day": "", "used": 0})
     prefs = {"free_msgs::2000-01-01": 9}
     assert engine.spend_free_quota(prefs)
     assert "free_msgs::2000-01-01" not in prefs  # stale day swept
@@ -206,6 +207,26 @@ def test_spend_free_quota_counts_and_sweeps(monkeypatch):
     assert not engine.spend_free_quota(prefs)  # cap reached
     day_key = f"free_msgs::{time.strftime('%Y-%m-%d')}"
     assert prefs[day_key] == 2
+
+
+def test_global_free_cap_backstops_across_accounts(monkeypatch):
+    monkeypatch.setenv("FREE_LLM_DAILY_CAP", "10")
+    monkeypatch.setenv("FREE_LLM_GLOBAL_DAILY_CAP", "3")
+    monkeypatch.setattr(engine, "_global_free", {"day": "", "used": 0})
+    # Three different accounts, each well under their own cap...
+    accounts = [{}, {}, {}, {}]
+    spent = [engine.spend_free_quota(p) for p in accounts]
+    # ...but the pot is shared: the fourth account finds it empty.
+    assert spent == [True, True, True, False]
+    assert accounts[3] == {}  # the refused turn charged nobody
+
+
+def test_global_free_cap_resets_at_utc_midnight(monkeypatch):
+    monkeypatch.setenv("FREE_LLM_GLOBAL_DAILY_CAP", "1")
+    monkeypatch.setattr(
+        engine, "_global_free", {"day": "1999-12-31", "used": 99}
+    )
+    assert engine.spend_free_quota({})  # new day -> counter forgotten
 
 
 # ------------------------------------------------------------ skill routing

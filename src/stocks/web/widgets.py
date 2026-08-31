@@ -809,7 +809,10 @@ def kpi_grid_html(
     for label, value, verdict, tip in tiles:
         head = f'<span class="ag-kpi-l">{html.escape(label)}</span>'
         if tip:
-            head += f'<span class="ag-kpi-q" title="{html.escape(tip, quote=True)}">?</span>'
+            head += (
+                f'<span class="ag-kpi-q" title="{html.escape(tip, quote=True)}">'
+                "?</span>"
+            )
         row = f'<span class="ag-kpi-v">{html.escape(value)}</span>'
         if verdict:
             fill, ink = _VERDICT_FILL.get(verdict[1], (SURFACE_SUNKEN, TEXT_MUTED))
@@ -873,12 +876,28 @@ def ticker_pill_md(ticker: str, max_name: int = 18) -> str:
 # so it can't drive an as-you-type dropdown. This tiny bidirectional component
 # streams the field's value to Python on every keystroke (debounced ~160ms) via
 # setStateValue; Python echoes it back through `data` so the cursor is never
-# fought. Declared once at import (never inside a function — re-registering the
-# name misbehaves). Styled in its own shadow root to match the old field.
-_LIVE_SEARCH = st.components.v2.component(
-    "topstocks_live_search",
-    html='<input id="q" class="lsi" type="text" autocomplete="off" spellcheck="false" />',
-    css="""
+# fought. Styled in its own shadow root to match the old field.
+#
+# Registered on first mount, NOT at import: server.py imports this module at
+# ASGI boot (via landing_static) before the Streamlit runtime exists, and a
+# registration made then lands in a throwaway local manager — every later
+# mount would raise "Component 'topstocks_live_search' is not registered".
+# The first mount always happens inside a script run, where the runtime's
+# registry is live; cached so the name is registered once per process.
+_LIVE_SEARCH = None
+
+
+def _live_search_component():
+    global _LIVE_SEARCH
+    if _LIVE_SEARCH is not None:
+        return _LIVE_SEARCH
+    _LIVE_SEARCH = st.components.v2.component(
+        "topstocks_live_search",
+        html=(
+            '<input id="q" class="lsi" type="text"'
+            ' autocomplete="off" spellcheck="false" />'
+        ),
+        css="""
     .lsi {
       width: 100%; box-sizing: border-box; height: 36px; padding: 0 0.75rem;
       background: var(--ag-surface-card); color: var(--ag-text-primary);
@@ -889,7 +908,7 @@ _LIVE_SEARCH = st.components.v2.component(
     .lsi::placeholder { color: var(--ag-text-muted); }
     .lsi:focus { border-color: var(--ag-brand-cta); }
     """,
-    js="""
+        js="""
 export default function (component) {
   const { parentElement, data, setStateValue } = component
   const input = parentElement.querySelector("#q")
@@ -944,7 +963,9 @@ export default function (component) {
       input._timer = setTimeout(() => send(v), 160)
     })
     input.addEventListener("keydown", (e) => {
-      if (e.key === "Enter") { clearTimeout(input._timer); input._retryN = 0; send(e.target.value) }
+      if (e.key === "Enter") {
+        clearTimeout(input._timer); input._retryN = 0; send(e.target.value)
+      }
     })
     // Report focus so Python can show recent searches on an empty, focused
     // field. Blur is delayed so a click on a dropdown row (a Streamlit button
@@ -990,7 +1011,8 @@ export default function (component) {
   doc.addEventListener("click", doc.__lsRowCloser)
 }
 """,
-)
+    )
+    return _LIVE_SEARCH
 
 
 def _live_search_input(*, key: str, placeholder: str) -> tuple[str, bool]:
@@ -1003,7 +1025,7 @@ def _live_search_input(*, key: str, placeholder: str) -> tuple[str, bool]:
         # The frontend may re-send the old query with this rerun, resurrecting
         # it in session state; echo an empty value so the JS clears the field.
         value = ""
-    result = _LIVE_SEARCH(
+    result = _live_search_component()(
         key=key,
         data={"value": value, "placeholder": placeholder, "blur": blur},
         width="stretch",
@@ -1164,7 +1186,9 @@ def _search_row(t: str, label: str, key: str) -> None:
     st.button(label, key=key, on_click=_go_ticker, args=(t,), width="stretch")
 
 
-def _render_ticker_rows(rows: list[tuple[str, str, str]], *, key_prefix: str = "tbres") -> None:
+def _render_ticker_rows(
+    rows: list[tuple[str, str, str]], *, key_prefix: str = "tbres"
+) -> None:
     """Render `(symbol, name, mark)` rows as logo'd buttons in the dropdown.
 
     Each carries its watchlist logo (CSS background, like the picker) and its
@@ -1711,7 +1735,8 @@ def ticker_table_html(
         for c in dim:
             sty = sty.apply(
                 lambda col: [
-                    signed_color(v, muted=m) for v, m in zip(col, muted_mask)
+                    signed_color(v, muted=m)
+                    for v, m in zip(col, muted_mask, strict=False)
                 ],
                 subset=[c],
                 axis=0,
@@ -2293,7 +2318,9 @@ def ticker_picker(
         # Unknown change → +inf so it sorts last in both directions.
         shown = sorted(
             shown,
-            key=lambda t: (changes.get(t) if changes.get(t) is not None else float("inf")),
+            key=lambda t: (
+                changes.get(t) if changes.get(t) is not None else float("inf")
+            ),
             reverse=desc,
         )
         if desc:
@@ -2473,7 +2500,7 @@ def ticker_actions(ticker: str, *, container=None, key: str = "ticker") -> None:
                 tr("widgets.sign_in_favorite"),
                 key=f"{key}_login_{_slug(ticker)}",
                 icon=":material/login:",
-                on_click=st.login,
+                on_click=auth.login,
                 width="stretch",
             )
         return

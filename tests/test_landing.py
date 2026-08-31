@@ -1,12 +1,17 @@
-"""Landing gate and its number formatting — no Streamlit runtime.
+"""The landing's CTA parameters, number formatting and markup.
 
-`AppTest` cannot cover this: it does not deliver query parameters to app.py at
-all (verified at the script's first executable line), which is also why the
-pre-existing `?ticker=` deep-link handler is untested there. The gate is pure
-enough to exercise directly, so it is.
+`AppTest` cannot cover the parameter half: it does not deliver query parameters
+to app.py at all (verified at the script's first executable line), which is also
+why the pre-existing `?ticker=` deep-link handler is untested there.
+`consume_params()` is pure enough to exercise directly, so it is.
+
+The markup half needs no Streamlit runtime either — the page is built as a
+string, outside any script run. See test_landing_static.py for the document
+that wraps it and test_server.py for the routes that serve it.
 """
 
 import re
+from contextlib import ExitStack
 
 import pytest
 
@@ -19,73 +24,84 @@ class _Params(dict):
 
 @pytest.fixture
 def gate(monkeypatch):
-    """Anonymous visitor, auth configured, nothing seen yet."""
+    """Anonymous visitor, auth configured, no parameters yet."""
     params, state, logins = _Params(), {}, []
     monkeypatch.setattr(landing.st, "query_params", params)
     monkeypatch.setattr(landing.st, "session_state", state)
     monkeypatch.setattr(landing.st, "secrets", {"auth": {"client_id": "x"}})
     monkeypatch.setattr(landing.st, "login", lambda *a, **k: logins.append(True))
     monkeypatch.setattr(landing.auth, "is_logged_in", lambda: False)
-    monkeypatch.setattr(landing, "active_language", lambda: "en")
     return params, state, logins
 
 
-def test_anonymous_first_visit_shows_landing(gate):
-    assert landing.should_show() is True
-
-
-def test_signed_in_visitor_never_sees_it(gate, monkeypatch):
-    monkeypatch.setattr(landing.auth, "is_logged_in", lambda: True)
-    assert landing.should_show() is False
-
-
-def test_hidden_when_auth_is_not_configured(gate, monkeypatch):
-    monkeypatch.setattr(landing.st, "secrets", {})
-    assert landing.should_show() is False
-
-
-def test_ticker_deep_link_wins(gate):
-    """Shared ?ticker= URLs are handed out by the app and must still work."""
-    params, _, _ = gate
-    params["ticker"] = "AAPL"
-    assert landing.should_show() is False
-
-
-def test_blank_ticker_does_not_count_as_a_deep_link(gate):
-    params, _, _ = gate
-    params["ticker"] = "   "
-    assert landing.should_show() is True
-
-
-def test_guest_param_dismisses_clears_and_sticks(gate):
-    params, state, _ = gate
-    params[landing.PARAM_GUEST] = "1"
-    assert landing.should_show() is False
-    assert landing.PARAM_GUEST not in params, "param must be cleared from the URL"
-    assert state["_landing_seen"] is True
-    # and it stays dismissed on the next run, with no parameter left
-    assert landing.should_show() is False
+def test_no_parameters_is_a_no_op(gate):
+    """A plain app load must not touch the session or start a login."""
+    params, state, logins = gate
+    landing.consume_params()
+    assert (dict(params), state, logins) == ({}, {}, [])
 
 
 def test_signin_param_starts_the_oidc_round_trip(gate):
     params, _, logins = gate
     params[landing.PARAM_SIGNIN] = "1"
-    assert landing.should_show() is False
+    landing.consume_params()
     assert logins == [True], "st.login() should have been called exactly once"
+
+
+def test_signin_param_is_ignored_once_signed_in(gate, monkeypatch):
+    """The parameter can survive the redirect; a second login would loop."""
+    params, _, logins = gate
+    monkeypatch.setattr(landing.auth, "is_logged_in", lambda: True)
+    params[landing.PARAM_SIGNIN] = "1"
+    landing.consume_params()
+    assert logins == []
+
+
+def test_signin_param_is_ignored_without_auth_configured(gate, monkeypatch):
+    params, _, logins = gate
+    monkeypatch.setattr(landing.st, "secrets", {})
+    params[landing.PARAM_SIGNIN] = "1"
+    landing.consume_params()
+    assert logins == []
+
+
+def test_guest_param_is_cleared_from_the_url(gate):
+    params, _, logins = gate
+    params[landing.PARAM_GUEST] = "1"
+    landing.consume_params()
+    assert landing.PARAM_GUEST not in params, "param must be cleared from the URL"
+    assert logins == [], "browsing as a guest must not start a login"
+
+
+def test_ticker_deep_link_passes_straight_through(gate):
+    """Shared ?ticker= URLs are handed out by the app and must be left alone."""
+    params, state, logins = gate
+    params["ticker"] = "AAPL"
+    landing.consume_params()
+    assert params["ticker"] == "AAPL"
+    assert (state, logins) == ({}, [])
 
 
 @pytest.mark.parametrize("lang", ["es", "en"])
 def test_lang_param_overrides_the_run_language(gate, lang):
     params, state, _ = gate
     params["lang"] = lang
-    landing.should_show()
+    landing.consume_params()
     assert state["active_lang"] == lang
+
+
+def test_lang_param_survives_for_the_next_rerun(gate):
+    """app.py re-resolves the language every rerun; the parameter re-applies it."""
+    params, _, _ = gate
+    params["lang"] = "es"
+    landing.consume_params()
+    assert params["lang"] == "es"
 
 
 def test_unknown_lang_param_is_ignored(gate):
     params, state, _ = gate
     params["lang"] = "klingon"
-    landing.should_show()
+    landing.consume_params()
     assert "active_lang" not in state
 
 
@@ -93,11 +109,14 @@ def test_unknown_lang_param_is_ignored(gate):
 
 
 @pytest.fixture
-def as_lang(monkeypatch):
-    def _set(lang):
-        monkeypatch.setattr(landing, "active_language", lambda: lang)
+def as_lang():
+    """Enter landing.render_language(lang) for the rest of the test."""
+    with ExitStack() as stack:
 
-    return _set
+        def _set(lang):
+            stack.enter_context(landing.render_language(lang))
+
+        yield _set
 
 
 @pytest.mark.parametrize(
@@ -200,33 +219,69 @@ def test_mobile_bar_carries_the_sign_in_parameter():
     assert f"?{landing.PARAM_SIGNIN}=1" in bar
 
 
+# -------------------------------------------------------------------- markup
+
+
 @pytest.fixture
-def rendered(monkeypatch):
-    """render_landing() with st.html captured instead of emitted."""
+def body(as_lang):
+    def _build(lang="en"):
+        as_lang(lang)
+        return landing.page_body()
 
-    def _render(*, mobile: bool):
-        blocks: list[str] = []
-        monkeypatch.setattr(
-            landing.st, "html", lambda body, **kw: blocks.append(body)
-        )
-        monkeypatch.setattr(landing, "is_mobile", lambda: mobile)
-        monkeypatch.setattr(landing, "active_language", lambda: "en")
-        monkeypatch.setattr(landing, "_static_logo_src", lambda name: "/x.svg")
-        landing.render_landing()
-        return blocks
-
-    return _render
+    return _build
 
 
-def test_the_bar_and_its_script_ship_on_every_request(rendered):
-    blocks = rendered(mobile=False)
-    assert '<div class="ag-l-mbar">' in blocks[-2], "bar missing from the markup"
-    assert blocks[-1] == landing._BAR_JS, "reveal script must follow the markup"
+def test_the_page_is_one_element_with_every_section(body):
+    html = body()
+    assert html.startswith('<div class="ag-l">') and html.endswith("</div>")
+    for marker in (
+        "ag-l-bar",      # top bar
+        "ag-l-hero",
+        "ag-l-broker",   # broker list
+        "ag-l-provcard", # provenance
+        "ag-l-trustgrid",
+        "ag-l-q",        # FAQ
+        "ag-l-final",
+        "ag-l-foot",
+        "ag-l-mbar",     # the phone CTA bar ships on every request
+    ):
+        assert marker in html, f"section missing: {marker}"
 
 
-def test_the_user_agent_override_ships_only_for_phones(rendered):
-    assert landing._mobile_css() in rendered(mobile=True)
-    assert landing._mobile_css() not in rendered(mobile=False)
+def test_every_cta_leaves_the_landing_for_the_app(body):
+    """The CTAs must point at the app, not back at the page they are on.
+
+    `server.py` routes `/` to the landing precisely when there is no query
+    parameter, so a relative `?signin=1` from `/es/` would land on the Spanish
+    landing again instead of the app.
+    """
+    # &amp; because the href is escaped for the attribute it sits in
+    pairs = (("en", "/?signin=1"), ("es", "/?signin=1&amp;lang=es"))
+    for lang, expected in pairs:
+        html = body(lang)
+        assert f'href="{expected}"' in html
+        assert 'href="?signin=1"' not in html, "relative CTA would stay on the page"
+
+
+def test_the_language_toggle_pairs_the_two_indexable_urls(body):
+    en = body("en")
+    assert f'href="{landing.PATH_ES}"' in en
+    assert '<span class="on">EN</span>' in en
+    assert "?lang=" not in en.replace("&lang=es", ""), "no ?lang= toggle links"
+
+
+def test_the_brand_mark_is_absolute(body):
+    """/es/ is a directory deeper, so a relative asset URL would 404 there."""
+    assert f'src="{landing.ASSET_BASE}topstocks-icon.svg"' in body()
+
+
+def test_the_copy_actually_changes_language(body):
+    assert "Your real return" in body("en")
+    assert "Tu rentabilidad real" in body("es")
+
+
+def test_the_faq_renders_every_question_the_structured_data_claims(body):
+    assert body().count("<details class=\"ag-l-q\"") == landing.FAQ_COUNT
 
 
 def test_no_grid_track_can_outgrow_its_container():

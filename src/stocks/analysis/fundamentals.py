@@ -531,7 +531,7 @@ def comp_medals(metrics: list[dict]) -> dict[str, str]:
     if len(scores) < 3:
         return {}
     ranked = sorted(scores, key=scores.get, reverse=True)
-    return dict(zip(ranked, ("🥇", "🥈", "🥉")))
+    return dict(zip(ranked, ("🥇", "🥈", "🥉"), strict=False))
 
 
 def sources_table() -> pd.DataFrame:

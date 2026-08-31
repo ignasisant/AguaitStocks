@@ -84,5 +84,6 @@
   "chat.skill.earnings-review": "Earnings review",
   "chat.skill.portfolio-risk": "Portfolio risk",
   "chat.skill.spain-tax": "Spain tax (IRPF)",
-  "chat.skill.bear-case": "Bear case & red flags"
+  "chat.skill.bear-case": "Bear case & red flags",
+  "chat.rate_limited": "Too many messages at once — try again in about {seconds}s."
 }
