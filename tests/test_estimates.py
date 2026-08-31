@@ -3,12 +3,14 @@
 import pandas as pd
 
 from stocks.data.estimates import (
+    NEXT_Q,
     Consensus,
     RawEstimates,
     consensus,
     estimate_currency,
     long_term_growth,
     projection,
+    quarter_outlook,
     rating_from_counts,
 )
 
@@ -145,3 +147,18 @@ def test_long_term_growth():
     nan = pd.DataFrame({"stockTrend": [0.43, float("nan")]}, index=["+1y", "LTG"])
     assert long_term_growth(nan) is None
     assert long_term_growth(pd.DataFrame()) is None
+
+
+def test_quarter_outlook_reads_the_next_quarter_row():
+    raw = sample_raw()
+    view = quarter_outlook(raw, NEXT_Q)
+    assert view.period == "+1q"
+    assert (view.eps_avg, view.eps_low, view.eps_high) == (2.01, 1.88, 2.13)
+    assert view.eps_growth == 0.0902
+    assert view.rev_avg == 1.14e11 and view.rev_growth == 0.120
+    assert not view.empty
+
+
+def test_quarter_outlook_without_coverage_is_empty():
+    view = quarter_outlook(RawEstimates(ticker="TEST"))
+    assert view.empty and view.eps_avg is None and view.rev_analysts is None

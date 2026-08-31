@@ -16,23 +16,37 @@ last-write-wins — accepted, the overlap window is a single turn.
 
 from __future__ import annotations
 
+import logging
 import time
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from stocks.chat import market
 from stocks.secrets_env import secret
 from stocks.web import chat_skills, chat_web
+
+log = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     import pandas as pd
 
-    from stocks.web.chat_actions import Action
+    from stocks.chat.tools import Action
     from stocks.web.llm import Provider
 
-BYOK_TTL = 15 * 24 * 3600  # the "remembered for 15 days" promise, seconds
+# Remembered-key lifetime. The window *slides*: every successful use of a
+# stored key pushes BYOK_TTL out again, so an active account never re-enters
+# its key, while an abandoned one goes cold on its own. BYOK_MAX_AGE is the
+# absolute ceiling measured from the moment the key was entered and is never
+# refreshed, so no stored key can live indefinitely. Expiry is not just a read
+# check: prune_byok deletes the ciphertext, so dead keys stop sitting in
+# prefs.json (and in the bucket mirror).
+BYOK_TTL = 90 * 24 * 3600  # sliding window, seconds
+BYOK_MAX_AGE = 180 * 24 * 3600  # hard cap since first save, seconds
+_BYOK_TOUCH_MIN = 24 * 3600  # slide at most once a day (each write hits the bucket)
 _BYOK_ORDER = ("anthropic", "openai", "gemini")
 
 # The free chain runs on the operator's shared keys, so each account gets a
@@ -58,19 +72,84 @@ TELEGRAM_CONTEXT = (
 # ------------------------------------------------------------ provider keys
 
 
+def byok_fields(pid: str) -> tuple[str, str, str]:
+    """The three prefs keys holding one provider's remembered key."""
+    return f"{pid}_key_enc", f"{pid}_key_saved_at", f"{pid}_key_first_at"
+
+
+def byok_alive(prefs: dict, pid: str) -> bool:
+    """True while `pid`'s stored key is inside both windows (sliding + cap).
+
+    Entries written before the cap existed have no `_key_first_at`; their own
+    save time stands in for it, so the ceiling counts from the true origin
+    rather than restarting on upgrade.
+    """
+    enc_k, saved_k, first_k = byok_fields(pid)
+    if not prefs.get(enc_k):
+        return False
+    try:
+        saved = float(prefs.get(saved_k, 0) or 0)
+        first = float(prefs.get(first_k, saved) or saved)
+    except (TypeError, ValueError):
+        return False
+    now = time.time()
+    return now - saved <= BYOK_TTL and now - first <= BYOK_MAX_AGE
+
+
 def decrypt_byok(prefs: dict, pid: str) -> str:
     """The user's stored key for `pid`, or '' (missing / expired / bad token)."""
     try:
         from cryptography.fernet import Fernet
 
         enc_key = secret("CHAT_ENC_KEY", "chat", "enc_key")
-        token = prefs.get(f"{pid}_key_enc")
-        saved_at = prefs.get(f"{pid}_key_saved_at", 0)
-        if not enc_key or not token or time.time() - saved_at > BYOK_TTL:
+        enc_k, _, _ = byok_fields(pid)
+        if not enc_key or not byok_alive(prefs, pid):
             return ""
-        return Fernet(enc_key).decrypt(token.encode()).decode()
+        return Fernet(enc_key).decrypt(prefs[enc_k].encode()).decode()
     except Exception:
         return ""
+
+
+def touch_byok(prefs: dict, pid: str) -> bool:
+    """Slide `pid`'s window after a successful use. True when prefs changed.
+
+    Mutates `prefs` in place — the caller saves. Throttled to one write a day
+    so a busy panel doesn't re-upload prefs.json on every rerun.
+    """
+    _, saved_k, first_k = byok_fields(pid)
+    if not byok_alive(prefs, pid):
+        return False
+    now = int(time.time())
+    saved = int(float(prefs.get(saved_k, 0) or 0))
+    if now - saved < _BYOK_TOUCH_MIN:
+        return False
+    prefs.setdefault(first_k, saved or now)  # legacy entry: origin = its save time
+    prefs[saved_k] = now
+    return True
+
+
+def prune_byok(prefs: dict) -> bool:
+    """Delete every expired stored key, ciphertext included. True when changed.
+
+    Expiry has to remove the token, not merely refuse to read it: otherwise an
+    abandoned account keeps a decryptable provider key in prefs.json and in the
+    bucket forever. Mutates `prefs` in place — the caller saves.
+    """
+    changed = False
+    for enc_k in [k for k in list(prefs) if k.endswith("_key_enc")]:
+        pid = enc_k[: -len("_key_enc")]
+        if byok_alive(prefs, pid):
+            continue
+        for field in byok_fields(pid):
+            changed = prefs.pop(field, None) is not None or changed
+    return changed
+
+
+def maintain_byok(prefs: dict, pid: str | None = None) -> bool:
+    """Slide the key just used (if any) and drop the dead ones. True when
+    prefs changed and the caller should save."""
+    touched = touch_byok(prefs, pid) if pid else False
+    return prune_byok(prefs) or touched
 
 
 def attempts(prefs: dict) -> list[tuple[Provider, str, str]]:
@@ -300,9 +379,12 @@ def system_prompt(profile: dict, context: str,
         "current as of this message; treat the figures as the user's real "
         "position, and let the current view guide what they are most likely "
         f"asking about. Today is {date.today().isoformat()}. Some user "
-        "messages carry appended web search results fetched at send time; "
-        "when present, ground your answer in them and cite the source URLs "
-        "you use.\n\n"
+        "messages carry appended web page extracts and live market quotes "
+        "fetched at send time; when present, ground your answer in them, "
+        "prefer those figures over anything you remember, and cite the "
+        "source URLs you use. Never claim you cannot access the internet or "
+        "current prices — say what the fetched material does or does not "
+        "cover.\n\n"
         f"{context}"
         + chat_skills.skills_block(skill_ids or [])
     )
@@ -350,20 +432,133 @@ def resolve_skills(prefs: dict, provider: Provider, api_key: str,
 # -------------------------------------------------------------- web search
 
 
+def web_enabled(prefs: dict) -> bool:
+    """Whether this turn may touch the internet: the "chat_web" pref (default
+    on) and a working ddgs install."""
+    return chat_web.available() and bool(prefs.get("chat_web", True))
+
+
 def plan_web(prefs: dict, provider: Provider, api_key: str,
-             history: list[dict]) -> list[str]:
+             history: list[dict], context: str = "") -> list[str]:
     """Search queries for the pending answer ([] = none needed / web off).
 
     Same planner as the web panel (chat_web.plan on the provider's cheapest
-    model); the "chat_web" pref (default on) and a missing ddgs install both
-    disable it. Prior user turns ride along for topic continuity."""
-    if not (chat_web.available() and bool(prefs.get("chat_web", True))):
+    model), with the caller's context (the current view, for the panel) and
+    prior user turns riding along for topic continuity."""
+    if not web_enabled(prefs):
         return []
     prior = [m["content"][:200] for m in history[:-1] if m["role"] == "user"][-2:]
-    context = f"Today is {date.today().isoformat()}."
+    ctx = f"Today is {date.today().isoformat()}." + (
+        "\n" + context.strip() if context.strip() else "")
     if prior:
-        context += "\nEarlier user messages (topic continuity): " + " | ".join(prior)
-    return chat_web.plan(provider, api_key, history[-1]["content"], context)
+        ctx += "\nEarlier user messages (topic continuity): " + " | ".join(prior)
+    return chat_web.plan(provider, api_key, history[-1]["content"], ctx)
+
+
+def ground_web(prefs: dict, provider: Provider, api_key: str,
+               history: list[dict], context: str = "") -> list[chat_web.Result]:
+    """The pages this turn reads: planned searches plus any pasted links.
+
+    The "chat_web" pref gates the whole thing — off means no internet at all,
+    pasted links included."""
+    if not web_enabled(prefs):
+        return []
+    return chat_web.collect(plan_web(prefs, provider, api_key, history, context),
+                            history[-1]["content"])
+
+
+def in_parallel(*calls: Callable[[], object],
+                timeout: float | None = None) -> list:
+    """Run this turn's independent lookups at once, in order of the results.
+
+    Skill routing, search planning + page reading and quote fetching share no
+    inputs, and back to back they are the bulk of a turn's latency (two
+    classifier calls, three page fetches, a Yahoo round-trip). A call that
+    raises or overruns yields None: one dead lookup must not take the answer
+    with it. Callers on Streamlit must resolve session state *before* handing
+    a closure over — these run off the script thread.
+    """
+    pool = ThreadPoolExecutor(max_workers=max(1, len(calls)))
+    try:
+        futures = [pool.submit(c) for c in calls]
+        out: list = []
+        for f in futures:
+            try:
+                out.append(f.result(timeout=timeout))
+            except Exception:
+                out.append(None)
+        return out
+    finally:
+        # No wait: shutdown would block on whatever the timeout just escaped.
+        pool.shutdown(wait=False, cancel_futures=True)
+
+
+# ------------------------------------------------------------ thread titles
+
+
+TITLE_MAX_CHARS = 60
+
+_TITLE_SYSTEM = (
+    "You name chat conversations. Reply with ONLY a title for the "
+    "conversation that the message below opens: at most 6 words, no quotes, "
+    "no trailing period, written in the same language as the message. Name "
+    "the subject (ticker, company, topic), not the request."
+)
+
+
+def _trim(text: str) -> str:
+    """Cap a title at TITLE_MAX_CHARS on a word boundary, not mid-word."""
+    text = text.strip()
+    if len(text) <= TITLE_MAX_CHARS:
+        return text
+    cut = text[:TITLE_MAX_CHARS]
+    head, sep, _ = cut.rpartition(" ")
+    return ((head if sep and len(head) >= TITLE_MAX_CHARS // 2 else cut).rstrip(
+        " ,;:-") + "\u2026")
+
+
+def title_for(provider: Provider, api_key: str, message: str) -> str:
+    """A short conversation title for `message`.
+
+    One call on the provider's cheapest model — the same shape as the skill
+    router. Any failure (network, empty reply) degrades to a trimmed copy of
+    the message itself, so a thread is never left unnamed."""
+    fallback = _trim(" ".join(message.split()))
+    try:
+        raw = provider.complete(
+            api_key,
+            provider.classifier_model or provider.default_model,
+            _TITLE_SYSTEM,
+            [{"role": "user", "content": message[:500]}],
+        )
+    except Exception:
+        return fallback
+    title = " ".join((raw or "").split()).strip().strip("\"'\u201c\u201d").rstrip(".")
+    return _trim(title) or fallback
+
+
+def autotitle(chat_path: Path, provider: Provider, api_key: str,
+              history: list[dict]) -> None:
+    """Name the active thread from its opening question, once.
+
+    Only fires on the first completed pair of a still-unnamed, never-renamed
+    conversation, so the extra classifier call happens once per thread and
+    never for a title the user chose. Failures are swallowed: a nameless
+    thread must not cost the user an answer."""
+    if len(history) != 2 or history[0]["role"] != "user":
+        return
+    from stocks.web import auth
+
+    try:
+        conv = auth.active_conversation(chat_path)
+        if conv.get("title") or not conv.get("title_auto", True):
+            return
+        auth.autotitle_conversation(
+            conv["id"], title_for(provider, api_key, history[0]["content"]),
+            chat_path,
+        )
+    except Exception:
+        return
 
 
 # ----------------------------------------------------------------- actions
@@ -388,22 +583,14 @@ def action_context(watchlist: Path) -> str:
 
 
 def action_reply(act: Action, lang: str) -> str:
-    """Localized confirmation line for an executed action (explicit lang)."""
+    """Localized confirmation line for an executed action (explicit lang).
+
+    The per-tool wording lives with the tools (chat/tools.py); this only
+    binds the recipient's language to the translator they hand it."""
+    from stocks.chat import tools
     from stocks.web.i18n import translate
 
-    if act.kind == "favorite":
-        return translate("chat.action_favorited", lang, ticker=act.ticker)
-    if act.kind == "unfavorite":
-        return translate("chat.action_unfavorited", lang, ticker=act.ticker)
-    if act.kind == "set_alerts":
-        rules = ", ".join(
-            translate(f"chat.action_alert_{a['type']}", lang, price=f"{a['price']:g}")
-            for a in act.alerts
-        )
-        return translate("chat.action_alerts_set", lang, ticker=act.ticker,
-                         rules=rules)
-    return translate("chat.action_tagged", lang, ticker=act.ticker,
-                     groups=", ".join(act.tags))
+    return tools.reply(act, lambda key, **kw: translate(key, lang, **kw))
 
 
 # ------------------------------------------------------------------ answer
@@ -422,6 +609,18 @@ class Reply:
     error: str | None = None
 
 
+def _keep_byok(prefs: dict, prefs_path: Path, pid: str) -> None:
+    """After a served turn: slide the key that served it, drop expired ones.
+
+    The free chain is the operator's key, so a free turn slides nothing — it
+    only gets the prune.
+    """
+    from stocks.web import auth
+
+    if maintain_byok(prefs, None if pid == "free" else pid):
+        auth.save_prefs(prefs, prefs_path)
+
+
 def answer(*, prefs: dict, prefs_path: Path, chat_path: Path,
            watchlist: Path, db: Path, message: str, lang: str = "en",
            timeout_s: float = 90.0) -> Reply:
@@ -432,7 +631,8 @@ def answer(*, prefs: dict, prefs_path: Path, chat_path: Path,
     the Reply carries a locale key: chat.free_cap, chat.free_exhausted or
     chat.api_error.
     """
-    from stocks.web import auth, chat_actions
+    from stocks.chat import tools
+    from stocks.web import auth
 
     history = auth.load_chat(chat_path)
     history.append({"role": "user", "content": message})
@@ -444,12 +644,11 @@ def answer(*, prefs: dict, prefs_path: Path, chat_path: Path,
 
     # App actions first (favorite / alerts / groups): a deterministic
     # localized confirmation — no main-model call, no free-quota spend.
-    if chat_actions.maybe_action(message):
-        act = chat_actions.detect(provider, key, message,
-                                  action_context(watchlist))
+    if tools.maybe_action(message):
+        act = tools.detect(provider, key, message, action_context(watchlist))
         if act is not None:
             try:
-                chat_actions.execute(act, watchlist)
+                tools.execute(act, watchlist)
             except Exception:
                 act = None
         if act is not None:
@@ -457,22 +656,33 @@ def answer(*, prefs: dict, prefs_path: Path, chat_path: Path,
             history.append({"role": "assistant", "content": note,
                             "action": act.kind})
             auth.save_chat(history, chat_path)
+            autotitle(chat_path, provider, key, history)
+            _keep_byok(prefs, prefs_path, provider.id)
             return Reply(text=note, provider_id=provider.id)
 
-    skills = resolve_skills(prefs, provider, key, history,
-                            context=TELEGRAM_CONTEXT)
+    # Skill routing, the web lookup and the quotes are independent, so they
+    # run at the same time rather than stacking their latencies.
+    skills, hits, live = in_parallel(
+        lambda: resolve_skills(prefs, provider, key, history,
+                               context=TELEGRAM_CONTEXT),
+        lambda: ground_web(prefs, provider, key, history),
+        lambda: market.lookup_for(message, watchlist),
+        timeout=timeout_s,
+    )
+    skills, hits, live = skills or [], hits or [], live or []
     system = system_prompt(
         auth.load_profile(prefs),
         TELEGRAM_CONTEXT + portfolio_context(watchlist, db),
         skills,
     )
-    # Web hits ride on the outgoing copy of the user turn, not the system
-    # prompt — the stored history keeps the user's own text (same as the
-    # panel).
-    hits = chat_web.search(plan_web(prefs, provider, key, history))
+    # Web hits and live quotes ride on the outgoing copy of the user turn,
+    # not the system prompt — the stored history keeps the user's own text
+    # (same as the panel).
     msgs = recent(history)
     if hits:
         msgs[-1]["content"] = chat_web.augment(msgs[-1]["content"], hits)
+    if live:
+        msgs[-1]["content"] = market.augment(msgs[-1]["content"], live)
     web_sources = chat_web.sources(hits)
 
     capped = False
@@ -489,8 +699,13 @@ def answer(*, prefs: dict, prefs_path: Path, chat_path: Path,
             future = pool.submit(provider.complete, key,
                                  model or provider.default_model, system, msgs)
             text = (future.result(timeout=timeout_s) or "").strip()
-        except Exception:
-            continue  # timeout, bad key, rate limit — next candidate
+        except Exception as exc:
+            # timeout, bad key, rate limit — next candidate. Logged because the
+            # user only ever sees chat.api_error; without this the reason for a
+            # dead chain (retired model, free tier gone paid) is unrecoverable.
+            log.warning("provider %s (%s) failed: %s: %s", provider.id,
+                        model or provider.default_model, type(exc).__name__, exc)
+            continue
         finally:
             pool.shutdown(wait=False, cancel_futures=True)
         if text:
@@ -501,6 +716,8 @@ def answer(*, prefs: dict, prefs_path: Path, chat_path: Path,
                 turn["web"] = web_sources
             history.append(turn)
             auth.save_chat(history, chat_path)
+            autotitle(chat_path, provider, key, history)
+            _keep_byok(prefs, prefs_path, provider.id)
             return Reply(text=text, skills=tuple(skills),
                          sources=tuple(web_sources), provider_id=provider.id)
 

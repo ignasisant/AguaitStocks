@@ -1,4 +1,4 @@
-# Aguait Stocks — Oracle Cloud Always Free VM deploy (sslip.io + Caddy).
+# TopStocks — Oracle Cloud Always Free VM deploy (sslip.io + Caddy).
 #
 # Two containers on a private compose network:
 #   app   — the Streamlit dashboard (built from the repo-root Dockerfile),
@@ -23,7 +23,7 @@ services:
     build:
       context: ..
       dockerfile: Dockerfile
-    image: aguait-stocks:latest
+    image: topstocks:latest
     restart: unless-stopped
     expose:
       - "8501" # compose-network only; Caddy reaches it as app:8501

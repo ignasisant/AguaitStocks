@@ -1,8 +1,10 @@
 """Optional one-line LLM narrative for the daily digest.
 
 Provider resolution, first success wins:
-  1. The user's own BYOK key (Fernet-encrypted in prefs.json, same 15-day TTL
-     the chat honours) — their key, their billing, their provider choice.
+  1. The user's own BYOK key (Fernet-encrypted in prefs.json, same sliding
+     90-day TTL the chat honours) — their key, their billing, their provider
+     choice. The digest only *reads* the key: it never slides the window, so
+     an account that stopped chatting still goes cold on schedule.
   2. The operator's free chain ([free_llm] secrets / FREE_LLM_* env).
   3. None — the digest ships computed-only.
 
@@ -16,7 +18,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 from stocks.chat import engine
 
-_TTL = engine.BYOK_TTL  # the shared "remembered for 15 days" promise
+_TTL = engine.BYOK_TTL  # the shared "remembered for 90 days, sliding" promise
 _LANG_NAME = {"en": "English", "es": "Spanish"}
 MAX_CHARS = 300
 
@@ -27,7 +29,7 @@ _decrypt_byok = engine.decrypt_byok
 
 def _prompt(data, lang: str) -> tuple[str, list[dict]]:
     system = (
-        "You are the portfolio assistant for Aguait, a stock-tracking app. "
+        "You are the portfolio assistant for TopStocks, a stock-tracking app. "
         "Given today's portfolio numbers, write exactly 1-2 sentences of "
         f"insight in {_LANG_NAME.get(lang, 'English')}. Plain text only: no "
         "markdown, no emoji, no preamble. Mention what drove the day and "

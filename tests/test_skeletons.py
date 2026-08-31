@@ -26,6 +26,7 @@ SHAPES = [
     ("chart", {"shape": "heatmap", "cells": 6}),
     ("table", {"rows": 5, "cols": 4}),
     ("rows", {"rows": 8}),
+    ("cards", {"n": 3, "lines": 6}),
     ("calendar", {"weeks": 4, "cols": 5, "cell": 62}),
     ("pills", {"n": 5}),
 ]
@@ -36,7 +37,7 @@ def test_every_shape_is_a_tagged_shimmer(kind, kw):
     out = skeletons.html(kind, **kw)
     # The wrapper carries the palette and the animation; a block outside it
     # renders as an invisible transparent box.
-    assert out.startswith('<div class="aguait-sk')
+    assert out.startswith('<div class="topstocks-sk')
     assert 'class="skb' in out
     assert out.count("<div") == out.count("</div>")
 
@@ -150,7 +151,7 @@ def fake_st(monkeypatch):
 
 def test_reserve_draws_the_shimmer_and_leaves_the_slot_open(fake_st):
     box = skeletons.reserve("metrics", n=3)
-    assert "aguait-sk" in fake_st.content
+    assert "topstocks-sk" in fake_st.content
     assert not box.resolved
 
 

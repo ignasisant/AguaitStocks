@@ -1,8 +1,8 @@
-"""LLM provider registry for the chat page — Aguait AI (free), Claude, ChatGPT,
+"""LLM provider registry for the chat page — TopStocks AI (free), Claude, ChatGPT,
 Gemini.
 
 The named providers are bring-your-own-key: the user supplies their own API key
-(own billing). "Aguait AI" is keyless for the user — it chains through
+(own billing). "TopStocks AI" is keyless for the user — it chains through
 operator-funded free-tier backends configured in the ``[free_llm]`` secrets
 section, hopping to the next backend when one is rate-limited, until all are
 exhausted. A provider exposes a streaming generator plus an error classifier
@@ -18,8 +18,11 @@ the whole page.
 from __future__ import annotations
 
 import importlib.util
+import logging
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
+
+log = logging.getLogger(__name__)
 
 MAX_TOKENS = 4096
 
@@ -41,7 +44,7 @@ class Provider:
     # model argument and picks per backend.
     classifier_model: str = ""
     # Brand website, for the selector logo (mirrored same-origin like broker
-    # logos). None = no external brand; the keyless Aguait provider ships its
+    # logos). None = no external brand; the keyless TopStocks provider ships its
     # own bundled icon instead.
     domain: str | None = None
 
@@ -297,10 +300,15 @@ def _free_stream(api_key, model, system, messages):
                 started = True
                 yield chunk
             return
-        except Exception:
+        except Exception as exc:
             if started:
                 raise  # mid-answer failure: text already on screen, can't switch
-            continue  # rate limit / bad key / retired model — try the next one
+            # rate limit / bad key / retired model — try the next one, but say
+            # which one died and why: this is the operator's only signal that a
+            # free tier went paid or a model was retired.
+            log.warning("free backend %s (%s) failed: %s: %s",
+                        b.id, b.model, type(exc).__name__, exc)
+            continue
     raise FreeTierExhausted("all free backends failed")
 
 
@@ -317,7 +325,7 @@ PROVIDERS: dict[str, Provider] = {
     p.id: p
     for p in (
         Provider(
-            "free", "Aguait AI",
+            "free", "TopStocks AI",
             ("auto",),  # the chain picks the backend; no user-facing model list
             "", "",  # keyless: no placeholder, no console link
             "openai", _free_stream, _free_error,
@@ -362,5 +370,5 @@ def default_provider_id() -> str:
 
 
 def available_providers() -> list[Provider]:
-    """Usable providers, registry order (Aguait AI, Claude, ChatGPT, Gemini)."""
+    """Usable providers, registry order (TopStocks AI, Claude, ChatGPT, Gemini)."""
     return [p for p in PROVIDERS.values() if p.available()]

@@ -25,7 +25,9 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import uuid
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 
 import streamlit as st
@@ -339,7 +341,7 @@ def _login_screen() -> None:
         with st.container(border=True, width=420, horizontal_alignment="center"):
             st.space("xsmall")
             st.image(
-                str(Path(__file__).parent / "assets" / "aguait-logo.svg"),
+                str(Path(__file__).parent / "assets" / "topstocks-logo.svg"),
                 width=200,
             )
             st.caption(
@@ -363,47 +365,6 @@ def _login_screen() -> None:
                 text_alignment="center",
             )
             st.space("xsmall")
-
-
-def maybe_prompt_login() -> None:
-    """First load only: pop a dismissible modal inviting Google sign-in.
-
-    Fires once per session and only for anonymous visitors while [auth] is
-    configured. Any exit — the skip button, the X, ESC or a click outside —
-    leaves them on the public guest view; the sidebar sign-in entry stays for
-    later. The seen-flag is set before the dialog opens so it never re-pops on
-    the fragment reruns the modal itself triggers.
-    """
-    if "auth" not in st.secrets or is_logged_in():
-        return
-    if st.session_state.get("_login_prompt_seen"):
-        return
-    st.session_state["_login_prompt_seen"] = True
-    # Build the dialog at call time (not via @st.dialog) so the title resolves
-    # in the run's active language rather than freezing at import.
-    st.dialog(tr("auth.welcome_title"))(_login_dialog_body)()
-
-
-def _login_dialog_body() -> None:
-    st.html(_LOGIN_CSS)
-    st.image(
-        str(Path(__file__).parent / "assets" / "aguait-logo.svg"),
-        width=180,
-    )
-    st.markdown(tr("auth.signin_prompt"))
-    # Distinct key: on a first anonymous visit to a require_login page, this
-    # modal and _login_screen render in the same run — a shared key crashes
-    # with StreamlitDuplicateElementKey. The Google-G CSS matches both keys.
-    st.button(
-        tr("common.sign_in_google"),
-        type="primary",
-        key="google_signin_modal",
-        on_click=st.login,
-        width="stretch",
-    )
-    if st.button(tr("auth.continue_guest"), key="login_skip", width="stretch"):
-        st.rerun()  # close the modal; the seen-flag keeps it from re-opening
-    st.caption(tr("auth.browsing_public"))
 
 
 # ---------------------------------------------------------------- accessors
@@ -601,25 +562,211 @@ def _profile_dialog_body() -> None:
         st.rerun()  # close; the seen-flag keeps it shut for the rest of the session
 
 
-# ---------------------------------------------------------------- chat thread
-# The assistant conversation is persisted per account (like prefs) so it
-# survives a reload, a new session, or an ephemeral redeploy — and is mirrored
-# to the bucket. One thread per account, stored as a list of {role, content}.
+# ------------------------------------------------------------- chat threads
+# The assistant keeps several conversations per account — each with an id, a
+# title and timestamps, one of them active — persisted like prefs so they
+# survive a reload, a new session or an ephemeral redeploy, and mirrored to
+# the bucket.
+#
+# All of them live in a single chat.json ({"version", "active",
+# "conversations"}) rather than one file per thread: the whole per-account
+# sync path (_USER_FILES, storage.restore_once, _persist) is built on a fixed
+# tuple of paths, so a directory of threads would need its own bucket keying
+# and orphan cleanup for nothing the user can see.
+#
+# load_chat/save_chat keep their original list-of-turns signature and act on
+# the active conversation, so the Telegram bot and the headless engine never
+# had to learn about threads.
+
+CHAT_VERSION = 2
+MAX_CONVERSATIONS = 50  # oldest by last use pruned first; never the active one
+_TITLE_MAX = 80
 
 
-def load_chat(path: Path | None = None) -> list[dict]:
+def _now() -> str:
+    return datetime.now(UTC).isoformat(timespec="seconds")
+
+
+def _blank_conversation(title: str = "") -> dict:
+    now = _now()
+    return {
+        "id": f"c_{uuid.uuid4().hex[:8]}",
+        "title": title,
+        # False once the user renames it, so auto-titling stops overwriting.
+        "title_auto": True,
+        "created": now,
+        "updated": now,
+        "messages": [],
+    }
+
+
+def _empty_book() -> dict:
+    conv = _blank_conversation()
+    return {"version": CHAT_VERSION, "active": conv["id"], "conversations": [conv]}
+
+
+def load_book(path: Path | None = None) -> dict:
+    """Every conversation for the account, in the current shape.
+
+    Never writes — a turn that fails must leave chat.json untouched (and
+    absent when it never existed). A v1 file (the bare list of turns the
+    single-thread assistant wrote) migrates to one conversation; anything
+    missing or corrupt yields a fresh empty book.
+    """
     p = path or user_paths().chat
     try:
         data = json.loads(p.read_text())
-        return data if isinstance(data, list) else []
     except (OSError, ValueError, TypeError):
-        return []
+        data = None
+
+    if isinstance(data, list):  # v1: one unnamed thread
+        conv = _blank_conversation()
+        conv["messages"] = [m for m in data if isinstance(m, dict)]
+        return {"version": CHAT_VERSION, "active": conv["id"],
+                "conversations": [conv]}
+    if not isinstance(data, dict):
+        return _empty_book()
+
+    convs = [
+        c for c in (data.get("conversations") or [])
+        if isinstance(c, dict) and c.get("id")
+    ]
+    for c in convs:  # tolerate records written by an older/partial writer
+        c.setdefault("title", "")
+        c.setdefault("title_auto", True)
+        c.setdefault("created", _now())
+        c.setdefault("updated", c["created"])
+        c["messages"] = [m for m in (c.get("messages") or []) if isinstance(m, dict)]
+    if not convs:
+        return _empty_book()
+
+    active = data.get("active")
+    if active not in {c["id"] for c in convs}:
+        active = convs[0]["id"]
+    return {"version": CHAT_VERSION, "active": active, "conversations": convs}
+
+
+def _pruned(book: dict) -> dict:
+    """The book capped at MAX_CONVERSATIONS, dropping least-recently-used
+    threads first and never the active one."""
+    convs = book["conversations"]
+    if len(convs) <= MAX_CONVERSATIONS:
+        return book
+    ranked = sorted(convs, key=lambda c: c.get("updated") or "", reverse=True)
+    keep = [c for c in ranked if c["id"] == book["active"]][:1]
+    keep += [c for c in ranked if c["id"] != book["active"]][
+        : MAX_CONVERSATIONS - len(keep)
+    ]
+    order = {c["id"]: i for i, c in enumerate(convs)}
+    return {**book, "conversations": sorted(keep, key=lambda c: order[c["id"]])}
+
+
+def save_book(book: dict, path: Path | None = None) -> None:
+    p = path or user_paths().chat
+    p.write_text(json.dumps(_pruned(book), indent=2))
+    _persist(p)
+
+
+def _active(book: dict) -> dict:
+    """The active conversation — load_book guarantees one exists."""
+    for c in book["conversations"]:
+        if c["id"] == book["active"]:
+            return c
+    return book["conversations"][0]
+
+
+def load_chat(path: Path | None = None) -> list[dict]:
+    """The active conversation's turns (the historical single-thread API)."""
+    return _active(load_book(path))["messages"]
 
 
 def save_chat(history: list[dict], path: Path | None = None) -> None:
-    p = path or user_paths().chat
-    p.write_text(json.dumps(history, indent=2))
-    _persist(p)
+    """Replace the active conversation's turns and stamp it as just used."""
+    book = load_book(path)
+    conv = _active(book)
+    conv["messages"] = list(history)
+    conv["updated"] = _now()
+    save_book(book, path)
+
+
+def list_conversations(path: Path | None = None) -> list[dict]:
+    """Conversation metadata (no message bodies), most recently used first."""
+    book = load_book(path)
+    metas = [
+        {
+            "id": c["id"], "title": c["title"], "title_auto": c["title_auto"],
+            "created": c["created"], "updated": c["updated"],
+            "messages": len(c["messages"]), "active": c["id"] == book["active"],
+        }
+        for c in book["conversations"]
+    ]
+    return sorted(metas, key=lambda m: m["updated"], reverse=True)
+
+
+def active_conversation(path: Path | None = None) -> dict:
+    """Metadata of the conversation the next turn will land in."""
+    c = _active(load_book(path))
+    return {k: v for k, v in c.items() if k != "messages"}
+
+
+def new_conversation(path: Path | None = None, title: str = "") -> str:
+    """Start (and activate) an empty conversation; returns its id.
+
+    An active conversation that is still empty is reused, so pressing New
+    repeatedly can't stack blank threads."""
+    book = load_book(path)
+    conv = _active(book)
+    if conv["messages"]:
+        conv = _blank_conversation(title)
+        book["conversations"].append(conv)
+    elif title:
+        conv["title"] = title[:_TITLE_MAX]
+    book["active"] = conv["id"]
+    save_book(book, path)
+    return conv["id"]
+
+
+def set_active_conversation(cid: str, path: Path | None = None) -> None:
+    book = load_book(path)
+    if any(c["id"] == cid for c in book["conversations"]):
+        book["active"] = cid
+        save_book(book, path)
+
+
+def rename_conversation(cid: str, title: str, path: Path | None = None) -> None:
+    """User-set title — pins it, so auto-titling never overwrites it again."""
+    book = load_book(path)
+    for c in book["conversations"]:
+        if c["id"] == cid:
+            c["title"] = title.strip()[:_TITLE_MAX]
+            c["title_auto"] = False
+            save_book(book, path)
+            return
+
+
+def autotitle_conversation(cid: str, title: str, path: Path | None = None) -> None:
+    """Title derived from the opening exchange; a no-op on a renamed thread."""
+    book = load_book(path)
+    for c in book["conversations"]:
+        if c["id"] == cid and c.get("title_auto", True):
+            c["title"] = title.strip()[:_TITLE_MAX]
+            save_book(book, path)
+            return
+
+
+def delete_conversation(cid: str, path: Path | None = None) -> None:
+    """Drop a conversation. Deleting the active one falls back to the most
+    recently used survivor — or a fresh empty thread when it was the last."""
+    book = load_book(path)
+    kept = [c for c in book["conversations"] if c["id"] != cid]
+    if len(kept) == len(book["conversations"]):
+        return
+    if not kept:
+        kept = [_blank_conversation()]
+    if book["active"] == cid:
+        book["active"] = max(kept, key=lambda c: c["updated"])["id"]
+    book["conversations"] = kept
+    save_book(book, path)
 
 
 def display_currency() -> str:
@@ -782,6 +929,59 @@ def set_alerts(ticker: str, alerts: list[dict], path: Path | None = None) -> Non
             entry["alerts"] = clean
         else:
             entry.pop("alerts", None)
+
+    _update_entry(ticker, _set, path)
+
+
+def add_entry(ticker: str, name: str = "", path: Path | None = None) -> None:
+    """Put a ticker on the watchlist (a no-op when it's already there).
+
+    `name` only fills a blank one — a symbol the user already labelled keeps
+    its label when the assistant re-adds it."""
+
+    def _set(entry: dict) -> None:
+        if name.strip() and not entry.get("name"):
+            entry["name"] = name.strip()
+
+    _update_entry(ticker, _set, path)
+
+
+def remove_entry(ticker: str, path: Path | None = None) -> None:
+    """Drop a ticker from the watchlist, alerts and tags with it.
+
+    Unlike the other mutators this never creates the entry: removing a symbol
+    that isn't listed is a no-op, not an add-then-delete."""
+    p = path or watchlist_path()
+    if not p.exists():
+        return
+    raw = yaml.safe_load(p.read_text()) or {}
+    items = raw.get("watchlist") or []
+    t = ticker.strip().upper()
+    kept = [i for i in items if str(i.get("ticker", "")).upper() != t]
+    if len(kept) == len(items):
+        return
+    raw["watchlist"] = kept
+    p.write_text(yaml.safe_dump(raw, sort_keys=False, allow_unicode=True))
+    _persist(p)
+
+
+def set_position(ticker: str, shares: float | None = None,
+                 cost: float | None = None, path: Path | None = None) -> None:
+    """Set a ticker's held quantity and/or average cost.
+
+    None leaves that field alone, 0 clears it — so "I hold 12 shares" can be
+    recorded without inventing a cost basis. This is the watchlist fallback
+    the app values when no ledger exists; an imported ledger still wins.
+    """
+
+    def _set(entry: dict) -> None:
+        for field, value in (("shares", shares), ("cost", cost)):
+            if value is None:
+                continue
+            if value:
+                entry[field] = float(value)
+            else:
+                entry.pop(field, None)
 
     _update_entry(ticker, _set, path)
 

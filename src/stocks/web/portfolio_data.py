@@ -62,12 +62,13 @@ def basket_history(db: str, mtime: float) -> pd.DataFrame:
 
 @st.cache_data(ttl=300, show_spinner=False)
 def last_session_moves(tickers: tuple[str, ...]) -> dict[str, float]:
-    """Cached last regular-session % move per ticker (fast_info burst).
+    """Cached day % move per ticker (quote burst), extended hours included.
 
-    Only fetched for off-session names — when the market's closed the daily
-    close-to-close basket can collapse to ~0% (a stale/flat premarket bar), so
-    the day-change cells read from this instead. Keyed by the ticker tuple; ttl
-    refreshes it around the next open."""
+    Only fetched for names outside their regular session — the daily close-to-
+    close basket can collapse to ~0% there (a stale/flat premarket bar), so the
+    day-change cells read from this instead: the live pre/after-hours move while
+    Yahoo quotes one, the last completed session once those windows shut. Keyed
+    by the ticker tuple; ttl refreshes it around the next open."""
     return session_moves(list(tickers))
 
 
@@ -90,9 +91,9 @@ def enriched_positions(db: str, mtime: float) -> pd.DataFrame:
         tbl["day_pct"] = (last / prev - 1).reindex(tbl.index)
     else:
         tbl["day_eur"] = tbl["day_pct"] = float("nan")
-    # Market closed → the close-to-close basket can be a flat premarket 0%.
-    # Override those rows with fast_info's last regular-session move (native)
-    # so the (dimmed) day cell shows the real last close; day_eur re-derives
+    # Outside the regular session the close-to-close basket can be a flat
+    # premarket 0%. Override those rows with the quote move (native): the live
+    # pre/after-hours move, else the last completed session; day_eur re-derives
     # from the EUR value. Crypto is 24/7 so it never overrides.
     off = tuple(t for t in tbl.index if not market_live(t))
     if off:

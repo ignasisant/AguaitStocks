@@ -74,8 +74,48 @@ def test_plan_passes_context_and_parses():
     assert "User message: any news on nvidia?" in messages[0]["content"]
 
 
-def test_plan_swallows_provider_errors():
-    assert plan(_StubProvider(boom=True), "key", "news?") == []
+def test_plan_falls_back_to_heuristics_when_the_planner_dies():
+    # A dead classifier model must cost relevance, not internet access.
+    assert plan(_StubProvider(boom=True), "key", "any NVDA news?") == [
+        "any NVDA news"
+    ]
+
+
+def test_plan_falls_back_when_the_planner_answers_off_contract():
+    assert plan(_StubProvider("I cannot help with that"), "k", "NVDA news?") == [
+        "NVDA news"
+    ]
+
+
+def test_plan_respects_an_explicit_empty_plan():
+    # A well-formed "no search needed" is obeyed — no heuristic second-guess.
+    assert plan(_StubProvider('{"queries": []}'), "k", "any news today?") == []
+
+
+# ------------------------------------------------------------- heuristics
+
+
+def test_heuristics_fire_on_time_sensitive_wording():
+    assert chat_web.heuristic_queries("¿alguna noticia de Telefónica?") == [
+        "alguna noticia de Telefónica"
+    ]
+
+
+def test_heuristics_add_focus_ticker_and_year():
+    ctx = "Today is 2026-08-28.\nCurrent view: The ticker in focus is NVDA."
+    assert chat_web.heuristic_queries("any news?", ctx) == [
+        "NVDA any news 2026"
+    ]
+
+
+def test_heuristics_stay_quiet_on_timeless_questions():
+    # "PER" is caps but not a ticker — the shared stop-list screens it.
+    assert chat_web.heuristic_queries("¿qué es un PER?") == []
+    assert chat_web.heuristic_queries("hola") == []
+
+
+def test_heuristics_fire_on_a_bare_ticker():
+    assert chat_web.heuristic_queries("ASML?") == ["ASML"]
 
 
 # ------------------------------------------------------------------ search
@@ -113,3 +153,78 @@ def test_sources_compact_dicts():
         {"title": "Nvidia Q2 results", "url": "https://example.com/nvda"},
         {"title": "Fed holds rates", "url": "https://news.example.org/fed"},
     ]
+
+
+# ----------------------------------------------------------- page reading
+
+_PAGE = b"""<html><head><title>t</title><style>x{}</style></head><body>
+<nav>Home About Subscribe</nav>
+<article><p>Nvidia guided to 54 billion dollars in revenue for the quarter,
+above the 52 billion consensus, and said data-centre demand stays ahead of
+supply.</p><p>Shares rose 4% in after-hours trading on the print.</p></article>
+<footer>Cookies</footer></body></html>"""
+
+
+def test_extract_keeps_paragraphs_and_drops_chrome():
+    text = chat_web._extract(_PAGE)
+    assert "54 billion dollars" in text
+    assert "after-hours" in text
+    assert "Subscribe" not in text and "Cookies" not in text
+
+
+def test_extract_falls_back_to_whole_document_without_paragraphs():
+    text = chat_web._extract(b"<html><body><div>" + b"bare text " * 30 +
+                             b"</div></body></html>")
+    assert "bare text" in text
+
+
+def test_extract_truncates_to_the_prompt_budget():
+    long = b"<html><body><p>" + b"word " * 5000 + b"</p></body></html>"
+    assert len(chat_web._extract(long)) <= chat_web._PAGE_CHARS
+
+
+def test_read_pages_fills_text_and_leaves_failures_alone(monkeypatch):
+    monkeypatch.setattr(chat_web, "read_page",
+                        lambda url, timeout=0: "article body" if "ok" in url else "")
+    got = chat_web.read_pages([Result("A", "https://ok.example/a", "snip"),
+                               Result("B", "https://paywall.example/b", "snip")])
+    assert got[0].text == "article body"
+    assert got[0].body == "article body"
+    assert got[1].text == ""
+    assert got[1].body == "snip"  # the DDG snippet still carries the hit
+
+
+def test_read_pages_only_opens_the_budget(monkeypatch):
+    opened = []
+    monkeypatch.setattr(chat_web, "read_page",
+                        lambda url, timeout=0: opened.append(url) or "text")
+    hits = [Result(f"h{i}", f"https://e.example/{i}", "") for i in range(6)]
+    chat_web.read_pages(hits, limit=2)
+    assert len(opened) == 2
+
+
+# ---------------------------------------------------------- pasted links
+
+
+def test_urls_in_finds_dedupes_and_trims_punctuation():
+    msg = ("mira https://example.com/a, y también https://example.com/a "
+           "(https://ex.org/b).")
+    assert chat_web.urls_in(msg) == ["https://example.com/a", "https://ex.org/b"]
+
+
+def test_urls_in_ignores_plain_text():
+    assert chat_web.urls_in("qué opinas de NVDA?") == []
+
+
+def test_collect_reads_pasted_links_first_and_shares_the_budget(monkeypatch):
+    monkeypatch.setattr(chat_web, "read_page", lambda url, timeout=0: "body")
+    monkeypatch.setattr(
+        chat_web, "search",
+        lambda queries, read_limit=chat_web.READ_PAGES: [
+            Result("hit", "https://found.example/1", "snip", "read"
+                   if read_limit else "")
+        ])
+    got = chat_web.collect(["nvda news"], "read https://pasted.example/x please")
+    assert got[0].url == "https://pasted.example/x"
+    assert got[0].text == "body"
+    assert got[1].url == "https://found.example/1"

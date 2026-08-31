@@ -87,11 +87,13 @@ from stocks.web.widgets import (
     WARN_COLOR,
     chart_layout,
     company_name,
+    data_table,
     hover_wrap,
     is_mobile,
     kpi_grid_html,
     metric_cells,
     show_chart,
+    stacked_table_html,
     ticker_actions,
     ticker_cell,
     ticker_pill_md,
@@ -1509,8 +1511,19 @@ with _ins_card.container(border=True):
             )
             show_chart(bar)
 
-        st.dataframe(
+        # Seven columns pan off a phone: there each trade becomes a card
+        # headed by the insider's name, one line per field.
+        data_table(
             transactions_frame(txs).head(30),
+            title="Insider",
+            fmt={"Shares": "{:+,.0f}", "Price": "${:,.2f}", "Value": "${:+,.0f}"},
+            signed=("Shares", "Value"),
+            labels={
+                "Date": tr("ticker.col_date"),
+                "Shares": tr("ticker.col_shares"),
+                "Price": tr("ticker.col_price"),
+                "Value": tr("ticker.col_value"),
+            },
             hide_index=True,
             height=280,
             column_config={
@@ -1572,7 +1585,14 @@ with st.container(border=True):
     if peers:
         # One metrics pull per peer, serial — the table shimmers with a column
         # per picked name so adding a peer doesn't blank the comparison.
-        _comp_slot = skeletons.reserve("table", rows=8, cols=len(peers) + 1)
+        # The placeholder takes the shape the comps will land in — a wide
+        # grid on desktop, one card per peer on a phone — so the swap is a
+        # fill, not a relayout.
+        _comp_slot = (
+            skeletons.reserve("cards", n=len(peers) + 1, lines=8)
+            if _MOBILE
+            else skeletons.reserve("table", rows=8, cols=len(peers) + 1)
+        )
         rows = [mets] + [_metrics(p) for p in peers]
         # Tickers run across the columns here, so the logo+symbol cell goes in
         # the header (no company name — comps stay compact); KPI labels keep the
@@ -1583,8 +1603,13 @@ with st.container(border=True):
             (f"{medals[t]}&nbsp;" if t in medals else "") + ticker_cell(t, name=False)
             for t in comp.columns
         ]
+        # Peers run across the columns, which pans off a phone — there the
+        # grid transposes into one card per peer, one KPI per line (the
+        # medal + logo header cell becomes the card's title).
         _comp_slot.container().html(
-            ticker_table_html(comp, ticker_col=None, show_index=True)
+            stacked_table_html(comp.T, index_title=True, title_html=True)
+            if _MOBILE
+            else ticker_table_html(comp, ticker_col=None, show_index=True)
         )
         if medals:
             st.caption(tr("ticker.medals_caption"))
@@ -1592,5 +1617,6 @@ with st.container(border=True):
         st.caption(tr("ticker.pick_peers"))
 
 with st.expander(tr("ticker.kpi_sources_title")):
-    st.dataframe(sources_table(), hide_index=True)
+    _sources = sources_table()
+    data_table(_sources, title=_sources.columns[0], hide_index=True)
     st.caption(tr("ticker.kpi_sources_caption", n=len(KPI_SOURCES)))

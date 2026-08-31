@@ -29,10 +29,11 @@ from stocks.analysis.portfolio import (
     cumulative_returns,
     effective_positions,
     holdings_from_positions,
-    market_live,
+    market_active,
     market_value_weights_eur,
     portfolio_returns,
     top_n_weight,
+    us_extended_session,
     us_market_open,
 )
 from stocks.portfolio import dividends
@@ -55,6 +56,7 @@ from stocks.web.widgets import (
     PROFIT_COLOR,
     TEXT_MUTED,
     chart_layout,
+    data_table,
     db_mtime,
     is_mobile,
     metric_cells,
@@ -153,11 +155,13 @@ def _positions_section() -> None:
                 # Degrade: 1w/1m read n/a; the positions table below still renders.
                 st.warning(tr("portfolio.data_unavailable"))
                 vals = pd.DataFrame()
-            # Market closed → "Today" is the last completed session's move. Sum the
-            # per-row day_eur (already overridden to the last-session move) instead
-            # of the basket's close-to-close, which can be a flat premarket 0%; grey
-            # its delta ("off") to flag it isn't live.
+            # Regular session closed → sum the per-row day_eur (already overridden
+            # to the live pre/after-hours quote, or the last completed session once
+            # those windows shut) instead of the basket's close-to-close, which can
+            # be a flat premarket 0%. Grey its delta ("off") only when nothing is
+            # trading — an extended-hours quote is live.
             mkt_open = us_market_open()
+            extended = None if mkt_open else us_extended_session()
             today_closed = None
             if not mkt_open:
                 d_eur = tbl["day_eur"].dropna().sum()
@@ -178,10 +182,20 @@ def _positions_section() -> None:
                         label,
                         f"{sym}{chg[0] * fx:+,.0f}",
                         f"{chg[1]:+.2%}",
-                        delta_color="off" if days == 1 and not mkt_open else "normal",
+                        delta_color=(
+                            "off"
+                            if days == 1 and not mkt_open and not extended
+                            else "normal"
+                        ),
                     )
             if not mkt_open:
-                st.caption(tr("portfolio.market_closed_note"))
+                st.caption(
+                    tr(
+                        f"portfolio.{extended}market_note"
+                        if extended
+                        else "portfolio.market_closed_note"
+                    )
+                )
 
             # Shared Positions-style HTML table (logo+name cells, semantic P/L
             # colors — see widgets.ticker_table_html). Rows come pre-sorted by
@@ -203,9 +217,10 @@ def _positions_section() -> None:
                 "pnl_pct": "{:+.1%}",
             }
             pnl_cols = ("day_eur", "day_pct", "pnl_eur", "pnl_pct")
-            # Off-session rows: dim only the day columns (last-close move, not live);
-            # total P/L stays full color. Crypto is 24/7 so it never dims.
-            muted = {t for t in tbl["ticker"] if not market_live(t)}
+            # Rows with no live quote: dim only the day columns (a last-close move,
+            # not live); total P/L stays full color. Crypto is 24/7, and a US name
+            # in pre/after-hours is live, so neither dims.
+            muted = {t for t in tbl["ticker"] if not market_active(t)}
             day_cols = ("day_eur", "day_pct")
             # € and % of the same move belong in one cell: "€-97  (-1.1%)",
             # the percentage as a tinted pill. Halves the desktop column count.
@@ -631,33 +646,64 @@ if tab_tax.open:
                         "ticker": s.ticker, "buy": s.buy_date, "sell": s.sell_date,
                         "qty": s.quantity, "cost_eur": s.cost_eur,
                         "proceeds_eur": s.proceeds_eur, "gain_eur": s.gain_eur,
+                        # Return on the cost of the shares this sale consumed —
+                        # the pill beside the symbol on phones, merged into the
+                        # gain cell on desktop.
+                        "gain_pct": (s.gain_eur / s.cost_eur) if s.cost_eur else None,
                     }
                     for s in ty.sales
                 ]
                 if rows:
-                    st.html(
-                        ticker_table_html(
-                            pd.DataFrame(rows),
-                            fmt={
-                                "qty": "{:,.4f}",
-                                "cost_eur": "€{:,.2f}",
-                                "proceeds_eur": "€{:,.2f}",
-                                "gain_eur": "€{:+,.2f}",
-                            },
-                            signed=("gain_eur",),
-                            left_cols=("buy", "sell"),
-                            sortable="realized",
-                            labels={
-                                "ticker": tr("portfolio.col_position"),
-                                "buy": tr("portfolio.col_bought"),
-                                "sell": tr("portfolio.col_sold"),
-                                "qty": tr("portfolio.col_shares"),
-                                "cost_eur": tr("portfolio.cost_basis"),
-                                "proceeds_eur": tr("portfolio.col_proceeds"),
-                                "gain_eur": tr("portfolio.col_gain"),
-                            },
-                        )
-                    )
+                    sales_df = pd.DataFrame(rows)
+                    sales_fmt = {
+                        "qty": "{:,.4f}",
+                        "cost_eur": "€{:,.2f}",
+                        "proceeds_eur": "€{:,.2f}",
+                        "gain_eur": "€{:+,.2f}",
+                        "gain_pct": "{:+.1%}",
+                    }
+                    sales_signed = ("gain_eur", "gain_pct")
+                    sales_labels = {
+                        "ticker": tr("portfolio.col_position"),
+                        "buy": tr("portfolio.col_bought"),
+                        "sell": tr("portfolio.col_sold"),
+                        "qty": tr("portfolio.col_shares"),
+                        "cost_eur": tr("portfolio.cost_basis"),
+                        "proceeds_eur": tr("portfolio.col_proceeds"),
+                        "gain_eur": tr("portfolio.col_gain"),
+                    }
+                    # Seven columns pan off a 390px screen, so phones get the
+                    # same dense rows as the Positions tab: proceeds and the
+                    # signed gain on the right, the return as a pill beside the
+                    # symbol, dates + shares on the wrapping dim line (company
+                    # names dropped — that line is already three items long).
+                    # Full sortable table one expander below.
+                    if _MOBILE:
+                        st.html(ticker_table_html(
+                            sales_df, fmt=sales_fmt, signed=sales_signed,
+                            labels=sales_labels, names=False,
+                            mobile={
+                                "value": "proceeds_eur", "delta": "gain_eur",
+                                "badge": "gain_pct", "wrap": True,
+                                "sub": ("buy", "sell", "qty"),
+                                "sub_labels": {
+                                    "buy": tr("portfolio.col_bought"),
+                                    "sell": tr("portfolio.col_sold"),
+                                    "qty": tr("portfolio.col_shares"),
+                                },
+                            }))
+                        with st.expander(tr("portfolio.all_columns_realized")):
+                            st.html(ticker_table_html(
+                                sales_df, fmt=sales_fmt, signed=sales_signed,
+                                left_cols=("buy", "sell"), sortable="realized",
+                                pairs=(("gain_eur", "gain_pct"),),
+                                labels=sales_labels))
+                    else:
+                        st.html(ticker_table_html(
+                            sales_df, fmt=sales_fmt, signed=sales_signed,
+                            left_cols=("buy", "sell"), sortable="realized",
+                            pairs=(("gain_eur", "gain_pct"),),
+                            labels=sales_labels))
 
                 # Mark to market from the cached positions table — shares the
                 # Positions tab's price burst; unpriced names fall back to cost.
@@ -702,7 +748,7 @@ if tab_div.open:
                     }
                     for yr, d in sorted(years.items())
                 ]
-                st.dataframe(
+                div_frame = (
                     pd.DataFrame(rows)
                     .set_index("year")
                     .rename_axis(tr("portfolio.col_year"))
@@ -713,6 +759,12 @@ if tab_div.open:
                         "creditable_eur": tr("portfolio.col_creditable"),
                         "reclaimable_eur": tr("portfolio.col_reclaimable"),
                     })
-                    .style.format("€{:,.0f}"),
+                )
+                # Five money columns pan off a phone: there each year becomes a
+                # card with one "label — €amount" line per column.
+                data_table(
+                    div_frame,
+                    index_title=True,
+                    fmt=dict.fromkeys(div_frame.columns, "€{:,.0f}"),
                 )
                 st.caption(tr("portfolio.dividends_caption"))

@@ -190,3 +190,72 @@ def test_mirror_brand_downloads_once_under_brand_stem(tmp_path, monkeypatch):
 def test_mirror_brand_unresolved(tmp_path, monkeypatch):
     monkeypatch.setattr(logo_mod, "brand_logo_url", lambda d: None)
     assert logo_mod.mirror_brand("generic", "example.com", tmp_path) is None
+
+
+def test_no_web_module_feeds_a_logo_url_to_st_image():
+    """`logo()`/`brand_logo()`/`asset_logo()` return BROWSER URLs, not paths.
+
+    A mirrored logo comes back as the relative "app/static/logos/<file>",
+    which st.image reads as a filesystem path — it fails to open and raises
+    MediaFileStorageError at render time (this bit the earnings dialog). Logo
+    URLs belong in an <img> tag, so guard every web module against the
+    st.image form instead of waiting for the next page to trip on it.
+
+    Bundled assets handed over as a real path (`str(Path(...) / "x.svg")`,
+    the login screen) are fine and stay allowed.
+    """
+    import ast
+    from pathlib import Path
+
+    HELPERS = {"logo", "brand_logo", "asset_logo"}
+
+    def helper_call(node) -> bool:
+        """A call to one of the URL-returning logo helpers, however qualified."""
+        if not isinstance(node, ast.Call):
+            return False
+        fn = node.func
+        name = fn.attr if isinstance(fn, ast.Attribute) else getattr(fn, "id", "")
+        return name.lstrip("_") in HELPERS
+
+    def logo_mapping_read(node) -> bool:
+        """A read out of a ticker->URL mapping: `logos[t]` / `logos.get(t)`."""
+        if isinstance(node, ast.Subscript):
+            base = node.value
+        elif (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "get"
+        ):
+            base = node.func.value
+        else:
+            return False
+        return isinstance(base, ast.Name) and "logo" in base.id.lower()
+
+    def is_url_source(node) -> bool:
+        return helper_call(node) or logo_mapping_read(node)
+
+    offenders = []
+    web = Path(__file__).resolve().parents[1] / "src" / "stocks" / "web"
+    for path in sorted(web.rglob("*.py")):
+        tree = ast.parse(path.read_text())
+        # Locals holding a logo URL, bound by `=` or by a walrus in an `if`.
+        url_names = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Assign) and is_url_source(node.value):
+                url_names |= {t.id for t in node.targets if isinstance(t, ast.Name)}
+            elif isinstance(node, ast.NamedExpr) and is_url_source(node.value):
+                url_names.add(node.target.id)
+        for node in ast.walk(tree):
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "image"
+                and node.args
+            ):
+                arg = node.args[0]
+                if is_url_source(arg) or (
+                    isinstance(arg, ast.Name) and arg.id in url_names
+                ):
+                    offenders.append(f"{path.name}:{node.lineno}")
+
+    assert not offenders, f"logo URL passed to st.image: {', '.join(offenders)}"

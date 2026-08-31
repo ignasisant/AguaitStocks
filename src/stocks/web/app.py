@@ -26,6 +26,7 @@ from yfinance.exceptions import YFRateLimitError  # noqa: E402
 from stocks.web import auth  # noqa: E402
 from stocks.web import chat_core  # noqa: E402
 from stocks.web import i18n  # noqa: E402
+from stocks.web import landing  # noqa: E402
 from stocks.web import notices  # noqa: E402
 from stocks.web import skeletons  # noqa: E402
 from stocks.web.i18n import t as tr  # noqa: E402
@@ -36,16 +37,15 @@ from stocks.web.widgets import (  # noqa: E402
     ticker_picker,
 )
 
-# Aguait — Catalan "estar a l'aguait": to be on the lookout.
 _ASSETS = Path(__file__).parent / "assets"
 st.set_page_config(
-    page_title="Aguait Stocks",
-    page_icon=str(_ASSETS / "aguait-icon.svg"),
+    page_title="TopStocks",
+    page_icon=str(_ASSETS / "topstocks-icon.svg"),
     layout="wide",
 )
 st.logo(
-    str(_ASSETS / "aguait-logo.svg"),
-    icon_image=str(_ASSETS / "aguait-icon.svg"),
+    str(_ASSETS / "topstocks-logo.svg"),
+    icon_image=str(_ASSETS / "topstocks-icon.svg"),
     size="large",
 )
 
@@ -112,9 +112,21 @@ st.html(
            the card edge-to-edge (same bleed trick as the topbar); text and
            metrics keep the card padding. Plotly measures its container after
            CSS applies, so the widened box is picked up on first render. */
-        .aguait-card [data-testid="stElementContainer"]:has(> [data-testid="stPlotlyChart"]) {
+        .topstocks-card [data-testid="stElementContainer"]:has(> [data-testid="stPlotlyChart"]) {
           margin-left: -1.2rem; margin-right: -1.2rem;
         }
+        /* Markdown tables — the one table shape the page can't restructure,
+           because the assistant writes them at runtime (chat answers, skill
+           output). Everything else stacks into cards on a phone
+           (widgets.stacked_table_html); these get their own scroll box so a
+           six-column answer pans inside the bubble instead of widening the
+           whole page. */
+        [data-testid="stMarkdown"] table {
+          display: block; width: max-content; max-width: 100%;
+          overflow-x: auto; font-size: var(--ag-fs-sm);
+        }
+        [data-testid="stMarkdown"] table td,
+        [data-testid="stMarkdown"] table th {white-space: nowrap;}
       }
       [data-testid="stMainBlockContainer"] [data-testid="stVerticalBlock"] {gap: 0.55rem;}
       [data-testid="stMetric"] {padding: 0;}
@@ -158,8 +170,9 @@ st.html(
          stVerticalBlockBorderWrapper testid and moved the border onto the
          inner stVerticalBlock, where a bordered block differs from a plain
          one only by computed style — the tagger script below stamps
-         .aguait-card on main-area blocks that carry a border. */
-      [data-testid="stMainBlockContainer"] [data-testid="stVerticalBlock"].aguait-card {
+         .topstocks-card on main-area blocks that carry a border. */
+      [data-testid="stMainBlockContainer"]
+        [data-testid="stVerticalBlock"].topstocks-card {
         background: var(--ag-surface-card);
         border-color: var(--ag-border);
         border-radius: var(--ag-radius-lg);
@@ -312,17 +325,17 @@ st.html(
     """
     <script>
     (function () {
-      if (window.__aguaitCardTagger) return;  /* survive reruns — wire once */
-      window.__aguaitCardTagger = true;
+      if (window.__topstocksCardTagger) return;  /* survive reruns — wire once */
+      window.__topstocksCardTagger = true;
       const tag = () => {
         document
           .querySelectorAll(
             '[data-testid="stMainBlockContainer"] ' +
-            '[data-testid="stVerticalBlock"]:not(.aguait-card)'
+            '[data-testid="stVerticalBlock"]:not(.topstocks-card)'
           )
           .forEach((el) => {
             if (parseFloat(getComputedStyle(el).borderTopWidth) > 0) {
-              el.classList.add("aguait-card");
+              el.classList.add("topstocks-card");
             }
           });
       };
@@ -348,8 +361,8 @@ st.html(
     r"""
     <script>
     (function () {
-      if (window.__aguaitTableSort) return;  /* survive reruns — wire once */
-      window.__aguaitTableSort = true;
+      if (window.__topstocksTableSort) return;  /* survive reruns — wire once */
+      window.__topstocksTableSort = true;
       let store = null;
       try { store = window.sessionStorage; } catch (e) { /* blocked — no memory */ }
       const cell = (row, ci) => {
@@ -437,8 +450,8 @@ st.html(
     """
     <script>
     (function () {
-      if (window.__aguaitBadgeMover) return;  /* survive reruns — wire once */
-      window.__aguaitBadgeMover = true;
+      if (window.__topstocksBadgeMover) return;  /* survive reruns — wire once */
+      window.__topstocksBadgeMover = true;
       let doc = document;
       try {
         if (window.parent !== window && window.parent.document.body) {
@@ -621,15 +634,19 @@ auth.resolve_user()
 # stable value. A Profile change lands on its rerun, which re-runs this first.
 i18n.set_active_language()
 
-# First load only: nudge anonymous visitors to sign in with a dismissible
-# modal (skippable in one click). No-op when [auth] is unset or already logged
-# in; runs after the language is resolved so its text is localized.
-auth.maybe_prompt_login()
+# First visit while signed out: the marketing landing takes the whole viewport
+# and nothing else renders on this run. It has to come before the nav is built
+# because it consumes its own query parameters — its CTAs are links, not
+# buttons, so the designed layout can stay one HTML node. A ?ticker= deep link
+# always wins, so shared ticker URLs are never swallowed by the pitch.
+if landing.should_show():
+    landing.render_landing()
+    st.stop()
 
 # Signed-in first load: nudge the user to set up their investor profile so the
 # assistant tailors its analysis. Skippable; nags again next session until set
 # (or filled from the Profile page). No-op for guests — mutually exclusive with
-# the login modal, which only fires when logged out.
+# the landing above, which only renders when logged out.
 auth.maybe_prompt_profile()
 
 ticker_page = st.Page(

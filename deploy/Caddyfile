@@ -1,4 +1,4 @@
-# Caddy reverse proxy for Aguait Stocks.
+# Caddy reverse proxy for TopStocks.
 # SITE_ADDRESS (e.g. 152-70-1-2.sslip.io) comes from deploy/.env via
 # compose. Caddy auto-provisions a Let's Encrypt cert for it (needs :80/:443
 # reachable) and proxies to the app container, upgrading the Streamlit

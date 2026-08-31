@@ -2,14 +2,22 @@
 
 from datetime import date
 
+import pandas as pd
+
 from stocks.data.earnings import (
     EarningsEvent,
     EarningsResult,
+    Quarter,
     add_months,
     build_events,
     group_by_date,
+    match_quarter,
     month_weeks,
     next_after,
+    pct_change,
+    prior_quarter,
+    quarters,
+    year_ago,
 )
 
 REF = date(2026, 7, 24)
@@ -107,3 +115,94 @@ def test_result_beat_falls_back_to_eps_comparison():
     )
     assert EarningsResult("X", date(2026, 5, 1), reported_eps=1.2).beat is None
     assert EarningsResult("X", date(2026, 5, 1)).beat is None
+
+
+# ------------------------------------------------------- quarter figures
+
+
+def statement() -> pd.DataFrame:
+    """Quarterly income statement in yfinance's shape: rows are line items."""
+    return pd.DataFrame(
+        {
+            pd.Timestamp("2026-04-30"): [81615e6, 61157e6, 53536e6, 58321e6,
+                                         69903e6, 11582e6, 6321e6, 2.39],
+            pd.Timestamp("2026-01-31"): [68127e6, 51093e6, 44299e6, 42960e6,
+                                         50398e6, 7438e6, 5512e6, 1.76],
+            pd.Timestamp("2025-04-30"): [44062e6, 26668e6, 21638e6, 18775e6,
+                                         21910e6, 3135e6, 3989e6, 0.76],
+        },
+        index=["Total Revenue", "Gross Profit", "Operating Income", "Net Income",
+               "Pretax Income", "Tax Provision", "Research And Development",
+               "Diluted EPS"],
+    )
+
+
+def test_quarters_parses_newest_first_with_margins():
+    qs = quarters(statement())
+    assert [q.end for q in qs] == [
+        date(2026, 4, 30), date(2026, 1, 31), date(2025, 4, 30)
+    ]
+    q = qs[0]
+    assert q.revenue == 81615e6 and q.diluted_eps == 2.39
+    assert round(q.gross_margin, 4) == 0.7493
+    assert round(q.operating_margin, 4) == 0.6560
+    assert round(q.net_margin, 4) == 0.7146
+    assert round(q.tax_rate, 4) == 0.1657
+
+
+def test_quarters_tolerates_missing_rows_and_empty_columns():
+    frame = statement().drop(index=["Gross Profit", "Diluted EPS"])
+    frame[pd.Timestamp("2025-01-31")] = [None] * len(frame)
+    qs = quarters(frame)
+    assert len(qs) == 3  # the all-empty column is dropped
+    assert qs[0].gross_profit is None and qs[0].gross_margin is None
+    assert qs[0].diluted_eps is None
+
+
+def test_quarters_of_empty_frame_is_empty():
+    assert quarters(pd.DataFrame()) == []
+
+
+def test_match_quarter_picks_the_quarter_the_print_reported_on():
+    qs = quarters(statement())
+    matched = match_quarter(qs, date(2026, 5, 20))
+    assert matched is not None and matched.end == date(2026, 4, 30)
+
+
+def test_match_quarter_rejects_an_unpublished_quarter():
+    # A print 118 days after the newest quarter on file reports a quarter
+    # yfinance has not published yet — showing the old one would be a lie.
+    assert match_quarter(quarters(statement()), date(2026, 8, 26)) is None
+
+
+def test_match_quarter_never_falls_back_a_whole_quarter():
+    # Two days after a quarter end is too fast to be that quarter's print, and
+    # the one before it (91 days back) is past the lag window — so: unknown,
+    # rather than the wrong quarter's figures.
+    assert match_quarter(quarters(statement()), date(2026, 5, 2)) is None
+
+
+def test_year_ago_matches_the_same_fiscal_quarter():
+    qs = quarters(statement())
+    prior = year_ago(qs, qs[0])
+    assert prior is not None and prior.end == date(2025, 4, 30)
+    # One quarter back has no year-ago partner in this history.
+    assert year_ago(qs, qs[1]) is None
+
+
+def test_prior_quarter_is_the_one_immediately_before():
+    qs = quarters(statement())
+    assert prior_quarter(qs, qs[0]).end == date(2026, 1, 31)
+    assert prior_quarter(qs, qs[-1]) is None
+
+
+def test_pct_change_guards_a_nonpositive_base():
+    assert round(pct_change(81615e6, 44062e6), 4) == 0.8523
+    assert pct_change(2.0, 0.0) is None
+    assert pct_change(2.0, -1.0) is None
+    assert pct_change(None, 1.0) is None
+
+
+def test_margins_need_revenue():
+    bare = Quarter(end=date(2026, 4, 30), net_income=100.0)
+    assert bare.net_margin is None and bare.tax_rate is None

@@ -1,5 +1,5 @@
 #cloud-config
-# Oracle Cloud first-boot provisioning for the Aguait Stocks VM.
+# Oracle Cloud first-boot provisioning for the TopStocks VM.
 # Paste into the Instance -> Advanced -> Management -> "cloud-init script" box
 # when creating the VM (or `oci compute instance launch --user-data-file`).
 #

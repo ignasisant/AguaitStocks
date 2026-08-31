@@ -28,7 +28,7 @@ env:
   # Same Fernet key as Streamlit's [chat] enc_key — decrypts each user's own
   # (BYOK) LLM key from their prefs. Optional; without it only the free chain.
   CHAT_ENC_KEY: ${{ secrets.CHAT_ENC_KEY }}
-  # Keyless free-chain backends (same as the web panel's "Aguait AI").
+  # Keyless free-chain backends (same as the web panel's "TopStocks AI").
   FREE_LLM_GROQ: ${{ secrets.FREE_LLM_GROQ }}
   FREE_LLM_CEREBRAS: ${{ secrets.FREE_LLM_CEREBRAS }}
   FREE_LLM_OPENROUTER: ${{ secrets.FREE_LLM_OPENROUTER }}

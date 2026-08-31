@@ -32,7 +32,13 @@ from stocks.portfolio.ledger import add_many, all_transactions, clear, delete_ma
 from stocks.portfolio.validate import known_tickers, validate
 from stocks.web import auth, skeletons
 from stocks.web.i18n import t as tr
-from stocks.web.widgets import brand_logo, ticker_table_html
+from stocks.web.widgets import (
+    brand_logo,
+    data_table,
+    is_mobile,
+    stacked_table_html,
+    ticker_table_html,
+)
 
 # Imports write the personal ledger — no anonymous access.
 auth.require_login()
@@ -82,12 +88,28 @@ _TX_LEFT = ("date", "action", "currency", "note")
 def _tx_table(frame: pd.DataFrame, *, rich: bool = True) -> None:
     # rich=False skips the logo/name lookup — rejected rows carry malformed
     # symbols, and resolving each one costs a network round-trip.
+    # Eight columns pan off a phone. With a resolvable symbol the preview goes
+    # dense (quantity + price on the right, date/action/notes on the wrapping
+    # dim line); rejected rows have no symbol to hang a dense row off, so they
+    # stack as label/value cards instead.
+    if not rich and is_mobile():
+        st.html(stacked_table_html(frame, title="ticker", fmt=_TX_FMT))
+        return
     st.html(
         ticker_table_html(
             frame,
             fmt=_TX_FMT,
             ticker_col="ticker" if rich else None,
             left_cols=_TX_LEFT + ("warnings", "errors"),
+            mobile={
+                "value": "quantity",
+                "delta": "price",
+                "sub": ("date", "action")
+                + tuple(
+                    c for c in ("note", "warnings", "errors") if c in frame.columns
+                ),
+                "wrap": True,
+            },
         )
     )
 
@@ -246,7 +268,7 @@ if validation.rejected:
 
 if result.skipped:
     with st.expander(tr("import.skipped_rows", n=len(result.skipped))):
-        st.dataframe(pd.DataFrame(result.skipped), hide_index=True)
+        data_table(pd.DataFrame(result.skipped), hide_index=True)
         if platform.key == "revolut":
             st.caption(tr("import.skipped_caption_revolut"))
         else:

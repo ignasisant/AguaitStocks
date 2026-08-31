@@ -235,3 +235,201 @@ def calendar_events(
     results = [r for _, rs in fetched for r in rs if r.date < ref]
     events = build_events(dated, ref, within_days=None)
     return events, sorted(results, key=lambda r: r.date, reverse=True)
+
+
+# ------------------------------------------------------------ quarter figures
+# The result dialog wants more than EPS: what revenue printed, how the margins
+# moved, what GAAP net income was. yfinance carries that on the quarterly
+# income statement — a different payload than get_earnings_dates, keyed by
+# fiscal *quarter end* instead of report date, hence match_quarter() below.
+# Row labels vary by filer, so each field lists its aliases in priority order.
+QUARTER_ROWS: dict[str, tuple[str, ...]] = {
+    "revenue": ("Total Revenue", "Operating Revenue"),
+    "gross_profit": ("Gross Profit",),
+    "operating_income": ("Operating Income", "Total Operating Income As Reported"),
+    "net_income": ("Net Income", "Net Income Common Stockholders"),
+    "pretax_income": ("Pretax Income",),
+    "tax_provision": ("Tax Provision",),
+    "rnd": ("Research And Development",),
+    "opex": ("Operating Expense",),
+    "diluted_eps": ("Diluted EPS",),
+    "diluted_shares": ("Diluted Average Shares",),
+}
+
+# A print lands weeks after the quarter it reports on — the 10-Q deadline is
+# 40-45 days out, and slow foreign filers stretch to ~10 weeks. The upper bound
+# stays under a full quarter (~91 days) on purpose: any wider and the PREVIOUS
+# quarter could match a print whose own quarter yfinance hasn't published yet,
+# putting stale figures under the right headline.
+MIN_REPORT_LAG = 5
+MAX_REPORT_LAG = 80
+
+# Same fiscal quarter, one year back: 365 days ± a fiscal-calendar week or two.
+YOY_TOLERANCE = 45
+
+
+@dataclass(frozen=True)
+class Quarter:
+    """One fiscal quarter's income-statement slice (GAAP, as filed).
+
+    Every field is optional: yfinance drops rows a filer doesn't report, and
+    the margins degrade to None rather than guessing a denominator.
+    """
+
+    end: date
+    revenue: float | None = None
+    gross_profit: float | None = None
+    operating_income: float | None = None
+    net_income: float | None = None
+    pretax_income: float | None = None
+    tax_provision: float | None = None
+    rnd: float | None = None
+    opex: float | None = None
+    diluted_eps: float | None = None
+    diluted_shares: float | None = None
+
+    def _over_revenue(self, value: float | None) -> float | None:
+        if value is None or not self.revenue:
+            return None
+        return value / self.revenue
+
+    @property
+    def gross_margin(self) -> float | None:
+        return self._over_revenue(self.gross_profit)
+
+    @property
+    def operating_margin(self) -> float | None:
+        return self._over_revenue(self.operating_income)
+
+    @property
+    def net_margin(self) -> float | None:
+        return self._over_revenue(self.net_income)
+
+    @property
+    def rnd_intensity(self) -> float | None:
+        return self._over_revenue(self.rnd)
+
+    @property
+    def tax_rate(self) -> float | None:
+        """Effective tax rate: provision / pretax income."""
+        if self.tax_provision is None or not self.pretax_income:
+            return None
+        return self.tax_provision / self.pretax_income
+
+
+def _cell(frame: pd.DataFrame, label: str, col) -> float | None:
+    """Scalar at (label, col), tolerating duplicate index labels."""
+    if label not in frame.index:
+        return None
+    value = frame.loc[label, col]
+    if isinstance(value, pd.Series):
+        value = value.dropna()
+        if value.empty:
+            return None
+        value = value.iloc[0]
+    return _to_float(value)
+
+
+def quarters(income_q: pd.DataFrame) -> list[Quarter]:
+    """Quarterly income statement to Quarters, newest-first. Pure."""
+    if income_q is None or income_q.empty:
+        return []
+    out: list[Quarter] = []
+    for col in income_q.columns:
+        end = _to_date(col)
+        if end is None:
+            continue
+        fields = {
+            field: next(
+                (
+                    v
+                    for label in labels
+                    if (v := _cell(income_q, label, col)) is not None
+                ),
+                None,
+            )
+            for field, labels in QUARTER_ROWS.items()
+        }
+        # An all-empty column (yfinance pads the frame out) carries nothing.
+        if fields["revenue"] is None and fields["net_income"] is None:
+            continue
+        out.append(Quarter(end=end, **fields))
+    return sorted(out, key=lambda q: q.end, reverse=True)
+
+
+def match_quarter(quarters_: list[Quarter], report: date) -> Quarter | None:
+    """The quarter a print on `report` reported on; None when not published yet.
+
+    Picks the shortest plausible lag so a newly filed quarter wins over the one
+    before it. Pure.
+    """
+    dated = [
+        (lag, q)
+        for q in quarters_
+        if MIN_REPORT_LAG <= (lag := (report - q.end).days) <= MAX_REPORT_LAG
+    ]
+    return min(dated, key=lambda pair: pair[0])[1] if dated else None
+
+
+def year_ago(quarters_: list[Quarter], q: Quarter) -> Quarter | None:
+    """The same fiscal quarter one year before `q`; None when out of history."""
+    target = q.end - timedelta(days=365)
+    near = [
+        (abs((x.end - target).days), x)
+        for x in quarters_
+        if x.end != q.end and abs((x.end - target).days) <= YOY_TOLERANCE
+    ]
+    return min(near, key=lambda pair: pair[0])[1] if near else None
+
+
+def prior_quarter(quarters_: list[Quarter], q: Quarter) -> Quarter | None:
+    """The quarter immediately before `q`; None when out of history."""
+    earlier = [x for x in quarters_ if x.end < q.end]
+    return max(earlier, key=lambda x: x.end) if earlier else None
+
+
+def pct_change(current: float | None, previous: float | None) -> float | None:
+    """Fractional change current/previous - 1; None when it can't be computed.
+
+    Guards a negative or zero base, where the percentage is meaningless (a swing
+    from -1bn to +2bn is not "-300% growth").
+    """
+    if current is None or previous is None or previous <= 0:
+        return None
+    return current / previous - 1
+
+
+def fetch_quarters(ticker: str) -> list[Quarter]:
+    """Quarterly income statement for one ticker, newest-first (network).
+
+    Empty on any failure except a rate limit, which re-raises so the web layer
+    can say why the section is empty (same contract as fetch_earnings).
+    """
+    import yfinance as yf
+    from yfinance.exceptions import YFRateLimitError
+
+    try:
+        frame = yf.Ticker(resolve(ticker)).quarterly_income_stmt
+    except YFRateLimitError:
+        raise
+    except Exception:
+        return []
+    return quarters(frame)
+
+
+def fetch_statement_currency(ticker: str) -> str | None:
+    """Currency the income statement is filed in ('financialCurrency').
+
+    The statement frames carry no currency of their own, and an ADR files in
+    its local currency while its estimates are quoted per USD ADS — so the
+    figures can only be labeled from the snapshot.
+    """
+    import yfinance as yf
+    from yfinance.exceptions import YFRateLimitError
+
+    try:
+        return (yf.Ticker(resolve(ticker)).info or {}).get("financialCurrency")
+    except YFRateLimitError:
+        raise
+    except Exception:
+        return None

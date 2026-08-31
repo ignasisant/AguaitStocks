@@ -31,7 +31,7 @@ def full_data() -> dg.DigestData:
 
 def test_render_full_digest_en():
     text = dg.render_digest(full_data(), "en")
-    assert "<b>📊 Aguait — daily digest</b> · Fri 14 Aug" in text
+    assert "<b>📊 TopStocks — daily digest</b> · Fri 14 Aug" in text
     assert "<b>Portfolio</b> €48,230" in text
     assert "Day +412 € (+0.86%)" in text
     assert "Week -1,105 € (-2.24%)" in text

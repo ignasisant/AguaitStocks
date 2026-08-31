@@ -19,6 +19,8 @@ import pandas as pd
 # yfinance period labels: "0q"/"+1q" = current/next quarter, "0y"/"+1y" = current/next FY.
 CURRENT_FY = "0y"
 NEXT_FY = "+1y"
+CURRENT_Q = "0q"
+NEXT_Q = "+1q"
 
 # strongBuy..strongSell mapped to 1..5, matching yfinance recommendationMean.
 _RATING_SCORE = {"strongBuy": 1, "buy": 2, "hold": 3, "sell": 4, "strongSell": 5}
@@ -158,6 +160,62 @@ def consensus(raw: RawEstimates) -> Consensus:
         rev_cy=_pick(rev, CURRENT_FY, "avg"),
         rev_next_fy=_pick(rev, NEXT_FY, "avg"),
         rev_growth_next_fy=_pick(rev, NEXT_FY, "growth"),
+    )
+
+
+@dataclass(frozen=True)
+class QuarterOutlook:
+    """Consensus for ONE quarter — the forward view next to a just-reported one.
+
+    Company guidance is not in any free feed, so this is the sell-side
+    aggregate for the quarter in flight: the UI must label it consensus, never
+    guidance. `low`/`high` are the analyst dispersion, not a company range.
+    """
+
+    period: str  # yfinance label: "0q" (quarter in flight) or "+1q"
+    eps_avg: float | None = None
+    eps_low: float | None = None
+    eps_high: float | None = None
+    eps_growth: float | None = None  # vs the year-ago quarter
+    eps_year_ago: float | None = None
+    eps_analysts: int | None = None
+    rev_avg: float | None = None
+    rev_low: float | None = None
+    rev_high: float | None = None
+    rev_growth: float | None = None
+    rev_year_ago: float | None = None
+    rev_analysts: int | None = None
+    currency: str | None = None
+
+    @property
+    def empty(self) -> bool:
+        """No usable figure on either line — the section has nothing to draw."""
+        return self.eps_avg is None and self.rev_avg is None
+
+
+def quarter_outlook(raw: RawEstimates, period: str = NEXT_Q) -> QuarterOutlook:
+    """Fold the per-quarter estimate rows into a QuarterOutlook (pure)."""
+    eps, rev = raw.earnings_estimate, raw.revenue_estimate
+
+    def _count(df: pd.DataFrame) -> int | None:
+        n = _pick(df, period, "numberOfAnalysts")
+        return int(n) if n is not None else None
+
+    return QuarterOutlook(
+        period=period,
+        eps_avg=_pick(eps, period, "avg"),
+        eps_low=_pick(eps, period, "low"),
+        eps_high=_pick(eps, period, "high"),
+        eps_growth=_pick(eps, period, "growth"),
+        eps_year_ago=_pick(eps, period, "yearAgoEps"),
+        eps_analysts=_count(eps),
+        rev_avg=_pick(rev, period, "avg"),
+        rev_low=_pick(rev, period, "low"),
+        rev_high=_pick(rev, period, "high"),
+        rev_growth=_pick(rev, period, "growth"),
+        rev_year_ago=_pick(rev, period, "yearAgoRevenue"),
+        rev_analysts=_count(rev),
+        currency=estimate_currency(rev) or estimate_currency(eps),
     )
 
 

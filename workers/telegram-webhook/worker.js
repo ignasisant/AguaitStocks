@@ -1,4 +1,4 @@
-// Telegram webhook receiver for Aguait.
+// Telegram webhook receiver for TopStocks.
 //
 // Telegram POSTs each bot update here. The Worker does exactly two things:
 // store the update as one JSON object in the R2 bucket (the same bucket the

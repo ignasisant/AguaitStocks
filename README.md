@@ -1,5 +1,5 @@
 ---
-title: Aguait Stocks
+title: TopStocks
 emoji: 📈
 colorFrom: purple
 colorTo: gray
@@ -8,11 +8,11 @@ app_port: 8501
 pinned: false
 ---
 
-# Aguait Stocks
+# TopStocks
 
-<img src="src/stocks/web/assets/aguait-logo.svg" alt="Aguait Stocks logo" width="270">
+<img src="src/stocks/web/assets/topstocks-logo.svg" alt="TopStocks logo" width="270">
 
-**Aguait Stocks** is a personal equity tracking toolkit: fetch market
+**TopStocks** is a personal equity tracking toolkit: fetch market
 prices, compute technical indicators, run price alerts, and browse a visual
 analytics dashboard.
 
@@ -141,9 +141,9 @@ it in an iframe where the Google login popup/cookies may misbehave.
 Local check of the same image:
 
 ```bash
-docker build -t aguait-stocks .
+docker build -t topstocks .
 docker run --rm -p 8501:8501 \
-  -e STREAMLIT_SECRETS_TOML="$(cat .streamlit/secrets.toml)" aguait-stocks
+  -e STREAMLIT_SECRETS_TOML="$(cat .streamlit/secrets.toml)" topstocks
 ```
 
 ## Usage
@@ -233,7 +233,7 @@ in your language.
 
 ### Free assistant, no user key (`[free_llm]`)
 
-Optionally, the deploy can offer a keyless **Aguait AI** provider: a chain of
+Optionally, the deploy can offer a keyless **TopStocks AI** provider: a chain of
 free-tier backends billed to *operator* keys in `secrets.toml`. Users get chat
 with zero setup; when a backend answers with a rate-limit (or any error before
 its first token), the chain hops to the next one, and only errors out once
@@ -251,7 +251,7 @@ openrouter = "sk-or-..."  # openrouter.ai/settings/keys (:free models)
 # daily_cap = 30
 ```
 
-When configured, Aguait AI is listed first and becomes the default for
+When configured, TopStocks AI is listed first and becomes the default for
 accounts that never picked a provider; the BYOK entries stay available in the
 same selector. Each account gets a **daily message cap** (`daily_cap`, counted
 in its prefs) so one user can't drain the shared quota. Mind the fine print:
@@ -262,8 +262,21 @@ to stay strictly BYOK.
 ### Key storage & privacy
 
 - Your key stays in session by default. Tick **Remember** and it's encrypted
-  (Fernet) and persisted for **15 days**, then auto-expires. Rotating the
-  server's `[chat].enc_key` invalidates every stored key on the spot.
+  (Fernet) and persisted for **90 days**. The window **slides**: every turn
+  your key actually serves pushes it out again, so an account you keep using
+  never has to re-enter it. An **absolute cap of 180 days** from the moment
+  you entered the key is never refreshed — after that you type it once more.
+  Rotating the server's `[chat].enc_key` invalidates every stored key on the
+  spot.
+- Expiry **deletes** the stored ciphertext (`<pid>_key_enc` and its
+  timestamps) the next time the account is read, in prefs and in the bucket
+  mirror — an abandoned account doesn't sit on a decryptable provider key.
+  The daily digest only reads a key, never slides it, so it can't keep one
+  alive on its own.
+- The encryption is at rest, not zero-knowledge: `[chat].enc_key` lives on the
+  server (and in the Actions secrets the digest/Telegram jobs use), so a
+  bucket-only leak yields useless ciphertext, while server compromise does
+  not. Blast radius is your provider bill — revoke the key at the provider.
 - Key storage is **account-scoped** (prefs `<pid>_key_enc`), so multiple users
   never share a key. **Forget** wipes it from session and prefs immediately.
 - **Chat history persists per account** (one thread per watchlist, mirrored to

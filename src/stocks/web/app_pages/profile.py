@@ -132,12 +132,21 @@ with tab_watch:
         ],
         columns=["logo", "ticker", "name", "favorite", "shares", "cost", "tags"],
     )
+    # The grid stays editable on phones — a read-only card list can't add or
+    # retag a holding — but seven columns pan, so the two that carry no edit
+    # (the logo) or repeat the symbol (the name) drop out of the view there.
+    # Hidden columns still come back in `edited`, so saving is unaffected.
     edited = st.data_editor(
         frame,
         num_rows="dynamic",
         hide_index=True,
         key="watchlist_editor",
         disabled=("logo",),
+        column_order=(
+            ("ticker", "favorite", "shares", "cost", "tags")
+            if widgets.is_mobile()
+            else None
+        ),
         column_config={
             "logo": st.column_config.ImageColumn("", width=40),
             "ticker": st.column_config.TextColumn(

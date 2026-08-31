@@ -88,7 +88,7 @@ def test_backends_follow_fixed_order_and_model_override(monkeypatch):
     got = llm._free_backends()
     assert [b.id for b in got] == ["groq", "cerebras"]
     assert got[0].model == "qwen-32b"
-    assert got[1].model == "llama-3.3-70b"
+    assert got[1].model == "gpt-oss-120b"
 
 
 def test_blank_keys_are_skipped(monkeypatch):

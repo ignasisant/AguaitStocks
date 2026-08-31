@@ -153,7 +153,7 @@ def _result_chip(r) -> str:
     )
 
 
-@st.dialog(tr("earnings.dialog_title"))
+@st.dialog(tr("earnings.dialog_title"), width="large")
 def _result_dialog(ticker: str, iso: str) -> None:
     render_result_body(ticker, iso, results, names, logos)
 

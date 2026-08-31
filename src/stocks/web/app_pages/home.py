@@ -19,7 +19,13 @@ import plotly.graph_objects as go
 import streamlit as st
 from yfinance.exceptions import YFRateLimitError
 
-from stocks.analysis.portfolio import basket_change, market_live, us_market_open
+from stocks.analysis.portfolio import (
+    basket_change,
+    market_active,
+    market_live,
+    us_extended_session,
+    us_market_open,
+)
 from stocks.config import Holding, load_watchlist
 from stocks.data.crypto import is_crypto
 from stocks.data.earnings import calendar_events
@@ -118,7 +124,7 @@ def _setup_card() -> None:
         except Exception:
             pass  # unreadable/missing ledger reads as "not imported yet"
     # "Connected" = a provider key saved to prefs (encrypted, chat_core) or
-    # entered this session; the keyless Aguait free chain doesn't count.
+    # entered this session; the keyless TopStocks free chain doesn't count.
     has_ai_key = any(k.endswith("_key_enc") for k in prefs) or any(
         k.startswith("llm_key::") and st.session_state[k] for k in st.session_state
     )
@@ -196,13 +202,15 @@ _setup_card()
 # Daily-glance cut of the Portfolio page: value / today / unrealised P/L plus
 # a 30-day sparkline, then today's top movers. The full positions table, risk,
 # tax and dividends stay on the Portfolio page.
-# Movers table: ticker, live market value (display currency), portfolio weight,
-# day %. The value/weight columns come from enriched_positions (tbl) reindexed
-# to each list's tickers; fmt for the value column is built at render since it
-# needs the display-currency symbol.
+# Movers table: ticker, live share price with the day move as a chip beside it
+# ("$226.10  +18.92%"), live market value (display currency), portfolio weight.
+# The price/value/weight columns come from enriched_positions (tbl) reindexed to
+# each list's tickers; fmt for the price and value columns is built at render
+# since both need the display-currency symbol.
 MOVER_FMT = {"weight": "{:.1%}", "day_pct": "{:+.2%}"}
 MOVER_LABELS = {
     "ticker": tr("home.col_ticker"),
+    "price": tr("home.col_price"),
     "value": tr("home.col_value"),
     "weight": tr("home.col_weight"),
     "day_pct": tr("home.col_day_pct"),
@@ -318,10 +326,13 @@ if auth.is_logged_in():
                 # Delta row — Today / 1 week / 1 month, mirroring the Portfolio
                 # page's second metric row. Cells (d1-d3) were carved above so
                 # they sit in the KPI column beside the sparkline.
-                # Market closed → "Today" is the last completed session's move
-                # (per-row day_eur, overridden to the last close), not the
-                # basket's flat premarket 0%; grey its delta ("off") too.
+                # Regular session closed → "Today" comes from the per-row
+                # day_eur (overridden to the live pre/after-hours quote, or the
+                # last completed session once those windows shut), not the
+                # basket's flat premarket 0%. Only a fully shut market greys
+                # its delta ("off") — an extended-hours quote is live.
                 mkt_open = us_market_open()
+                extended = None if mkt_open else us_extended_session()
                 today_closed = None
                 if not mkt_open:
                     d_eur = tbl["day_eur"].dropna().sum()
@@ -345,11 +356,19 @@ if auth.is_logged_in():
                             f"{sym}{chg[0] * fx:+,.0f}",
                             f"{chg[1]:+.2%}",
                             delta_color=(
-                                "off" if days == 1 and not mkt_open else "normal"
+                                "off"
+                                if days == 1 and not mkt_open and not extended
+                                else "normal"
                             ),
                         )
                 if not mkt_open:
-                    st.caption(tr("home.market_closed_note"))
+                    st.caption(
+                        tr(
+                            f"home.{extended}market_note"
+                            if extended
+                            else "home.market_closed_note"
+                        )
+                    )
                 # The sparkline slot (assigned above) is filled at the bottom of
                 # the script — ledger_history's cold build fetches the ledger's
                 # full price span, so the deferred-slot pattern keeps it off
@@ -376,25 +395,36 @@ if auth.is_logged_in():
                             box.caption(tr("home.none_today"))
                             return
                         idx = series.index
+                        # Price per share, display currency: value / shares
+                        # rather than a second quote burst (value_eur is already
+                        # live-priced). Unpriced rows carry NaN -> "n/a".
+                        shares = tbl["shares"].reindex(idx).replace(0, float("nan"))
+                        price = tbl["value_eur"].reindex(idx) / shares * fx
                         box.html(
                             ticker_table_html(
                                 pd.DataFrame(
                                     {
                                         "ticker": idx,
+                                        "price": price.values,
+                                        "day_pct": series.values,
                                         "value": tbl["value_eur"].reindex(idx).values
                                         * fx,
                                         "weight": tbl["weight"].reindex(idx).values,
-                                        "day_pct": series.values,
                                     }
                                 ),
-                                fmt={**MOVER_FMT, "value": f"{sym}{{:,.0f}}"},
+                                fmt={**MOVER_FMT, "price": f"{sym}{{:,.2f}}",
+                                     "value": f"{sym}{{:,.0f}}"},
                                 signed=("day_pct",),
+                                # Price + its day move in one cell, the % as a
+                                # tinted chip — same treatment as the Positions
+                                # table's "€-97 (-1.1%)" cells.
+                                pairs=(("price", "day_pct"),),
                                 labels=MOVER_LABELS,
                                 names=False,
-                                muted={t for t in idx if not market_live(t)},
+                                muted={t for t in idx if not market_active(t)},
                                 muted_cols=("day_pct",),
                                 mobile={"value": "value", "delta": "day_pct",
-                                        "sub": ("weight",)},
+                                        "sub": ("price", "weight")},
                             )
                         )
 
@@ -562,8 +592,9 @@ def _watch_table(tickers: list[str]) -> None:
     # One row per ticker in the placeholder, so the expander opens at the
     # height it will keep once the off-session moves come back.
     with skeletons.slot("table", rows=len(tickers), cols=3) as box:
-        # Market closed → the close-to-close day % can be a flat premarket 0%,
-        # so pull the last regular-session move from fast_info for those names.
+        # Outside the regular session the close-to-close day % can be a flat
+        # premarket 0%, so pull the quote move (pre/after-hours, else the last
+        # completed session) for those names.
         off = tuple(t for t in tickers if not market_live(t))
         moves = last_session_moves(off) if off else {}
         rows = []
@@ -583,7 +614,7 @@ def _watch_table(tickers: list[str]) -> None:
                     "price": tr("home.col_last_close"),
                     "day_pct": tr("home.col_day_pct"),
                 },
-                muted={t for t in tickers if not market_live(t)},
+                muted={t for t in tickers if not market_active(t)},
                 muted_cols=("day_pct",),
                 mobile={"value": "price", "delta": "day_pct"},
             )
@@ -890,7 +921,7 @@ else:
                 _names = {t: (company_name(t) or t) for t in _syms}
                 _logos = {t: logo(t) for t in _syms}
 
-                @st.dialog(tr("earnings.dialog_title"))
+                @st.dialog(tr("earnings.dialog_title"), width="large")
                 def _mini_result_dialog(ticker: str, iso: str) -> None:
                     render_result_body(ticker, iso, _results, _names, _logos)
 

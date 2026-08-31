@@ -10,6 +10,7 @@ import pytest
 from stocks.chat import bot
 from stocks.chat.engine import Reply
 from stocks.notify.fanout import NotifyUser
+from stocks.web import auth
 
 
 def _update(uid: int, chat_id: int, text: str, chat_type: str = "private") -> dict:
@@ -164,7 +165,7 @@ def test_drain_clear_resets_shared_thread(local, users):
     _queue(local, _update(17, 111, "/clear"))
     status = bot.drain()
     assert status[bot.queue_key(17)] == "cleared jane_ab12cd34"
-    assert json.loads(users["linked"].chat_path.read_text()) == []
+    assert auth.load_chat(users["linked"].chat_path) == []
 
 
 def test_drain_engine_error_reported_and_queue_consumed(local, users, monkeypatch):

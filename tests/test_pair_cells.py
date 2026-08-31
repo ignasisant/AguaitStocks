@@ -158,7 +158,7 @@ def test_sorter_is_wired_once_at_the_entry_point():
     """The handler lives in app.py (one MutationObserver for every table on
     the page); a table alone can't sort itself."""
     src = (WEB / "app.py").read_text()
-    assert "__aguaitTableSort" in src
+    assert "__topstocksTableSort" in src
     assert "unsafe_allow_javascript=True" in src
 
 
@@ -188,3 +188,68 @@ def test_phone_row_puts_the_badge_next_to_the_symbol(monkeypatch):
     # …and the sub line is back to name + weight only.
     sub = re.search(r'<div class="agr-l2">(.*?)</div>', html, re.S).group(1)
     assert "Alphabet" in sub and "7.7%" in sub and "50.2%" not in sub
+
+
+def _realized_frame():
+    return pd.DataFrame({
+        "ticker": ["GOOG", "META"],
+        "buy": ["2021-03-04", "2022-01-10"],
+        "sell": ["2024-05-06", "2024-08-01"],
+        "qty": [12.5, 3.0],
+        "cost_eur": [1000.0, 500.0],
+        "proceeds_eur": [1500.0, 480.0],
+        "gain_eur": [500.0, -20.0],
+        "gain_pct": [0.5, -0.04],
+    })
+
+
+REALIZED_FMT = {
+    "qty": "{:,.4f}", "cost_eur": "€{:,.2f}", "proceeds_eur": "€{:,.2f}",
+    "gain_eur": "€{:+,.2f}", "gain_pct": "{:+.1%}",
+}
+REALIZED_SIGNED = ("gain_eur", "gain_pct")
+
+
+def test_realized_sales_merge_gain_and_return_on_desktop():
+    """Adding the return can't widen the tax table — it rides in the gain
+    cell, so the phone badge and the desktop grid share one column set."""
+    html = ticker_table_html(
+        _realized_frame(), fmt=REALIZED_FMT, signed=REALIZED_SIGNED,
+        left_cols=("buy", "sell"), pairs=(("gain_eur", "gain_pct"),),
+        labels={"gain_eur": "Gain"},
+    )
+    headers = re.findall(r"<th[^>]*>(.*?)</th>", html)
+    assert "gain_pct" not in html and headers.count("Gain") == 1
+    assert "€+500.00" in html and "+50.0%" in html
+
+
+def test_realized_sales_render_as_phone_rows(monkeypatch):
+    """Seven columns pan off a 390px screen; the tax tab's sales list gets
+    the same dense rows as Positions — dates on the wrapping dim line, the
+    return as a pill, no horizontal scroll."""
+    monkeypatch.setattr(widgets, "is_mobile", lambda: True)
+    monkeypatch.setattr(widgets, "logo", lambda t: None)
+    html = ticker_table_html(
+        _realized_frame(), fmt=REALIZED_FMT, signed=REALIZED_SIGNED,
+        names=False,
+        mobile={"value": "proceeds_eur", "delta": "gain_eur",
+                "badge": "gain_pct", "wrap": True,
+                "sub": ("buy", "sell", "qty"),
+                "sub_labels": {"buy": "Bought", "sell": "Sold",
+                               "qty": "Shares"}},
+    )
+    assert "<table" not in html
+    line1 = re.search(r'<div class="agr-l1">(.*?)</div>', html, re.S).group(1)
+    assert "GOOG" in line1 and "+50.0%" in line1 and PROFIT_BAND in line1
+    sub = re.search(r'<div class="agr-l2 agr-wrap">(.*?)</div>', html, re.S).group(1)
+    assert "Bought 2021-03-04" in sub and "Sold 2024-05-06" in sub
+    # Proceeds on line 1 right, the signed gain under it.
+    side = re.search(r'<div class="agr-side">(.*?)</div></a>', html, re.S).group(1)
+    assert "€1,500.00" in side and "€+500.00" in side
+
+
+def test_tax_tab_offers_the_full_table_on_a_phone():
+    """The dense rows drop columns (cost basis, shares detail), so the phone
+    branch keeps the sortable table one expander below — same as Positions."""
+    src = (WEB / "app_pages" / "portfolio.py").read_text()
+    assert "portfolio.all_columns_realized" in src

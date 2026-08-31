@@ -324,3 +324,92 @@ def test_basket_change_ignores_tickers_missing_at_either_endpoint():
     chg = basket_change(vals, 1)
     assert abs(chg[0] - 10.0) < 1e-9  # B's appearance isn't a +500 "gain"
     assert abs(chg[1] - 0.10) < 1e-9
+
+
+from datetime import UTC, datetime  # noqa: E402
+
+from stocks.analysis.portfolio import (  # noqa: E402
+    _session_move,
+    market_active,
+    market_live,
+    us_extended_session,
+)
+
+
+def _utc(month: int, day: int, hour: int, minute: int = 0) -> datetime:
+    """A 2024 UTC instant (Jan = EST, UTC-5)."""
+    return datetime(2024, month, day, hour, minute, tzinfo=UTC)
+
+
+def test_us_extended_session_windows():
+    # Jan 3 2024 is a Wednesday; ET = UTC-5.
+    assert us_extended_session(_utc(1, 3, 8)) is None  # 03:00 ET, before the feed
+    assert us_extended_session(_utc(1, 3, 9)) == "pre"  # 04:00 ET, feed opens
+    assert us_extended_session(_utc(1, 3, 12)) == "pre"  # 07:00 ET
+    assert us_extended_session(_utc(1, 3, 15)) is None  # 10:00 ET, regular
+    assert us_extended_session(_utc(1, 3, 22)) == "post"  # 17:00 ET
+    assert us_extended_session(_utc(1, 4, 2)) is None  # 21:00 ET, shut
+    assert us_extended_session(_utc(1, 6, 12)) is None  # Saturday
+
+
+def test_market_active_covers_us_extended_hours_but_not_foreign():
+    pre = _utc(1, 3, 12)  # 07:00 ET — US premarket
+    assert not market_live("AAPL", pre)
+    assert market_active("AAPL", pre)  # premarket quote is live data
+    shut = _utc(1, 4, 2)  # 21:00 ET — nothing trading anywhere
+    assert not market_active("AAPL", shut)
+
+
+class _FakeQuote:
+    def __init__(self, info):
+        self.info = info
+
+
+def _patch_quote(monkeypatch, info):
+    import yfinance
+
+    monkeypatch.setattr(yfinance, "Ticker", lambda symbol: _FakeQuote(info))
+
+
+def test_session_move_uses_premarket_against_last_close(monkeypatch):
+    # Premarket: regularMarketPrice is still yesterday's close.
+    _patch_quote(
+        monkeypatch,
+        {
+            "marketState": "PRE",
+            "regularMarketPrice": 200.0,
+            "regularMarketPreviousClose": 190.0,
+            "preMarketPrice": 220.0,
+        },
+    )
+    assert abs(_session_move("CRM") - 0.10) < 1e-9
+
+
+def test_session_move_compounds_after_hours_with_the_session(monkeypatch):
+    _patch_quote(
+        monkeypatch,
+        {
+            "marketState": "POST",
+            "regularMarketPrice": 110.0,
+            "regularMarketPreviousClose": 100.0,
+            "postMarketPrice": 121.0,
+        },
+    )
+    assert abs(_session_move("NVDA") - 0.21) < 1e-9
+
+
+def test_session_move_falls_back_to_last_completed_session(monkeypatch):
+    _patch_quote(
+        monkeypatch,
+        {
+            "marketState": "CLOSED",
+            "regularMarketPrice": 105.0,
+            "regularMarketPreviousClose": 100.0,
+        },
+    )
+    assert abs(_session_move("MSFT") - 0.05) < 1e-9
+
+
+def test_session_move_none_when_quote_missing(monkeypatch):
+    _patch_quote(monkeypatch, {"marketState": "PRE"})
+    assert _session_move("AAPL") is None

@@ -41,29 +41,29 @@ import streamlit as st
 CSS = """
 <style>
   /* Base sheen: two alphas of the neutral-600 token, so the trough and crest
-     composite over whatever sits behind them (the neutral-900 .aguait-card,
+     composite over whatever sits behind them (the neutral-900 .topstocks-card,
      or the page tone in a card-less section) instead of pinning two opaque
      greys that only look right on one of the two surfaces. */
-  .aguait-sk {
+  .topstocks-sk {
     --sk-base: var(--ag-skeleton-base);
     --sk-hi: var(--ag-skeleton-hi);
     width: 100%;
   }
-  .aguait-sk .skb {
+  .topstocks-sk .skb {
     display: block;
     border-radius: var(--ag-radius-xs);
     background: linear-gradient(90deg,
       var(--sk-base) 25%, var(--sk-hi) 50%, var(--sk-base) 75%);
     background-size: 200% 100%;
-    animation: aguait-sk-sheen 1.5s linear infinite;
+    animation: topstocks-sk-sheen 1.5s linear infinite;
   }
-  @keyframes aguait-sk-sheen {
+  @keyframes topstocks-sk-sheen {
     from {background-position: 200% 0;}
     to {background-position: -200% 0;}
   }
   /* Vestibular safety: keep the shape, drop the sweep. */
   @media (prefers-reduced-motion: reduce) {
-    .aguait-sk .skb {animation: none; background: var(--sk-base);}
+    .topstocks-sk .skb {animation: none; background: var(--sk-base);}
   }
 
   /* Stat tiles — the 12px label / Epilogue value / delta pill stack that
@@ -143,6 +143,16 @@ CSS = """
   .sk-rside .sk-l1 {width: 78%;}
   .sk-rside .sk-l2 {width: 52%;}
 
+  /* Stacked cards — the phone rendering of a table that isn't a ticker
+     list (widgets.stacked_table_html's .ags-card). */
+  .sk-cards {display: flex; flex-direction: column;}
+  .sk-kcard {padding: 9px 2px; border-bottom: 1px solid var(--ag-rule-soft);}
+  .sk-kcard .sk-ktitle {height: 12px; width: 38%; margin-bottom: 7px;}
+  .sk-kv {display: flex; justify-content: space-between; gap: 12px;
+          padding: 3px 0;}
+  .sk-kv .sk-k {height: 9px; width: 32%;}
+  .sk-kv .sk-v {height: 9px; width: 20%;}
+
   /* Month / week grid — the earnings calendars. */
   .sk-cal {display: grid; gap: 4px;}
   .sk-cell {border: 1px solid var(--ag-border);
@@ -195,7 +205,7 @@ def _text(*, lines: int = 3, width: str = "100%") -> str:
     body = "".join(
         f'<span class="skb" style="width:{w}%"></span>' for w in widths[:lines]
     )
-    return f'<div class="aguait-sk sk-text" style="max-width:{width}">{body}</div>'
+    return f'<div class="topstocks-sk sk-text" style="max-width:{width}">{body}</div>'
 
 
 def _metrics(*, n: int | tuple[int, ...] = 4, delta: bool = True) -> str:
@@ -207,7 +217,7 @@ def _metrics(*, n: int | tuple[int, ...] = 4, delta: bool = True) -> str:
         + "</div>"
     )
     body = "".join(f'<div class="sk-mrow">{tile * count}</div>' for count in rows)
-    return f'<div class="aguait-sk sk-metrics">{body}</div>'
+    return f'<div class="topstocks-sk sk-metrics">{body}</div>'
 
 
 def _plot(shape: str, *, bars: int, cells: int) -> str:
@@ -258,7 +268,7 @@ def _chart(
     else:
         body = f'<div class="sk-col">{plot}</div>'
     return (
-        f'<div class="aguait-sk sk-chart" style="height:{height}px">'
+        f'<div class="topstocks-sk sk-chart" style="height:{height}px">'
         f'{head}<div class="sk-frame">{body}</div></div>'
     )
 
@@ -271,7 +281,7 @@ def _rows(*, rows: int = 5) -> str:
         '<div class="sk-rside"><span class="skb sk-l1"></span>'
         '<span class="skb sk-l2"></span></div></div>'
     )
-    return f'<div class="aguait-sk sk-rows">{row * rows}</div>'
+    return f'<div class="topstocks-sk sk-rows">{row * rows}</div>'
 
 
 def _table(*, rows: int = 5, cols: int = 4, header: bool = True) -> str:
@@ -295,7 +305,22 @@ def _table(*, rows: int = 5, cols: int = 4, header: bool = True) -> str:
         '<span class="skb sk-name"></span></div>'
         f'{_blocks(max(cols - 1, 1))}</div>'
     )
-    return f'<div class="aguait-sk sk-table">{head}{body * rows}</div>'
+    return f'<div class="topstocks-sk sk-table">{head}{body * rows}</div>'
+
+
+def _cards(*, n: int = 3, lines: int = 4) -> str:
+    """Stacked label/value cards — the phone form of a non-ticker table.
+
+    Its desktop counterpart is `_table`; the two are picked by the caller
+    (not forked in here) because the frames that stack are the ones with no
+    ticker column, and only the page knows how many lines a card will hold.
+    """
+    kv = (
+        '<div class="sk-kv"><span class="skb sk-k"></span>'
+        '<span class="skb sk-v"></span></div>'
+    ) * lines
+    card = f'<div class="sk-kcard"><span class="skb sk-ktitle"></span>{kv}</div>'
+    return f'<div class="topstocks-sk sk-cards">{card * n}</div>'
 
 
 def _calendar(*, weeks: int = 4, cols: int = 5, cell: int = 96) -> str:
@@ -304,11 +329,11 @@ def _calendar(*, weeks: int = 4, cols: int = 5, cell: int = 96) -> str:
         f'<div class="sk-cell" style="height:{cell}px">'
         '<span class="skb sk-day"></span><span class="skb sk-chip"></span></div>'
     ) * (weeks * cols)
-    return f'<div class="aguait-sk sk-cal" style="{grid}">{body}</div>'
+    return f'<div class="topstocks-sk sk-cal" style="{grid}">{body}</div>'
 
 
 def _pills(*, n: int = 5) -> str:
-    return f'<div class="aguait-sk sk-pills">{_blocks(n)}</div>'
+    return f'<div class="topstocks-sk sk-pills">{_blocks(n)}</div>'
 
 
 _SHAPES = {
@@ -317,6 +342,7 @@ _SHAPES = {
     "chart": _chart,
     "table": _table,
     "rows": _rows,
+    "cards": _cards,
     "calendar": _calendar,
     "pills": _pills,
 }
@@ -337,7 +363,7 @@ def html(kind: str = "text", *, title: bool = False, **kw) -> str:
     body = build(**kw)
     if title:
         body = (
-            '<div class="aguait-sk sk-card">'
+            '<div class="topstocks-sk sk-card">'
             f'<span class="skb sk-ctitle"></span>{body}</div>'
         )
     return body

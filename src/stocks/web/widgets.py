@@ -25,7 +25,7 @@ from stocks.fuzzy import FUZZY_CUTOFF, MIN_QUERY, fuzzy_ratio
 from stocks.web import auth, notices, skeletons
 from stocks.web.i18n import t as tr
 
-# ─────────────────────────────────────────────────── Aguait design tokens
+# ─────────────────────────────────────────────────── TopStocks design tokens
 # Single source of truth for every color, radius, elevation and type step the
 # Streamlit theme (.streamlit/config.toml) can't reach — our own HTML, CCv2
 # component CSS and Plotly figures. Values are Amphora Web DS tokens and MUST
@@ -64,6 +64,21 @@ TEXT_PRIMARY = "#F9F9FA"    # neutral-50 — primary text (also the logo plate)
 TEXT_SECONDARY = "#B3AFBD"  # neutral-400 — widget labels, secondary body
 TEXT_MUTED = "#827F8C"      # neutral-500 — captions, chart axes, company names
 TEXT_FAINT = "#696673"      # neutral-600 — section headers, separators, rules
+
+# Landing page. The public marketing surface needs two steps the app chrome
+# never asked for: a card fill between SURFACE_PAGE and SURFACE_CARD, and a
+# mid-tone green/red pair for figures. The DS success/critical pairs are a dark
+# fill plus a light tint, which reads as a badge rather than as a number, so
+# these follow the candle hues instead. Used only by landing.py.
+SURFACE_RAISED = "#1F1D24"      # landing card fill — between page and card
+SURFACE_BAND = "#1B1920"        # alternating full-width section band
+SURFACE_BRAND_BAND = "#221B31"  # provenance band — purple-tinted page
+BORDER_BRAND_BAND = "#3B3157"   # provenance band edge
+LANDING_UP = "#2AC77E"          # positive figures, "fact" provenance tag
+LANDING_DOWN = "#F0526A"        # negative figures, rejected import rows
+LANDING_INFO = "#4C8DFF"        # benchmark series, "consensus" provenance tag
+LANDING_WARN = "#F5B940"        # import warnings, deferred loss, disclaimers
+ON_BRAND = "#FEFEFF"            # text on a BRAND_CTA fill
 
 # Back-compat aliases — every green/red profit-loss cue routes through these.
 PROFIT_COLOR, LOSS_COLOR = UP_COLOR, DOWN_COLOR
@@ -184,6 +199,13 @@ def ds_vars_css() -> str:
         "border": BORDER, "text-primary": TEXT_PRIMARY,
         "text-secondary": TEXT_SECONDARY, "text-muted": TEXT_MUTED,
         "text-faint": TEXT_FAINT,
+        # color — landing surface
+        "surface-raised": SURFACE_RAISED, "surface-band": SURFACE_BAND,
+        "surface-brand-band": SURFACE_BRAND_BAND,
+        "border-brand-band": BORDER_BRAND_BAND,
+        "landing-up": LANDING_UP, "landing-down": LANDING_DOWN,
+        "landing-info": LANDING_INFO, "landing-warn": LANDING_WARN,
+        "on-brand": ON_BRAND,
         # color — alpha variants
         "profit-band": PROFIT_BAND, "loss-band": LOSS_BAND,
         "surface-sunken": SURFACE_SUNKEN, "rule-soft": RULE_SOFT,
@@ -214,7 +236,7 @@ def ds_vars_css() -> str:
 
 
 # One hover-label look for every chart — the DS card, echoed onto Plotly's SVG
-# tooltip: SURFACE_CARD (same as .aguait-card), BORDER, Instrument Sans body
+# tooltip: SURFACE_CARD (same as .topstocks-card), BORDER, Instrument Sans body
 # face, TEXT_PRIMARY text. namelength=-1 so
 # trace names never truncate to 15 chars. Radius + elevation (which Plotly's
 # hoverlabel can't set) come from CSS in app.py. Font size drops on mobile (see
@@ -225,7 +247,7 @@ HOVER_FONT_MOBILE = 11
 # ~40px of a ~390px screen; 10px narrows the gutter and lightens the frame.
 TICK_FONT_MOBILE = 10
 HOVERLABEL = dict(
-    bgcolor=SURFACE_CARD_HAZE,      # neutral-900 — matches .aguait-card surface
+    bgcolor=SURFACE_CARD_HAZE,      # neutral-900 — matches .topstocks-card surface
     bordercolor=BORDER,             # neutral-800 — DS border
     font=dict(
         family="'Instrument Sans', sans-serif",
@@ -297,7 +319,7 @@ def show_chart(fig, *, key: str | None = None, container=None) -> None:
         else HOVERLABEL
     )
     # Transparent canvas so the chart takes on the surface behind it (the
-    # .aguait-card SURFACE_CARD) instead of Streamlit's opaque
+    # .topstocks-card SURFACE_CARD) instead of Streamlit's opaque
     # page-background paper — otherwise the plot reads as a darker box inset
     # in the card. Card-less contexts inherit the page bg, still correct.
     fig.update_layout(
@@ -414,7 +436,7 @@ def brand_logo(key: str, domain: str | None) -> str | None:
 
 @st.cache_data(show_spinner=False)
 def asset_logo(name: str) -> str | None:
-    """Same-origin URL for a bundled image from web/assets/ (e.g. the Aguait
+    """Same-origin URL for a bundled image from web/assets/ (e.g. the TopStocks
     icon), copied into static/logos/ so it is served like the brand logos."""
     src = Path(__file__).parent / "assets" / name
     dest = _STATIC_LOGO_DIR / name
@@ -854,7 +876,7 @@ def ticker_pill_md(ticker: str, max_name: int = 18) -> str:
 # fought. Declared once at import (never inside a function — re-registering the
 # name misbehaves). Styled in its own shadow root to match the old field.
 _LIVE_SEARCH = st.components.v2.component(
-    "aguait_live_search",
+    "topstocks_live_search",
     html='<input id="q" class="lsi" type="text" autocomplete="off" spellcheck="false" />',
     css="""
     .lsi {
@@ -1247,7 +1269,7 @@ def render_topbar(page_title: str, ticker: str | None = None) -> None:
     state (collapsed rail / expanded / hidden phone) without any width math.
     """
     crumbs = [
-        '<span class="tb-brand">Aguait</span>',
+        '<span class="tb-brand">TopStocks</span>',
         '<span class="tb-sep">›</span>',
         f'<span class="tb-page">{html.escape(page_title)}</span>',
     ]
@@ -1274,7 +1296,7 @@ def render_topbar(page_title: str, ticker: str | None = None) -> None:
     #     of the MAIN column. Breadcrumb-only and single-line, so it never wraps
     #     or clips the way a search-in-bar row did on phones. Stickiness rides on
     #     the stElementContainer that st.html produces (a direct child of the
-    #     full-height main block), singled out with `:has(.aguait-topbar)`;
+    #     full-height main block), singled out with `:has(.topstocks-topbar)`;
     #     negative margins bleed it to the block-container's content edges.
     #  2. A GLOBAL ticker search (below), rendered as a VIEWPORT-FIXED field that
     #     sits in the very top strip just left of the assistant launcher (the
@@ -1290,7 +1312,7 @@ def render_topbar(page_title: str, ticker: str | None = None) -> None:
            the bar's bottom border stops short of the main column's right
            edge — the width calc adds both bled margins back so the border
            runs edge to edge. */
-        [data-testid="stElementContainer"]:has(.aguait-topbar) {
+        [data-testid="stElementContainer"]:has(.topstocks-topbar) {
           position: sticky !important; top: 0; z-index: 100000;
           /* -1.2rem swallows the block-container top padding; the extra
              0.55rem swallows the vertical-block gap the hidden st.html
@@ -1300,7 +1322,7 @@ def render_topbar(page_title: str, ticker: str | None = None) -> None:
           max-width: calc(100% + 5rem) !important;
         }
         /* 64px tall like the design header (14px padding + 36px controls). */
-        .aguait-topbar {
+        .topstocks-topbar {
           padding: 0 2.5rem; min-height: 64px;
           display: flex; align-items: center; gap: 0.5rem;
           background: var(--ag-surface-page-haze); backdrop-filter: blur(7px);
@@ -1308,16 +1330,16 @@ def render_topbar(page_title: str, ticker: str | None = None) -> None:
           font-size: var(--ag-fs-md); line-height: 1.2;
           white-space: nowrap; overflow: hidden;
         }
-        .aguait-topbar .tb-brand { color: var(--ag-text-muted); font-weight: 400; }
-        .aguait-topbar .tb-sep { color: var(--ag-text-faint); }
-        .aguait-topbar .tb-page { color: var(--ag-text-primary); font-weight: 600; }
-        .aguait-topbar .tb-ticker {
+        .topstocks-topbar .tb-brand { color: var(--ag-text-muted); font-weight: 400; }
+        .topstocks-topbar .tb-sep { color: var(--ag-text-faint); }
+        .topstocks-topbar .tb-page { color: var(--ag-text-primary); font-weight: 600; }
+        .topstocks-topbar .tb-ticker {
           color: var(--ag-text-primary); font-weight: 600;
           display: inline-flex; align-items: center; gap: 6px;
           min-width: 0; overflow: hidden; text-overflow: ellipsis;
         }
-        .aguait-topbar .tb-name { color: var(--ag-text-muted); font-weight: 400; }
-        .aguait-topbar .tb-logo {
+        .topstocks-topbar .tb-name { color: var(--ag-text-muted); font-weight: 400; }
+        .topstocks-topbar .tb-logo {
           height: 18px; width: 18px; object-fit: contain;
           border-radius: var(--ag-radius-xs);
         }
@@ -1387,15 +1409,15 @@ def render_topbar(page_title: str, ticker: str | None = None) -> None:
            the header row instead, so the bar keeps its full width there. */
         @media (min-width: 641px) {
           /* Room for the 300px search + 36px launcher riding the bar's right. */
-          .aguait-topbar { padding-right: 26rem; }
+          .topstocks-topbar { padding-right: 26rem; }
         }
         @media (max-width: 640px) {
-          [data-testid="stElementContainer"]:has(.aguait-topbar) {
+          [data-testid="stElementContainer"]:has(.topstocks-topbar) {
             margin-left: -0.75rem; margin-right: -0.75rem;
             width: calc(100% + 1.5rem) !important;
             max-width: calc(100% + 1.5rem) !important;
           }
-          .aguait-topbar { padding-left: 0.75rem; padding-right: 0.75rem; }
+          .topstocks-topbar { padding-left: 0.75rem; padding-right: 0.75rem; }
         }
         </style>
         """
@@ -1405,7 +1427,7 @@ def render_topbar(page_title: str, ticker: str | None = None) -> None:
     # still renders, so the menu toggle + search + chat button share the header
     # row on phones.
     if not is_mobile():
-        st.html(f'<div class="aguait-topbar">{"".join(crumbs)}</div>')
+        st.html(f'<div class="topstocks-topbar">{"".join(crumbs)}</div>')
     # Live search + dropdown, in a fragment so typing reruns only the panel.
     _topbar_search_panel()
 
@@ -1730,6 +1752,146 @@ def ticker_table_html(
         f'<div class="ag-sortable" data-ag-sort="{html.escape(sortable, quote=True)}"'
         f' style="overflow-x:auto">{markup}</div>'
     )
+
+
+# Stacked label/value cards: the phone rendering of every table that ISN'T a
+# ticker list (quarterly detail, dividends by year, insider trades, KPI
+# sources...). Those have no symbol to hang a dense .agr-row off, and their
+# columns are too many to fit a phone, so each row becomes a small card with
+# one "label — value" line per column. One style block per table is
+# idempotent, same as _ROWS_CSS.
+_STACK_CSS = f"""<style>
+.ags-card {{ padding: 9px 2px; border-bottom: 1px solid {RULE_SOFT}; }}
+.ags-card:last-child {{ border-bottom: none; }}
+.ags-title {{
+  font-size: {FS_MD}; font-weight: 600; line-height: 1.4; margin-bottom: 3px;
+}}
+.ags-kv {{
+  display: flex; gap: 12px; justify-content: space-between;
+  align-items: baseline; font-size: {FS_SM}; line-height: 1.6;
+}}
+.ags-k {{ color: {TEXT_MUTED}; flex: 0 0 auto; }}
+.ags-v {{ text-align: right; min-width: 0; overflow-wrap: anywhere; }}
+</style>"""
+
+
+def stacked_table_html(
+    frame: pd.DataFrame,
+    *,
+    title: str | None = None,
+    index_title: bool = False,
+    title_html: bool = False,
+    fmt: dict[str, str] | None = None,
+    signed: tuple[str, ...] = (),
+    labels: dict[str, str] | None = None,
+    hide: tuple[str, ...] = (),
+) -> str:
+    """Phone rendering of a non-ticker table: one card per row.
+
+        Q2 FY26                     <- title
+        Revenue            $94.0B   <- one line per remaining column
+        YoY               +12.3%
+
+    A wide grid on a 390px screen either pans sideways or squeezes every
+    column to three characters; stacking the columns as label/value lines
+    keeps every figure readable and the page scrolling in one direction.
+    Missing cells are dropped rather than printed as "n/a" — on a phone a
+    short card beats a complete one.
+
+    Args:
+        title: column whose value heads each card (dropped from the lines).
+        index_title: head each card with the row index instead (for frames
+            keyed by year/period, and for transposed grids).
+        title_html: the title value is already markup (e.g. a `ticker_cell`)
+            and must not be escaped.
+        fmt: column -> format string or callable, as ticker_table_html.
+        signed: columns tinted green/red by sign.
+        labels: column -> displayed label; fmt/signed keep the raw names.
+        hide: columns left out of the cards entirely.
+    """
+    labels = labels or {}
+    cols = [
+        c for c in frame.columns if c != title and c not in hide
+    ]
+    cards = []
+    for idx, row in frame.iterrows():
+        head = ""
+        if index_title:
+            head = str(idx)
+        elif title is not None and title in frame.columns:
+            head = str(row[title])
+        lines = []
+        for c in cols:
+            v = row[c]
+            try:
+                if pd.isna(v):
+                    continue
+            except (TypeError, ValueError):
+                pass
+            if isinstance(v, str) and not v.strip():
+                continue
+            f = (fmt or {}).get(c)
+            text = html.escape(
+                f(v) if callable(f) else _value_formatter(fmt, signed, c)(v)
+            )
+            if c in signed and (css := signed_color(v)):
+                text = f'<span style="{css}">{text}</span>'
+            lines.append(
+                f'<div class="ags-kv"><span class="ags-k">'
+                f'{html.escape(str(labels.get(c, c)))}</span>'
+                f'<span class="ags-v">{text}</span></div>'
+            )
+        if head:
+            head = (
+                '<div class="ags-title">'
+                + (head if title_html else html.escape(head))
+                + "</div>"
+            )
+        cards.append(f'<div class="ags-card">{head}{"".join(lines)}</div>')
+    return f"<div>{_STACK_CSS}{''.join(cards)}</div>"
+
+
+def data_table(
+    frame: pd.DataFrame,
+    *,
+    title: str | None = None,
+    index_title: bool = False,
+    title_html: bool = False,
+    fmt: dict[str, str] | None = None,
+    signed: tuple[str, ...] = (),
+    labels: dict[str, str] | None = None,
+    hide: tuple[str, ...] = (),
+    container=None,
+    **kwargs,
+) -> None:
+    """st.dataframe on desktop, `stacked_table_html` cards on phones.
+
+    The mobile-only arguments mirror stacked_table_html; `fmt` doubles as the
+    desktop number format (applied through a Styler) unless the caller drives
+    that with its own `column_config`. Everything else is forwarded to
+    st.dataframe untouched.
+    """
+    target = container if container is not None else st
+    if is_mobile():
+        target.html(
+            stacked_table_html(
+                frame,
+                title=title,
+                index_title=index_title,
+                title_html=title_html,
+                fmt=fmt,
+                signed=signed,
+                labels=labels,
+                hide=hide,
+            )
+        )
+        return
+    show = frame
+    if fmt and "column_config" not in kwargs:
+        show = frame.style.format(
+            {k: v for k, v in fmt.items() if k in frame.columns}, na_rep="n/a"
+        )
+    target.dataframe(show, **kwargs)
 
 
 @st.cache_data(ttl=86400, show_spinner=False)

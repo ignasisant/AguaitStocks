@@ -1,4 +1,4 @@
-# Aguait Stocks — container image for Hugging Face Spaces (Docker SDK) or any
+# TopStocks — container image for Hugging Face Spaces (Docker SDK) or any
 # container host (Cloud Run, a VM...). Serves the Streamlit dashboard on $PORT
 # (default 8501, matching app_port in the README front matter).
 #
@@ -14,7 +14,10 @@ COPY --from=ghcr.io/astral-sh/uv:0.11 /uv /uvx /bin/
 # HF Spaces run the container as UID 1000 regardless of USER; everything under
 # /app must belong to it (data/ price caches, static/logos mirror, the
 # secrets.toml bootstrap, R2 restores of watchlist.yaml + data/users/).
-RUN useradd -m -u 1000 appuser
+# Create + own /app as root FIRST: the classic (non-BuildKit) Docker builder
+# used by Cloud Build makes WORKDIR dirs root-owned, so uv sync's .venv write
+# would fail with EACCES unless /app is chowned to appuser beforehand.
+RUN useradd -m -u 1000 appuser && mkdir -p /app && chown appuser:appuser /app
 USER appuser
 ENV HOME=/home/appuser
 WORKDIR /app

@@ -3,39 +3,45 @@
 The whole assistant lives in one *side panel* — a launcher icon pinned top-right
 that opens a slide-in overlay, reachable from every page. It is fully
 self-contained: provider choice, model choice, BYOK key entry (with the same
-encrypted-for-15-days storage the app uses elsewhere) and the conversation all
-happen inside the panel, so there is no separate Chat page in the nav. The
-keyless "Aguait AI" provider (llm.py free chain) skips the key gate entirely
+encrypted, sliding-90-day storage the app uses elsewhere) and the conversation
+all happen inside the panel, so there is no separate Chat page in the nav. The
+keyless "TopStocks AI" provider (llm.py free chain) skips the key gate entirely
 and is throttled per account by _spend_free_quota.
 
 Storage is account-scoped: session slot "llm_key::<pid>", prefs "<pid>_key_enc" /
-"<pid>_key_saved_at", the "llm_provider" / "<pid>_model" choices, and one
-"chat_history::<watchlist_path>" thread per account.
+"<pid>_key_saved_at" / "<pid>_key_first_at", the "llm_provider" / "<pid>_model"
+choices, and one "chat_history::<watchlist_path>" thread per account.
 """
 
 from __future__ import annotations
 
 import time
-from datetime import date
+from datetime import UTC, datetime
+from pathlib import Path
 from urllib.parse import urlparse
 
+import pandas as pd
 import streamlit as st
 from cryptography.fernet import Fernet
 
-from stocks.chat import engine
+from stocks.chat import engine, market, tools
 from stocks.config import load_watchlist
+from stocks.portfolio import autodetect, last_import, llm_map
+from stocks.portfolio.ledger import add_many, all_transactions
+from stocks.portfolio.validate import known_tickers, validate
 from stocks.secrets_env import secret
-from stocks.web import auth, chat_actions, chat_skills, chat_web, llm, skeletons
+from stocks.web import auth, chat_skills, chat_web, llm, skeletons
 from stocks.web.i18n import t as tr
 from stocks.web.portfolio_data import enriched_positions
-from stocks.web.widgets import asset_logo, brand_logo, db_mtime
+from stocks.web.widgets import asset_logo, brand_logo, data_table, db_mtime
 
-_TTL = engine.BYOK_TTL  # 15 days, seconds — the shared "remembered" window
+_TTL = engine.BYOK_TTL  # 90 days, seconds — the shared sliding "remembered" window
 
 
 # ------------------------------------------------------------- key + provider
 # Account-scoped storage: session slot "llm_key::<pid>", prefs "<pid>_key_enc" /
-# "<pid>_key_saved_at", and the "llm_provider" / "<pid>_model" choices. Both the
+# "<pid>_key_saved_at" / "<pid>_key_first_at", and the "llm_provider" /
+# "<pid>_model" choices. Both the
 # read side (active_*) and the setup side (pick/gate/save/forget) live here now
 # that the panel is the only assistant surface.
 
@@ -50,27 +56,82 @@ def _fernet() -> Fernet | None:
 
 
 def _load_saved_key(pid: str) -> str:
-    """Decrypt a remembered provider key if present and within the 15-day window."""
-    return engine.decrypt_byok(auth.load_prefs(), pid)
+    """Decrypt a remembered provider key if present and inside its window.
+
+    Reading one is also the maintenance point: a live key has its 90-day
+    window slid forward (at most once a day) and any expired key anywhere in
+    prefs is deleted outright, ciphertext included.
+    """
+    prefs = auth.load_prefs()
+    key = engine.decrypt_byok(prefs, pid)
+    if engine.maintain_byok(prefs, pid if key else None):
+        auth.save_prefs(prefs)
+    return key
 
 
 def _save_key(pid: str, api_key: str) -> None:
-    """Encrypt and persist a provider key (save_prefs mirrors prefs.json)."""
+    """Encrypt and persist a provider key (save_prefs mirrors prefs.json).
+
+    A fresh entry restarts both clocks: the sliding window and the absolute
+    cap (`_key_first_at`) that the sliding one can never outrun.
+    """
     f = _fernet()
     if not f:
         st.warning(tr("chat.no_enc"))
         return
     prefs = auth.load_prefs()
-    prefs[f"{pid}_key_enc"] = f.encrypt(api_key.encode()).decode()
-    prefs[f"{pid}_key_saved_at"] = int(time.time())
+    now = int(time.time())
+    enc_k, saved_k, first_k = engine.byok_fields(pid)
+    prefs[enc_k] = f.encrypt(api_key.encode()).decode()
+    prefs[saved_k] = now
+    prefs[first_k] = now
     auth.save_prefs(prefs)
+
+
+def _mask_key(key: str) -> str:
+    """A key rendered as a glance-check: head, ellipsis, tail. Enough to tell
+    two keys apart without putting the secret on screen."""
+    if len(key) <= 12:
+        return "•" * len(key)
+    return f"{key[:6]}…{key[-4:]}"
+
+
+def _key_lifetime(pid: str) -> int | None:
+    """Whole days left on the stored key (sliding window vs absolute cap,
+    whichever runs out first), or None when nothing is stored."""
+    prefs = auth.load_prefs()
+    enc_k, saved_k, first_k = engine.byok_fields(pid)
+    if not prefs.get(enc_k):
+        return None
+    try:
+        saved = float(prefs.get(saved_k, 0) or 0)
+        first = float(prefs.get(first_k, saved) or saved)
+    except (TypeError, ValueError):
+        return None
+    now = time.time()
+    left = min(engine.BYOK_TTL - (now - saved), engine.BYOK_MAX_AGE - (now - first))
+    return max(0, int(left // 86400))
+
+
+def _show_key(provider: llm.Provider, key: str) -> None:
+    """The configured key, masked by default with an opt-in reveal, plus where
+    it lives — stored (with days left) or session-only."""
+    if st.toggle(tr("chat.key_show"), key=f"panel_key_show_{provider.id}"):
+        st.code(key, language=None, wrap_lines=True)
+    else:
+        st.code(_mask_key(key), language=None)
+    days = _key_lifetime(provider.id)
+    st.caption(tr("chat.key_stored", days=days) if days is not None
+               else tr("chat.key_session_only"))
 
 
 def _forget_key(pid: str) -> None:
     st.session_state.pop(_sk(pid), None)
     prefs = auth.load_prefs()
-    if prefs.pop(f"{pid}_key_enc", None) is not None:
-        prefs.pop(f"{pid}_key_saved_at", None)
+    enc_k, saved_k, first_k = engine.byok_fields(pid)
+    if prefs.pop(enc_k, None) is not None:
+        prefs.pop(saved_k, None)
+        prefs.pop(first_k, None)
         auth.save_prefs(prefs)
 
 
@@ -124,7 +185,7 @@ _MIN_WIDTH, _MAX_WIDTH = 320, 1500  # clamp range for the drag-to-resize handle
 def _provider_option_md(pid: str) -> str:
     """Segmented-control label: provider logo (markdown image) + brand name."""
     p = llm.PROVIDERS[pid]
-    src = brand_logo(p.id, p.domain) if p.domain else asset_logo("aguait-icon.svg")
+    src = brand_logo(p.id, p.domain) if p.domain else asset_logo("topstocks-icon.svg")
     img = f"![{p.label}]({src}) " if src else ""
     return f"{img}{p.label}"
 
@@ -247,17 +308,20 @@ def _pick_skills() -> None:
         auth.save_prefs(prefs)
 
 
-def _resolve_skills(provider: llm.Provider, api_key: str,
-                    history: list[dict]) -> list[str]:
+def _resolve_skills(provider: llm.Provider, api_key: str, history: list[dict],
+                    prefs: dict, context: str) -> list[str]:
     """Skill ids to apply to the pending answer, per the saved mode.
 
     Auto routes the message through the provider's cheapest model (for the
     keyless free chain that is one extra backend call per message). When the
     router call itself fails it falls back to the previous answer's skills —
     the answer always proceeds, and an unchanged skill set keeps the system
-    prompt byte-identical, which keeps provider prompt caches warm."""
-    return engine.resolve_skills(auth.load_prefs(), provider, api_key,
-                                 history, context=_view_context().strip())
+    prompt byte-identical, which keeps provider prompt caches warm.
+
+    `prefs` and `context` are passed in rather than read here: this runs off
+    the script thread (engine.in_parallel), where session state is gone."""
+    return engine.resolve_skills(prefs, provider, api_key, history,
+                                 context=context)
 
 
 # ------------------------------------------------------------- web search
@@ -267,7 +331,7 @@ def _resolve_skills(provider: llm.Provider, api_key: str,
 
 
 def _web_enabled() -> bool:
-    return chat_web.available() and bool(auth.load_prefs().get("chat_web", True))
+    return engine.web_enabled(auth.load_prefs())
 
 
 def _pick_web() -> None:
@@ -283,19 +347,25 @@ def _pick_web() -> None:
         auth.save_prefs(prefs)
 
 
-def _plan_web(provider: llm.Provider, api_key: str,
-              history: list[dict]) -> list[str]:
-    """Search queries for the pending answer ([] = none needed / web off).
+def _gather_web(provider: llm.Provider, api_key: str, history: list[dict],
+                prefs: dict, context: str) -> list[chat_web.Result]:
+    """The pages this turn reads: the planner's searches, opened and read,
+    plus any link the user pasted.
 
-    Prior user turns ride along so follow-ups ("and today?", "any news?")
-    keep planning within the thread's topic."""
-    if not _web_enabled():
-        return []
-    prior = [m["content"][:200] for m in history[:-1] if m["role"] == "user"][-2:]
-    context = f"Today is {date.today().isoformat()}.\n" + _view_context().strip()
-    if prior:
-        context += "\nEarlier user messages (topic continuity): " + " | ".join(prior)
-    return chat_web.plan(provider, api_key, history[-1]["content"], context)
+    [] when the web toggle is off — that means no internet at all, pasted
+    links included. Like the skill router, this runs off the script thread,
+    so `prefs` and the view context arrive as arguments."""
+    return engine.ground_web(prefs, provider, api_key, history, context)
+
+
+def _live_quotes(message: str, watchlist: Path, focus: str) -> list[market.Quote]:
+    """Live prices for the tickers this message names (chat/market.py).
+
+    Deterministic and model-free: the book snapshot in the system prompt only
+    covers what the user holds, so anything else — a ticker they are merely
+    looking at, a name they typed — would otherwise be answered from the
+    model's training-data prices."""
+    return market.lookup_for(message, watchlist, focus=focus)
 
 
 def _host(url: str) -> str:
@@ -309,7 +379,7 @@ def _sources_label(sources: list[dict]) -> str:
 
 
 # ------------------------------------------------------------- actions
-# App operations straight from chat (web/chat_actions.py): favorite, price
+# App operations straight from chat (chat/tools.py): favorite, price
 # alerts, groups. Detection only runs when the keyword gate hits; a detected
 # action replaces the LLM answer with a deterministic localized confirmation
 # (no free-quota spend), and any failure falls through to a normal answer.
@@ -329,35 +399,25 @@ def _action_context() -> str:
     return "\n".join(b for b in bits if b)
 
 
-def _action_reply(act: chat_actions.Action) -> str:
-    """Localized confirmation bubble for an executed action."""
-    if act.kind == "favorite":
-        return tr("chat.action_favorited", ticker=act.ticker)
-    if act.kind == "unfavorite":
-        return tr("chat.action_unfavorited", ticker=act.ticker)
-    if act.kind == "set_alerts":
-        rules = ", ".join(
-            tr(f"chat.action_alert_{a['type']}", price=f"{a['price']:g}")
-            for a in act.alerts
-        )
-        return tr("chat.action_alerts_set", ticker=act.ticker, rules=rules)
-    return tr("chat.action_tagged", ticker=act.ticker,
-              groups=", ".join(act.tags))
+def _action_reply(act: tools.Action) -> str:
+    """Localized confirmation bubble for an executed action — the per-tool
+    wording lives with the tools (chat/tools.py)."""
+    return tools.reply(act, tr)
 
 
 def _try_action(provider: llm.Provider, api_key: str,
-                message: str) -> chat_actions.Action | None:
+                message: str) -> tools.Action | None:
     """Detect and execute an app action for the message, or None.
 
     None on gate miss, parse failure or execution error — the caller then
     answers normally, so a broken action path never blocks the chat."""
-    if not chat_actions.maybe_action(message):
+    if not tools.maybe_action(message):
         return None
-    act = chat_actions.detect(provider, api_key, message, _action_context())
+    act = tools.detect(provider, api_key, message, _action_context())
     if act is None:
         return None
     try:
-        chat_actions.execute(act, auth.watchlist_path())
+        tools.execute(act, auth.watchlist_path())
     except Exception:
         return None
     return act
@@ -425,6 +485,291 @@ def _system_prompt(skill_ids: list[str] | None = None) -> str:
     )
 
 
+# ------------------------------------------------------------- threads
+# Several conversations per account (auth.load_book / list_conversations): a
+# bar above the messages with a picker popover — named after the open thread —
+# and a New button. All of it lives inside the panel fragment, so switching
+# threads reruns the panel and nothing else.
+
+
+def _conv_label(conv: dict, limit: int = 30) -> str:
+    """A thread's display name: its title, or a placeholder while unnamed."""
+    title = (conv.get("title") or "").strip() or tr("chat.untitled")
+    return title if len(title) <= limit else title[: limit - 1] + "\u2026"
+
+
+def _conv_when(conv: dict) -> str:
+    """Last-used stamp for the picker: the time today, the date before that."""
+    try:
+        when = datetime.fromisoformat(conv["updated"]).astimezone()
+    except (KeyError, TypeError, ValueError):
+        return ""
+    today = datetime.now().astimezone().date()
+    return when.strftime("%H:%M" if when.date() == today else "%Y-%m-%d")
+
+
+def _thread_picker(ns: str) -> None:
+    """The popover's body: switch to, rename or delete a conversation."""
+    renaming = st.session_state.get(f"{ns}_renaming")
+    for c in auth.list_conversations():
+        if c["id"] == renaming:
+            name = st.text_input(tr("chat.rename"), value=c["title"],
+                                 key=f"{ns}_rename_{c['id']}",
+                                 label_visibility="collapsed")
+            with st.container(horizontal=True):
+                if st.button(tr("chat.rename_save"), type="primary",
+                             key=f"{ns}_save_{c['id']}"):
+                    auth.rename_conversation(c["id"], name)
+                    st.session_state.pop(f"{ns}_renaming", None)
+                    st.rerun()
+                if st.button(tr("chat.cancel"), key=f"{ns}_cancel_{c['id']}"):
+                    st.session_state.pop(f"{ns}_renaming", None)
+                    st.rerun()
+            continue
+        with st.container(horizontal=True, vertical_alignment="center"):
+            # The open thread is the disabled row — no navigation to where you
+            # already are, and it reads as the current selection.
+            if st.button(f"{_conv_label(c, 24)} \u00b7 {_conv_when(c)}",
+                         key=f"{ns}_pick_{c['id']}", type="tertiary",
+                         width="stretch", disabled=c["active"]):
+                auth.set_active_conversation(c["id"])
+                st.rerun()
+            if st.button("", icon=":material/edit:", type="tertiary",
+                         key=f"{ns}_ren_{c['id']}", help=tr("chat.rename")):
+                st.session_state[f"{ns}_renaming"] = c["id"]
+                st.rerun()
+            if st.button("", icon=":material/delete:", type="tertiary",
+                         key=f"{ns}_del_{c['id']}", help=tr("chat.delete_thread")):
+                auth.delete_conversation(c["id"])
+                st.rerun()
+
+
+def _render_thread_bar(ns: str, conv: dict) -> None:
+    """Picker popover (labelled with the open thread) + New-thread button."""
+    with st.container(horizontal=True, vertical_alignment="center",
+                      key=f"{ns}_threadbar"):
+        with st.popover(_conv_label(conv), icon=":material/forum:",
+                        width="stretch", key=f"{ns}_threads"):
+            _thread_picker(ns)
+        if st.button("", icon=":material/add_comment:", key=f"{ns}_new",
+                     help=tr("chat.new")):
+            auth.new_conversation()
+            st.rerun()
+
+
+def _maybe_autotitle(conv: dict, history: list[dict], provider: llm.Provider,
+                     api_key: str) -> bool:
+    """Name a brand-new thread from its opening question (one cheap call).
+
+    True when the title changed, so the caller can rerun and repaint the bar —
+    it was drawn before the answer existed. Never fires twice on a thread, and
+    never on one the user renamed."""
+    if len(history) != 2 or conv.get("title") or not conv.get("title_auto", True):
+        return False
+    try:
+        auth.autotitle_conversation(
+            conv["id"], engine.title_for(provider, api_key, history[0]["content"])
+        )
+    except Exception:
+        return False
+    return True
+
+
+# -------------------------------------------------------------- statements
+# A broker export dropped into the chat input. autodetect picks the parser —
+# or maps the file's columns with one cheap model call when no parser owns it
+# — and the rows are then validated and previewed exactly as the Import page
+# does. Nothing reaches the ledger until the user presses the button: the
+# parsed batch waits in session state, which is also what carries it across
+# the fragment reruns the panel does on every interaction.
+#
+# The uploaded bytes are deliberately never written to disk. An import is
+# finished inside the session that started it, so persisting the statement
+# (and mirroring it to the bucket) would leave a second copy of the user's
+# whole trade history around for no gain; a lost session means re-uploading.
+
+MAX_UPLOAD_MB = 10
+
+
+def _uploads_key(ns: str) -> str:
+    return f"{ns}_uploads"
+
+
+def _pending_key(ns: str) -> str:
+    return f"{ns}_pending_import"
+
+
+def _submitted(value) -> tuple[str, list]:
+    """(text, files) out of st.chat_input, which returns a bare string only
+    when uploads are switched off."""
+    if value is None:
+        return "", []
+    if isinstance(value, str):
+        return value, []
+    return (value.text or ""), list(value.files or [])
+
+
+# Number formats for the phone cards of the import previews (desktop keeps
+# st.dataframe's own rendering).
+_PREVIEW_FMT = {"quantity": "{:,.4f}", "price": "{:,.2f}", "fee": "{:,.2f}"}
+
+
+def _tx_rows(txs: list) -> list[dict]:
+    return [
+        {"date": t.date, "ticker": t.ticker, "action": t.action,
+         "quantity": t.quantity, "price": t.price, "fee": t.fee,
+         "currency": t.currency}
+        for t in txs
+    ]
+
+
+def _issue_rows(checked: list) -> list[dict]:
+    return [
+        {"date": c.tx.date, "ticker": c.tx.ticker, "action": c.tx.action,
+         "quantity": c.tx.quantity, "price": c.tx.price,
+         "why": "; ".join(i.message for i in (c.errors or c.warnings))}
+        for c in checked
+    ]
+
+
+def _prepare_import(name: str, data: bytes, provider: llm.Provider,
+                    api_key: str) -> dict:
+    """Detect, validate and package one uploaded statement for preview.
+
+    Read-only. Unlike the Import page this passes no live symbol lookup: that
+    costs a network round-trip per unknown symbol against an API that already
+    rate-limits us, and it can only ever downgrade a warning — never keep a
+    bad row out. Unknown symbols are simply shown as warnings.
+    """
+    paths = auth.user_paths()
+    found = autodetect.detect(name, data, provider, api_key)
+    checked = validate(
+        found.result,
+        all_transactions(paths.db),
+        known=known_tickers(paths.watchlist, paths.db),
+    )
+    return {
+        "filename": name,
+        "label": found.label or tr("chat.import_source_llm"),
+        "platform": found.platform,
+        "kind": found.kind,
+        "unavailable": found.unavailable,
+        "transactions": checked.importable,
+        "rows": _tx_rows(checked.importable),
+        "flagged": _issue_rows(checked.flagged),
+        "rejected": _issue_rows(checked.rejected),
+        "skipped": found.result.skipped,
+    }
+
+
+def _ingest_uploads(ns: str, uploads: list[tuple[str, bytes]],
+                    provider: llm.Provider, api_key: str,
+                    history: list[dict]) -> None:
+    """Turn the just-attached files into a pending import and say so.
+
+    One statement at a time: several at once would need several previews and
+    several confirmations, and a second file is far more often the same export
+    twice than two different brokers. The rest are named as ignored rather
+    than silently dropped.
+    """
+    name, data = uploads[0]
+    # Reading, mapping and validating a statement takes a beat; hold the space
+    # as the table it is about to become rather than a spinner (skeletons.py).
+    shimmer = skeletons.reserve("table", rows=4, cols=5, title=True)
+    try:
+        pending = _prepare_import(name, data, provider, api_key)
+    finally:
+        shimmer.clear()
+
+    n = len(pending["transactions"])
+    if n:
+        st.session_state[_pending_key(ns)] = pending
+        note = tr("chat.import_found", filename=name, n=n,
+                  label=pending["label"])
+    elif pending["unavailable"]:
+        # The model never answered, so the file was never judged. Telling the
+        # user to fix their export here would send them off to do the wrong
+        # work entirely.
+        note = tr("chat.import_unavailable", filename=name)
+    elif pending["kind"] == llm_map.KIND_POSITIONS:
+        # A portfolio report: it says what is held today, not how it was
+        # bought. There is genuinely nothing to import, so say that and name
+        # the export that does carry the movements.
+        note = tr("chat.import_positions", filename=name) + "\n\n" + tr(
+            "chat.import_positions_help")
+    else:
+        note = tr("chat.import_none", filename=name) + "\n\n" + tr(
+            "chat.import_none_help")
+    if len(uploads) > 1:
+        note += "\n\n" + tr("chat.import_one_at_a_time",
+                             files=", ".join(u[0] for u in uploads[1:]))
+    history.append({"role": "assistant", "content": note, "action": "import"})
+    auth.save_chat(history)
+
+
+def _commit_import(ns: str, pending: dict, history: list[dict]) -> None:
+    """Write the previewed batch to the ledger and record it as undoable."""
+    paths = auth.user_paths()
+    ids = add_many(pending["transactions"], paths.db)
+    last_import.save(
+        last_import.ImportRecord(
+            filename=pending["filename"],
+            imported_at=datetime.now(UTC).isoformat(timespec="seconds"),
+            tx_ids=ids,
+            wiped=False,
+            platform=pending["platform"],
+        ),
+        paths.last_import,
+    )
+    history.append({
+        "role": "assistant",
+        "content": tr("chat.import_done", n=len(ids),
+                      total=len(all_transactions(paths.db))) + " " + tr(
+                          "chat.import_undo_hint"),
+        "action": "import",
+    })
+    auth.save_chat(history)
+    st.session_state.pop(_pending_key(ns), None)
+
+
+def _render_pending_import(ns: str, history: list[dict], box) -> bool:
+    """The preview card and its two buttons. True while one is waiting."""
+    pending = st.session_state.get(_pending_key(ns))
+    if not pending:
+        return False
+
+    with box, st.chat_message("assistant"):
+        st.caption(tr("chat.import_preview", filename=pending["filename"],
+                      label=pending["label"]))
+        # Seven columns in a chat bubble already crowd a desktop; on a phone
+        # they pan, so every preview grid stacks into per-row cards there
+        # (the symbol heads the card, the rest read as label/value lines).
+        data_table(pd.DataFrame(pending["rows"]), title="ticker",
+                   fmt=_PREVIEW_FMT, hide_index=True,
+                   height=200, width="stretch")
+        for key, rows in (("chat.import_warnings", pending["flagged"]),
+                          ("chat.import_rejected", pending["rejected"])):
+            if rows:
+                with st.expander(tr(key, n=len(rows))):
+                    data_table(pd.DataFrame(rows), title="ticker",
+                               fmt=_PREVIEW_FMT, hide_index=True,
+                               width="stretch")
+        if pending["skipped"]:
+            with st.expander(tr("chat.import_skipped",
+                                n=len(pending["skipped"]))):
+                data_table(pd.DataFrame(pending["skipped"]),
+                           hide_index=True, width="stretch")
+        with st.container(horizontal=True):
+            if st.button(tr("chat.import_button", n=len(pending["rows"])),
+                         type="primary", key=f"{ns}_do_import"):
+                _commit_import(ns, pending, history)
+                st.rerun()
+            if st.button(tr("chat.import_cancel"), key=f"{ns}_drop_import"):
+                st.session_state.pop(_pending_key(ns), None)
+                st.rerun()
+    return True
+
+
 # ------------------------------------------------------------- conversation
 
 # The tail of the conversation actually sent to the model (engine.recent):
@@ -440,7 +785,11 @@ def render_conversation(ns: str, provider: llm.Provider, model: str, api_key: st
     (auth.load_chat) and written back after every turn (auth.save_chat), so it
     survives a reload, a new session, or an ephemeral redeploy.
     """
-    hist_key = f"chat_history::{auth.watchlist_path()}"
+    conv = auth.active_conversation()
+    _render_thread_bar(ns, conv)
+    # Keyed by thread as well as account: switching conversations must not
+    # redraw the previous one's cached list.
+    hist_key = f"chat_history::{auth.watchlist_path()}::{conv['id']}"
     if hist_key not in st.session_state:
         st.session_state[hist_key] = auth.load_chat()
     history: list[dict] = st.session_state[hist_key]
@@ -457,13 +806,37 @@ def render_conversation(ns: str, provider: llm.Provider, model: str, api_key: st
                 if msg.get("skills"):  # which lens produced this answer
                     st.caption(_lens_label(msg["skills"]))
                 st.markdown(msg["content"])
+                for f in msg.get("files", []):  # what was attached to the turn
+                    st.caption(f":material/attach_file: {f['name']}")
                 if msg.get("web"):  # which pages grounded this answer
                     st.caption(_sources_label(msg["web"]))
 
-    if prompt := st.chat_input(tr("chat.placeholder"), key=f"{ns}_input"):
-        history.append({"role": "user", "content": prompt})
+    text, files = _submitted(st.chat_input(
+        tr("chat.placeholder"), key=f"{ns}_input",
+        accept_file="multiple", file_type=list(autodetect.supported_types()),
+        max_upload_size=MAX_UPLOAD_MB,
+    ))
+    if text or files:
+        turn: dict = {"role": "user", "content": text or tr("chat.import_ask")}
+        if files:
+            # Only the names go on the thread; the bytes ride in session state
+            # and are consumed by the ingest below on this same run.
+            turn["files"] = [{"name": f.name} for f in files]
+            st.session_state[_uploads_key(ns)] = [
+                (f.name, f.getvalue()) for f in files
+            ]
+        history.append(turn)
         with box, st.chat_message("user"):
-            st.markdown(prompt)
+            st.markdown(turn["content"])
+            for f in turn.get("files", []):
+                st.caption(f":material/attach_file: {f['name']}")
+
+    # An attached statement is an import, not a question: it is parsed,
+    # validated and previewed here, and never reaches the model as text.
+    uploads = st.session_state.pop(_uploads_key(ns), None)
+    if uploads:
+        _ingest_uploads(ns, uploads, provider, api_key, history)
+        st.rerun()
 
     # Generate whenever the last turn is a user turn still awaiting a reply
     # (covers both a fresh message and a Regenerate through one code path).
@@ -485,6 +858,8 @@ def render_conversation(ns: str, provider: llm.Provider, model: str, api_key: st
                 {"role": "assistant", "content": note, "action": act.kind}
             )
             auth.save_chat(history)
+            if _maybe_autotitle(conv, history, provider, api_key):
+                st.rerun()
         else:
             if provider.id == "free" and not _spend_free_quota():
                 pending.clear()
@@ -498,20 +873,34 @@ def render_conversation(ns: str, provider: llm.Provider, model: str, api_key: st
                 # the moment the model's first token arrives (write_stream
                 # itself shows nothing until then).
                 try:
-                    skills = _resolve_skills(provider, api_key, history)
-                    queries = _plan_web(provider, api_key, history)
-                    hits: list[chat_web.Result] = []
-                    if queries:
-                        hits = chat_web.search(queries)
+                    # Session state is read here, on the script thread; the
+                    # three lookups then run concurrently off it (routing,
+                    # search + page reads, quotes — ~15s back to back).
+                    prefs = auth.load_prefs()
+                    view = _view_context().strip()
+                    watchlist = auth.watchlist_path()
+                    focus = st.session_state.get("picker_selected") or ""
+                    skills, hits, live = engine.in_parallel(
+                        lambda: _resolve_skills(provider, api_key, history,
+                                                prefs, view),
+                        lambda: _gather_web(provider, api_key, history,
+                                            prefs, view),
+                        lambda: _live_quotes(history[-1]["content"],
+                                             watchlist, focus),
+                    )
+                    skills, hits, live = skills or [], hits or [], live or []
                     if skills:
                         st.caption(_lens_label(skills))
-                    # Hits ride on the outgoing copy of the user turn, not the
-                    # system prompt — the stored history keeps the user's own
-                    # text, and provider prompt caches stay warm.
+                    # Hits and quotes ride on the outgoing copy of the user
+                    # turn, not the system prompt — the stored history keeps
+                    # the user's own text, and prompt caches stay warm.
                     msgs = _recent(history)
                     if hits:
                         msgs[-1]["content"] = chat_web.augment(
                             msgs[-1]["content"], hits)
+                    if live:
+                        msgs[-1]["content"] = market.augment(
+                            msgs[-1]["content"], live)
                     answer = st.write_stream(
                         _retire_on_first_chunk(
                             pending,
@@ -538,6 +927,11 @@ def render_conversation(ns: str, provider: llm.Provider, model: str, api_key: st
                 turn["web"] = web_sources
             history.append(turn)
             auth.save_chat(history)  # persist the completed user+assistant turn
+            if _maybe_autotitle(conv, history, provider, api_key):
+                st.rerun()
+
+    if _render_pending_import(ns, history, box):
+        return  # a batch is waiting on the user — regenerating makes no sense
 
     if history and history[-1]["role"] == "assistant":
         with box, st.container(horizontal=True):
@@ -550,6 +944,10 @@ def render_conversation(ns: str, provider: llm.Provider, model: str, api_key: st
                          key=f"{ns}_clear"):
                 history.clear()  # same list object as session_state — stays empty
                 auth.save_chat(history)
+                # An emptied thread keeps a title about turns that are gone;
+                # drop it (a no-op on one the user named) so the next question
+                # re-titles it.
+                auth.autotitle_conversation(conv["id"], "")
                 st.rerun()
 
 
@@ -793,14 +1191,16 @@ def _panel_body() -> None:
             _pick_model(provider, f"panel_model_{provider.id}")  # persists the choice
         _pick_skills()
         _pick_web()
-        # Forget only makes sense when this provider actually has a key; while
-        # it has one the BYOK form below stays hidden, so forgetting is the
-        # only path to entering a different key.
-        if provider.needs_key and active_key(provider) and st.button(
-            tr("chat.forget"), icon=":material/logout:", key="panel_forget"
-        ):
-            _forget_key(provider.id)
-            st.rerun()
+        # The key itself is shown (masked, revealable) so it can be checked
+        # against the provider console. Forgetting is the only path to a
+        # different key, since the BYOK form stays hidden while one is set.
+        configured = active_key(provider) if provider.needs_key else ""
+        if configured:
+            _show_key(provider, configured)
+            if st.button(tr("chat.forget"), icon=":material/logout:",
+                         key="panel_forget"):
+                _forget_key(provider.id)
+                st.rerun()
 
     key = active_key(provider)  # provider may have just switched in the expander
     if provider.needs_key and not key:

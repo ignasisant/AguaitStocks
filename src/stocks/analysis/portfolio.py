@@ -683,33 +683,73 @@ def market_live(ticker: str, now_utc: datetime | None = None) -> bool:
     return _session_open(*hours, now_utc) if hours else us_market_open(now_utc)
 
 
-def _session_move(ticker: str) -> float | None:
-    """Last regular-session % move (native) for `ticker` via fast_info:
-    lastPrice / regularMarketPreviousClose - 1.
+def us_extended_session(now_utc: datetime | None = None) -> str | None:
+    """"pre" / "post" while a US extended-hours window is open, else None.
 
-    Robust when the market's closed — regularMarketPreviousClose is always the
-    prior regular close, so this reads the last completed session's move even
-    while a stale/flat premarket daily bar makes the close-to-close basket
-    collapse to ~0%. None when either quote is missing."""
+    Yahoo quotes those windows (04:00-09:30 and 16:00-20:00 America/New_York),
+    so the day change keeps moving outside the regular session. Time-based, no
+    network, same holiday caveat as `_session_open`."""
+    if _session_open("America/New_York", (4, 0), (9, 30), now_utc):
+        return "pre"
+    if _session_open("America/New_York", (16, 0), (20, 0), now_utc):
+        return "post"
+    return None
+
+
+def market_active(ticker: str, now_utc: datetime | None = None) -> bool:
+    """Whether `ticker` has a live quote now: regular session OR US pre/post.
+
+    Drives the dimmed day-change cells. A premarket quote is live data, so it
+    reads in full colour; a name whose exchange is fully shut stays dimmed.
+    Only US symbols get an extended feed here, so anything on a foreign
+    exchange follows `market_live`."""
+    if market_live(ticker, now_utc):
+        return True
+    from stocks.data.fetch import resolve
+
+    symbol = resolve(ticker)
+    suffix = symbol.rsplit(".", 1)[1].upper() if "." in symbol else ""
+    return suffix not in _EXCHANGE_HOURS and us_extended_session(now_utc) is not None
+
+
+def _session_move(ticker: str) -> float | None:
+    """Move since the previous regular close, extended hours included.
+
+    Reads Yahoo's quote (`.info`): during premarket `regularMarketPrice` is
+    still the last close, so `preMarketPrice / regularMarketPrice - 1` is the
+    move so far today; after the close `postMarketPrice /
+    regularMarketPreviousClose - 1` compounds the session with after-hours.
+    Outside those windows it falls back to the last completed session
+    (`regularMarketPrice / regularMarketPreviousClose - 1`), which is what the
+    daily close-to-close basket gets wrong (a stale/flat premarket bar collapses
+    it to ~0%). None when the quote is missing."""
     import yfinance as yf
 
     from stocks.data.fetch import resolve
 
     try:
-        fi = yf.Ticker(resolve(ticker)).fast_info
-        last, prev = fi["lastPrice"], fi["regularMarketPreviousClose"]
-        if last and prev:
-            return float(last) / float(prev) - 1
+        quote = yf.Ticker(resolve(ticker)).info
+        state = str(quote.get("marketState") or "")
+        regular = quote.get("regularMarketPrice")
+        prev = quote.get("regularMarketPreviousClose")
+        pre, post = quote.get("preMarketPrice"), quote.get("postMarketPrice")
+        if state.startswith("PRE") and pre and regular:
+            return float(pre) / float(regular) - 1
+        if post and prev and not state.startswith("PRE"):
+            return float(post) / float(prev) - 1
+        if regular and prev:
+            return float(regular) / float(prev) - 1
     except Exception:
         pass
     return None
 
 
 def session_moves(tickers: list[str], max_workers: int = 8) -> dict[str, float]:
-    """Last regular-session % move per ticker (native), fetched concurrently.
+    """Day % move per ticker (native), extended hours included, concurrent.
 
-    Feeds the "market closed → last completed session" day-change cells so they
-    show the real move instead of a flat premarket 0%. Tickers whose quote is
+    Feeds the off-session day-change cells: premarket / after-hours while those
+    windows are open, the last completed session once they close — never the
+    flat premarket 0% the daily basket can produce. Tickers whose quote is
     unavailable are absent (caller falls back to the basket value)."""
     if not tickers:
         return {}
