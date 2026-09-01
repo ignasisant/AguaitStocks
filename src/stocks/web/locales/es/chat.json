@@ -26,6 +26,8 @@
   "chat.placeholder": "Pregunta sobre tu cartera…",
   "chat.invalid_key": "Clave de API de {provider} no válida.",
   "chat.api_error": "El asistente no está disponible ahora mismo — inténtalo de nuevo en un momento.",
+  "chat.provider_busy": "{provider} está saturado ahora mismo — reintenta en un momento o cambia de proveedor en Ajustes de IA.",
+  "chat.fallback_note": "Respondido por {provider} — {chosen} no ha respondido.",
   "chat.no_credits": "Tu clave de {provider} no tiene crédito ni cuota disponible. Añade facturación en la consola del proveedor para seguir usando el asistente.",
   "chat.no_enc": "Persistencia desactivada — falta el secreto [chat] enc_key; la clave se mantiene solo en esta sesión.",
   "chat.free_note": "Asistente gratuito con límites diarios compartidos — las respuestas pueden venir de distintos modelos de IA. Añade tu propia clave de API en ajustes para un proveedor concreto.",

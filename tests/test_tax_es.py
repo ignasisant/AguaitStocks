@@ -86,6 +86,48 @@ def test_quick_roundtrip_loss_not_flagged():
     assert ty.deductible_loss_eur == pytest.approx(300)
 
 
+def test_deferred_loss_recovers_when_replacement_sold_next_year():
+    # loss deferred in 2025 (rebuy 2025-04-10); replacement lot sold 2026
+    # -> the 300 unlocks as a recovered loss in 2026, not 2025.
+    realized = [
+        sale("MSFT", "2024-01-01", "2025-03-01", 1000, 700),   # -300, deferred
+        sale("MSFT", "2025-04-10", "2026-05-01", 800, 900),    # replacement sold
+    ]
+    buy_dates = {"MSFT": ["2024-01-01", "2025-04-10"]}
+    ty25 = fiscal_year(realized, 2025, buy_dates)
+    assert ty25.deferred_loss_eur == pytest.approx(300)
+    assert ty25.recovered_loss_eur == pytest.approx(0)
+    ty26 = fiscal_year(realized, 2026, buy_dates)
+    assert ty26.recovered_loss_eur == pytest.approx(300)
+    assert ty26.net_taxable_eur == pytest.approx(100 - 300)  # 100 gain - recovered
+
+
+def test_deferred_loss_recovers_within_same_year():
+    # rebuy AND resale of the replacement in the same year: deferral and
+    # recovery cancel, so the loss stays effectively deductible in 2025.
+    realized = [
+        sale("MSFT", "2024-01-01", "2025-03-01", 1000, 700),   # -300, deferred
+        sale("MSFT", "2025-04-10", "2025-09-01", 800, 800),    # replacement sold
+    ]
+    buy_dates = {"MSFT": ["2024-01-01", "2025-04-10"]}
+    ty = fiscal_year(realized, 2025, buy_dates)
+    assert ty.deferred_loss_eur == pytest.approx(300)
+    assert ty.recovered_loss_eur == pytest.approx(300)
+    assert ty.net_taxable_eur == pytest.approx(-300)
+
+
+def test_partial_replacement_sale_recovers_pro_rata():
+    # 1-share deferred loss; replacement sold in two half-share pieces across
+    # two years -> the loss unlocks 50/50.
+    lot = RealizedSale("MSFT", "2024-01-01", "2025-03-01", 1, 1000, 700, "EUR")
+    half1 = RealizedSale("MSFT", "2025-04-10", "2026-02-01", 0.5, 400, 450, "EUR")
+    half2 = RealizedSale("MSFT", "2025-04-10", "2027-02-01", 0.5, 400, 500, "EUR")
+    buy_dates = {"MSFT": ["2024-01-01", "2025-04-10"]}
+    realized = [lot, half1, half2]
+    assert fiscal_year(realized, 2026, buy_dates).recovered_loss_eur == pytest.approx(150)
+    assert fiscal_year(realized, 2027, buy_dates).recovered_loss_eur == pytest.approx(150)
+
+
 def test_net_loss_carries_forward_no_tax():
     realized = [sale("MSFT", "2024-01-01", "2025-03-01", 1000, 400)]  # -600
     ty = fiscal_year(realized, 2025, buy_dates={"MSFT": ["2024-01-01"]})

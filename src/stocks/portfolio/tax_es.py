@@ -8,7 +8,9 @@ planning aid. Key rules encoded:
 * Art. 33.5.f "regla de los dos meses": a loss on listed securities is NOT
   deductible in the year if identical securities were (re)bought within the two
   months before or after the sale. The loss is deferred, not lost — it becomes
-  computable when the replacement shares are later sold. We flag & defer it.
+  computable as the replacement shares are later sold. We defer it in the sale
+  year and re-integrate it (pro-rata by replacement quantity sold) in the year
+  the replacement shares are transmitted — see `recovered_loss_eur`.
 * Losses offset gains within the savings base; any excess carries forward 4
   years (surfaced as a note, not auto-applied across years here).
 * Modelo 720 / foreign-asset reporting flag (> 50.000 EUR held abroad).
@@ -71,6 +73,9 @@ class TaxYear:
     realized_gain_eur: float = 0.0  # sum of gains from winning sales
     realized_loss_eur: float = 0.0  # sum of |losses| from losing sales
     deferred_loss_eur: float = 0.0  # losses disallowed this year (2-month rule)
+    # Losses deferred by the 2-month rule (this year or earlier) that become
+    # deductible THIS year because the replacement shares were sold this year.
+    recovered_loss_eur: float = 0.0
     sales: list[RealizedSale] = field(default_factory=list)
 
     @property
@@ -80,7 +85,11 @@ class TaxYear:
     @property
     def net_taxable_eur(self) -> float:
         """Net savings base from securities (may be negative -> carryforward)."""
-        return self.realized_gain_eur - self.deductible_loss_eur
+        return (
+            self.realized_gain_eur
+            - self.deductible_loss_eur
+            - self.recovered_loss_eur
+        )
 
     @property
     def estimated_tax_eur(self) -> float:
@@ -111,24 +120,68 @@ def fiscal_year(
             continue
         loss = -gain
         out.realized_loss_eur += loss
-        if _has_replacement(s, buy_dates.get(s.ticker, [])):
+        if _replacement_dates(s, buy_dates.get(s.ticker, [])):
             out.deferred_loss_eur += loss
+    out.recovered_loss_eur = _recovered_losses(realized, year, buy_dates)
     return out
 
 
-def _has_replacement(sale: RealizedSale, ticker_buy_dates: list[str]) -> bool:
-    """A loss is deferred only if homogeneous shares acquired *after* the sold
-    lot exist within the 2-month window — i.e. a genuine replacement position,
-    not the sold lot's own purchase nor an older parcel."""
+def _replacement_dates(
+    sale: RealizedSale, ticker_buy_dates: list[str]
+) -> set[str]:
+    """Buy dates that defer this sale's loss: homogeneous shares acquired
+    *after* the sold lot, within the 2-month window — i.e. a genuine
+    replacement position, not the sold lot's own purchase nor an older
+    parcel."""
     sell = date.fromisoformat(sale.sell_date)
     lot_buy = date.fromisoformat(sale.buy_date)
+    out: set[str] = set()
     for d in ticker_buy_dates:
         b = date.fromisoformat(d)
         if b <= lot_buy:  # the sold lot itself, or an older one: not a replacement
             continue
         if _within_two_months(sell, b):
-            return True
-    return False
+            out.add(d)
+    return out
+
+
+def _recovered_losses(
+    realized: list[RealizedSale], year: int, buy_dates: dict[str, list[str]]
+) -> float:
+    """Deferred losses that unlock in `year` (art. 33.5.f, second leg).
+
+    A loss deferred by the 2-month rule becomes computable as the replacement
+    shares are transmitted. FIFO sales carry their lot's buy date, so a sale
+    of a replacement lot is any later sale whose lot was bought on one of the
+    deferring dates. Buy quantities aren't in `buy_dates` (dates only), so
+    each replacement share sold is taken to free one deferred share's loss,
+    pro-rata, capped at the full deferred amount.
+    """
+    total = 0.0
+    for s in realized:
+        if s.gain_eur >= 0 or s.quantity <= 0:
+            continue
+        repl = _replacement_dates(s, buy_dates.get(s.ticker, []))
+        if not repl:
+            continue
+        consuming = sorted(
+            (
+                r
+                for r in realized
+                if r.ticker == s.ticker
+                and r.buy_date in repl
+                and r.sell_date >= s.sell_date
+            ),
+            key=lambda r: r.sell_date,
+        )
+        block = s.quantity  # shares whose loss the repurchase blocks
+        cum = 0.0
+        for r in consuming:
+            prev = min(cum, block)
+            cum += r.quantity
+            if int(r.sell_date[:4]) == year:
+                total += (min(cum, block) - prev) / block * -s.gain_eur
+    return total
 
 
 @dataclass

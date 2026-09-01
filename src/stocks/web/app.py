@@ -40,6 +40,7 @@ from stocks.web.i18n import t as tr  # noqa: E402
 from stocks.web.widgets import (  # noqa: E402
     ds_vars_css,
     is_mobile,
+    render_bottom_nav,
     render_topbar,
     ticker_picker,
 )
@@ -70,6 +71,9 @@ st.html(
       /* Epilogue — the DS display face for KPI numbers; config.toml can only
          load one body/heading/code font each, so it rides in here. */
       @import url('https://fonts.googleapis.com/css2?family=Epilogue:wght@600;700;800&display=swap');
+      /* DS type spec: numerals lining + tabular at page level, so every
+         figure column (tables, KPIs, tickers) aligns without per-cell rules. */
+      [data-testid="stApp"] {font-variant-numeric: lining-nums tabular-nums;}
       .block-container {padding-top: 1.2rem; padding-bottom: 1rem;
                         padding-left: 2.5rem; padding-right: 2.5rem; max-width: 100%;}
       /* Desktop only: reclaim the header strip. On phones the header must
@@ -90,9 +94,11 @@ st.html(
       @media (max-width: 640px) {
         /* The fixed header (3.75rem) overlays content on phones; clear it
            exactly instead of relying on the accumulated hidden-element gaps
-           below to push the first heading past it. */
-        .block-container {padding-left: 0.75rem; padding-right: 0.75rem;
-                          padding-top: 4rem;}
+           below to push the first heading past it. Sides are the DS mobile
+           16px page margin; the bottom pad clears the fixed bottom tab bar
+           (widgets.render_bottom_nav). */
+        .block-container {padding-left: 1rem; padding-right: 1rem;
+                          padding-top: 4rem; padding-bottom: 5.5rem;}
         /* Script-only st.html containers (the card tagger, chat wiring) are
            zero-height but still flex items, so each contributes one 0.55rem
            vertical-block gap above the first heading. (Style-only blocks are
@@ -125,7 +131,7 @@ st.html(
            CSS applies, so the widened box is picked up on first render. */
         .topstocks-card
         [data-testid="stElementContainer"]:has(> [data-testid="stPlotlyChart"]) {
-          margin-left: -1.2rem; margin-right: -1.2rem;
+          margin-left: -1rem; margin-right: -1rem;
         }
         /* Markdown tables — the one table shape the page can't restructure,
            because the assistant writes them at runtime (chat answers, skill
@@ -172,7 +178,7 @@ st.html(
         background: var(--ag-success-fill); color: var(--ag-up) !important;
       }
       [data-testid="stMetricDelta"]:has([data-testid="stMetricDeltaIcon-Down"]) {
-        background: var(--ag-critical-fill); color: var(--ag-down) !important;
+        background: var(--ag-down-fill); color: var(--ag-down) !important;
       }
       [data-testid="stCaptionContainer"] p {font-size: var(--ag-fs-xs); margin-bottom: 0;}
       h1 {font-size: var(--ag-fs-3xl); padding: 0.2rem 0;}
@@ -215,15 +221,16 @@ st.html(
          the purple-900 fill, the purple-500 accent bar and full-strength
          text. aria-current marks the active link (Streamlit sets it). */
       [data-testid="stSidebarNavLink"] {
-        border-radius: var(--ag-radius-sm);
+        border-radius: var(--ag-radius-nav);
         border-left: 2px solid transparent;
         margin: 1px 8px 1px 0;
-        padding-top: 0.3rem; padding-bottom: 0.3rem;
+        padding-top: 7px; padding-bottom: 7px;
+        transition: background 100ms ease-in-out;
       }
       [data-testid="stSidebarNavLink"] span {
         color: var(--ag-text-secondary); font-size: var(--ag-fs-md); font-weight: 500;
       }
-      [data-testid="stSidebarNavLink"]:hover {background: var(--ag-surface-card);}
+      [data-testid="stSidebarNavLink"]:hover {background: var(--ag-surface-hover);}
       [data-testid="stSidebarNavLink"][aria-current="page"] {
         background: var(--ag-purple-900);
         border-left-color: var(--ag-brand-accent);
@@ -246,10 +253,10 @@ st.html(
       [data-testid="stButtonGroup"] button[data-variant="segmented_control"],
       [data-testid="stButtonGroup"] button[data-variant="pills"] {
         border: 1px solid var(--ag-border);
-        border-radius: var(--ag-radius-sm);
+        border-radius: var(--ag-radius-nav);
         background: transparent;
         padding: 5px 14px;
-        transition: border-color 100ms ease-in-out, background 100ms ease-in-out;
+        transition: border-color 50ms ease-in-out, background 50ms ease-in-out;
       }
       [data-testid="stButtonGroup"] button[data-variant="segmented_control"] p,
       [data-testid="stButtonGroup"] button[data-variant="pills"] p {
@@ -257,8 +264,16 @@ st.html(
       }
       [data-testid="stButtonGroup"] button[data-variant="segmented_control"]:hover,
       [data-testid="stButtonGroup"] button[data-variant="pills"]:hover {
-        border-color: var(--ag-text-faint);
+        border-color: var(--ag-border-focus);
         background: transparent;
+      }
+      /* Range-selector hover per the DS: the label lifts to primary text;
+         the fill never changes (spec 08 — "Tab inactiva / leyenda" family). */
+      [data-testid="stButtonGroup"]
+        button[data-variant="segmented_control"]:not([data-selected="true"]):hover p,
+      [data-testid="stButtonGroup"]
+        button[data-variant="pills"]:not([data-selected="true"]):hover p {
+        color: var(--ag-text-primary);
       }
       [data-testid="stButtonGroup"]
         button[data-variant="segmented_control"][data-selected="true"],
@@ -270,6 +285,134 @@ st.html(
         button[data-variant="segmented_control"][data-selected="true"] p,
       [data-testid="stButtonGroup"] button[data-variant="pills"][data-selected="true"] p {
         color: var(--ag-purple-400);
+      }
+      /* Tabs — the DS tab spec (Aguait Tabs canvas): quiet underline nav, no
+         chip wash. Rest labels in neutral-400 at 500; hover lifts the label
+         to primary over a neutral-800 underline (an inset shadow, so the
+         strip never reflows); the active tab is purple-500 at 600 over the
+         sliding 2px accent bar. The full-width track stays the 1px
+         neutral-800 rule. data-baseweb hooks are stable across releases;
+         emotion classes are not. */
+      [data-testid="stTabs"] [data-baseweb="tab-list"] {
+        gap: 28px;
+      }
+      [data-testid="stTabs"] button[data-baseweb="tab"] {
+        padding: 0 0 13px;
+        border-radius: 0;
+        background: transparent;
+        transition: box-shadow 50ms ease-in-out;
+      }
+      [data-testid="stTabs"] button[data-baseweb="tab"] p {
+        font-size: var(--ag-fs-lg); font-weight: 500;
+        color: var(--ag-text-secondary);
+        transition: color 50ms ease-in-out;
+      }
+      [data-testid="stTabs"]
+        button[data-baseweb="tab"]:not([aria-selected="true"]):hover {
+        box-shadow: inset 0 -2px 0 var(--ag-border);
+      }
+      [data-testid="stTabs"]
+        button[data-baseweb="tab"]:not([aria-selected="true"]):hover p {
+        color: var(--ag-text-primary);
+      }
+      [data-testid="stTabs"] button[data-baseweb="tab"][aria-selected="true"] p {
+        color: var(--ag-brand-accent); font-weight: 600;
+      }
+      [data-testid="stTabs"] [data-baseweb="tab-highlight"] {
+        background: var(--ag-brand-accent); height: 2px;
+      }
+      [data-testid="stTabs"] [data-baseweb="tab-border"] {
+        background: var(--ag-border); height: 1px;
+      }
+      /* Count badges in tab labels (markdown `:gray-badge[n]`): the spec's
+         mono pill — neutral fill at rest, purple-800/purple-300 on the
+         active tab. Overrides the badge directive's own palette. */
+      [data-testid="stTabs"] button[data-baseweb="tab"]
+        [data-testid="stMarkdownBadge"] {
+        display: inline-flex; align-items: center; justify-content: center;
+        min-width: 18px; height: 18px; padding: 0 5px;
+        border-radius: var(--ag-radius-pill); vertical-align: middle;
+        background: var(--ag-border); color: var(--ag-text-secondary);
+        font-family: "Martian Mono", monospace;
+        font-size: var(--ag-fs-2xs); font-weight: 500; line-height: 1;
+      }
+      [data-testid="stTabs"] button[data-baseweb="tab"][aria-selected="true"]
+        [data-testid="stMarkdownBadge"] {
+        background: var(--ag-purple-800); color: var(--ag-purple-300);
+      }
+      /* Buttons — DS component spec: the primary CTA carries the purple glow
+         and darkens one step on hover (two when pressed); secondary stays
+         outlined and washes the hover surface behind the focus-step border.
+         50ms per the motion spec — no scale, no fades, no new shadows. */
+      .stButton button, .stDownloadButton button, .stFormSubmitButton button {
+        transition: background 50ms ease-in-out, border-color 50ms ease-in-out,
+                    color 50ms ease-in-out;
+      }
+      .stButton button[kind="primary"],
+      .stFormSubmitButton button[kind="primary"] {
+        box-shadow: 0px 4px 12px var(--ag-cta-glow);
+      }
+      .stButton button[kind="primary"]:hover,
+      .stFormSubmitButton button[kind="primary"]:hover {
+        background-color: var(--ag-purple-700);
+        border-color: var(--ag-purple-700);
+      }
+      .stButton button[kind="primary"]:active,
+      .stFormSubmitButton button[kind="primary"]:active {
+        background-color: var(--ag-purple-800);
+        border-color: var(--ag-purple-800);
+      }
+      .stButton button[kind="secondary"]:hover,
+      .stDownloadButton button:hover,
+      .stFormSubmitButton button[kind="secondary"]:hover {
+        background-color: var(--ag-surface-hover);
+        border-color: var(--ag-border-focus);
+        color: var(--ag-text-primary);
+      }
+      /* UI tooltips (widget help "?") — DS spec 08: page-tone surface, radius
+         8, 6x10 padding, 12px primary text, dialog shadow, no arrow. */
+      [data-testid="stTooltipContent"] {
+        background: var(--ag-surface-page);
+        border: 1px solid var(--ag-border);
+        border-radius: var(--ag-radius-sm);
+        box-shadow: var(--ag-shadow-overlay);
+        padding: 6px 10px;
+        font-size: var(--ag-fs-sm); color: var(--ag-text-primary);
+      }
+      /* Text-entry focus flips the border to the accent (DS search-field
+         spec); the theme's primaryColor would paint the CTA purple instead. */
+      [data-testid="stTextInput"] [data-baseweb="input"]:focus-within,
+      [data-testid="stNumberInput"] [data-baseweb="input"]:focus-within,
+      [data-testid="stTextArea"] [data-baseweb="textarea"]:focus-within {
+        border-color: var(--ag-brand-accent) !important;
+      }
+      @media (max-width: 640px) {
+        /* The strip scrolls sideways on phones (active tab auto-centers, see
+           the tab-center script); the scrollbar under it is just noise. When
+           the strip actually overflows (data-ts-overflow, set by the same
+           script) a page-color fade + chevron cues the hidden tabs — a
+           sticky flex item, not an absolute overlay, so it pins to the
+           scrollport edge and spans the strip height with no magic numbers. */
+        [data-testid="stTabs"] [data-baseweb="tab-list"] {
+          gap: 24px; scrollbar-width: none;
+        }
+        [data-testid="stTabs"] [data-baseweb="tab-list"]::-webkit-scrollbar {
+          display: none;
+        }
+        [data-testid="stTabs"] button[data-baseweb="tab"] {padding: 0 0 12px;}
+        [data-testid="stTabs"]
+          [data-baseweb="tab-list"][data-ts-overflow]::after {
+          content: "";
+          position: sticky; right: 0;
+          flex: 0 0 44px; margin-left: -44px; align-self: stretch;
+          pointer-events: none;
+          /* Chevron stroke is TEXT_MUTED #827F8C — var() can't reach inside
+             a data URI. */
+          background:
+            url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23827F8C' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='9 18 15 12 9 6'/%3E%3C/svg%3E")
+              right 6px center / 16px 16px no-repeat,
+            linear-gradient(to right, transparent, var(--ag-surface-page) 70%);
+        }
       }
       /* Toasts (stocks.web.notices — transient data-fetch notices) park
          bottom-LEFT. Streamlit anchors the container top-right, where it lands
@@ -287,6 +430,73 @@ st.html(
         left: 0 !important;
         flex-direction: column-reverse !important;
         align-items: flex-start !important;
+      }
+      /* ---- DS mobile spec (section 10) ---- Trailing block: these override
+         base rules above, so they must stay LAST in this stylesheet. */
+      @media (max-width: 640px) {
+        /* 12px between cards, 16px inside them (vs the tighter desktop
+           stack and its 1.1/1.2rem card padding). */
+        [data-testid="stMainBlockContainer"] [data-testid="stVerticalBlock"] {
+          gap: 0.75rem;
+        }
+        [data-testid="stMainBlockContainer"]
+          [data-testid="stVerticalBlock"].topstocks-card {
+          padding: 1rem;
+        }
+        /* 44px minimum touch targets on buttons, chips and tabs. */
+        .stButton button, .stDownloadButton button, .stFormSubmitButton button,
+        [data-testid="stButtonGroup"] button,
+        [data-testid="stTabs"] button[data-baseweb="tab"] {
+          min-height: 44px;
+        }
+        /* Period selector goes full-width and JOINED on phones: card-tone
+           container, borderless flexed cells, active cell on purple-900 with
+           a primary-text label. Segmented only — multi-row pills keep the
+           detached chips. */
+        [data-testid="stButtonGroup"] > div[data-orientation]:has(
+            button[data-variant="segmented_control"]) {
+          width: 100%;
+          background: var(--ag-surface-card);
+          border: 1px solid var(--ag-border);
+          border-radius: var(--ag-radius-sm);
+          padding: 3px;
+        }
+        [data-testid="stButtonGroup"] button[data-variant="segmented_control"] {
+          flex: 1 1 0; min-width: 0; justify-content: center;
+          border-color: transparent; padding: 5px 4px;
+        }
+        /* Never ellipsize a cell label ("20…"): the labels are 2-4 chars by
+           design, so let them paint over the 4px cell padding instead. */
+        [data-testid="stButtonGroup"] button[data-variant="segmented_control"]
+          [data-testid="stMarkdownContainer"],
+        [data-testid="stButtonGroup"] button[data-variant="segmented_control"] p {
+          overflow: visible !important; text-overflow: clip !important;
+          min-width: max-content;
+        }
+        [data-testid="stButtonGroup"]
+          button[data-variant="segmented_control"]:hover,
+        [data-testid="stButtonGroup"]
+          button[data-variant="segmented_control"][data-selected="true"] {
+          border-color: transparent;
+        }
+        [data-testid="stButtonGroup"]
+          button[data-variant="segmented_control"][data-selected="true"] p {
+          color: var(--ag-text-primary);
+        }
+        /* Toasts ride above the fixed bottom tab bar. */
+        [data-testid="stToastContainer"] {bottom: 5.5rem !important;}
+      }
+      /* Touch devices: no hover states — controls wash the hover surface
+         while pressed (DS mobile spec). The primary CTA keeps its own
+         purple pressed step from the button rules above. */
+      @media (hover: none) {
+        [data-testid="stSidebarNavLink"]:active,
+        .stButton button[kind="secondary"]:active,
+        .stDownloadButton button:active,
+        [data-testid="stButtonGroup"] button:not([data-selected="true"]):active,
+        [class*="st-key-topbar_results"] button:active {
+          background: var(--ag-surface-hover) !important;
+        }
       }
     </style>
     """
@@ -321,6 +531,78 @@ if is_mobile():
         </style>
         """
     )
+    # Touch chart readout — the DS mobile chart spec: the floating tooltip is
+    # replaced by a fixed reading row pinned to the chart's top-left (fecha ·
+    # precio · variación) that updates as the finger moves; the crosshair
+    # stays. The row's text is lifted from the tooltip Plotly already resolved
+    # (so every chart's custom hover template survives verbatim) and the
+    # floating boxes themselves are hidden. Injected after the base styles, so
+    # these rules win on source order. NOTE: no left angle bracket may appear
+    # inside the style block (DOMPurify drops the whole block).
+    st.html(
+        """
+        <style>
+          [data-testid="stPlotlyChart"] { position: relative; }
+          .ts-chart-readout {
+            position: absolute; top: 8px; left: 8px; z-index: 5;
+            background: var(--ag-surface-page-veil);
+            border-radius: var(--ag-radius-sm);
+            padding: 4px 8px; pointer-events: none;
+            font-size: var(--ag-fs-sm); color: var(--ag-text-primary);
+            max-width: calc(100% - 16px);
+            overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+          }
+          .ts-chart-readout:empty { display: none; }
+          /* Hide the floating boxes; spike/crosshair lines live outside these
+             groups and stay visible. */
+          .js-plotly-plot .hoverlayer g.legend,
+          .js-plotly-plot .hoverlayer g.hovertext { display: none; }
+        </style>
+        <script>
+        (function () {
+          if (window.__topstocksChartReadout) return;  /* wire once */
+          window.__topstocksChartReadout = true;
+          const read = (gd, ro) => {
+            const layer = gd.querySelector(".hoverlayer");
+            if (!layer) return;
+            const parts = [];
+            layer.querySelectorAll("text").forEach((t) => {
+              const s = Array.from(t.childNodes)
+                .map((n) => n.textContent).join(" ")
+                .replace(/\\s+/g, " ").trim();
+              if (s && parts.indexOf(s) === -1) parts.push(s);
+            });
+            if (parts.length) ro.textContent = parts.join(" \\u00b7 ");
+          };
+          const wire = () => {
+            document
+              .querySelectorAll(".js-plotly-plot:not([data-ts-readout])")
+              .forEach((gd) => {
+                if (typeof gd.on !== "function") return;
+                gd.setAttribute("data-ts-readout", "1");
+                const host =
+                  gd.closest('[data-testid="stPlotlyChart"]') || gd.parentElement;
+                if (!host) return;
+                let ro = host.querySelector(".ts-chart-readout");
+                if (!ro) {
+                  ro = document.createElement("div");
+                  ro.className = "ts-chart-readout";
+                  host.appendChild(ro);
+                }
+                gd.on("plotly_hover", () => {
+                  requestAnimationFrame(() => read(gd, ro));
+                });
+              });
+          };
+          new MutationObserver(wire).observe(document.body, {
+            subtree: true, childList: true,
+          });
+          wire();
+        })();
+        </script>
+        """,
+        unsafe_allow_javascript=True,
+    )
 
 # Card tagger for the CSS above. Bordered and borderless st.container() render
 # identical DOM in Streamlit 1.60 (same stVerticalBlock testid; the border is
@@ -348,6 +630,71 @@ st.html(
       };
       new MutationObserver(tag).observe(document.body, {subtree: true, childList: true});
       tag();
+    })();
+    </script>
+    """,
+    unsafe_allow_javascript=True,
+)
+
+# Keep the ACTIVE tab centered in overflowing tab bars. On phones the tab bar
+# scrolls horizontally; without this, selecting the right-most visible tab
+# leaves the next one off-screen, so you can never see where to go. Centering
+# on selection (and on load, for the tab restored from ?tab=) always keeps a
+# neighbor visible on each side. Desktop is untouched: the scroll only fires
+# when the list actually overflows. scrollTo on the list itself — not
+# scrollIntoView — so the page never jumps vertically. The same wiring stamps
+# data-ts-overflow on overflowing strips, which gates the mobile edge-fade
+# CSS above.
+st.html(
+    """
+    <script>
+    (function () {
+      if (window.__topstocksTabCenter) return;  /* survive reruns — wire once */
+      window.__topstocksTabCenter = true;
+      /* data-ts-overflow drives the mobile edge-fade CSS: only a strip that
+         actually scrolls gets the fade + chevron cue. */
+      const flag = (list) =>
+        list.toggleAttribute(
+          "data-ts-overflow", list.scrollWidth > list.clientWidth + 1);
+      const center = (tab) => {
+        const list = tab && tab.closest('[data-baseweb="tab-list"]');
+        if (!list) return;
+        flag(list);
+        if (list.scrollWidth <= list.clientWidth + 1) return;
+        const lr = list.getBoundingClientRect();
+        const tr = tab.getBoundingClientRect();
+        const left =
+          list.scrollLeft + (tr.left - lr.left) - (lr.width - tr.width) / 2;
+        list.scrollTo({ left: Math.max(0, left), behavior: "smooth" });
+      };
+      /* Selection flips aria-selected on the newly active tab. */
+      new MutationObserver((muts) => {
+        muts.forEach((m) => {
+          if (m.target.getAttribute("aria-selected") === "true") center(m.target);
+        });
+      }).observe(document.body, {
+        subtree: true,
+        attributes: true,
+        attributeFilter: ["aria-selected"],
+      });
+      /* Fresh tab bars (page load / rerun re-render): center their active tab. */
+      const init = () => {
+        document
+          .querySelectorAll('[data-baseweb="tab-list"]:not([data-ts-centered])')
+          .forEach((list) => {
+            list.setAttribute("data-ts-centered", "1");
+            flag(list);
+            center(list.querySelector('[aria-selected="true"]'));
+          });
+      };
+      new MutationObserver(init).observe(document.body, {subtree: true, childList: true});
+      init();
+      /* Rotation / viewport resize can flip a strip in or out of overflow. */
+      window.addEventListener("resize", () => {
+        document
+          .querySelectorAll('[data-baseweb="tab-list"]')
+          .forEach(flag);
+      });
     })();
     </script>
     """,
@@ -553,7 +900,7 @@ st.html(
         justify-content: center;
         margin-left: -14px; margin-right: -14px;
         padding-right: 0; gap: 0;
-        font-size: var(--ag-fs-3xs); letter-spacing: 0.04em;
+        font-size: var(--ag-fs-2xs); letter-spacing: 0.04em;
       }
       section[data-testid="stSidebar"][aria-expanded="false"]:not(:hover)
         [data-testid="stNavSectionHeader"] > div {
@@ -728,6 +1075,13 @@ _focus = (
     else None
 )
 render_topbar(page.title, _focus)
+
+# Phones swap the sidebar for the DS bottom tab bar (Inicio · Cartera ·
+# Screener · Perfil); the drawer stays behind the header's menu toggle for the
+# remaining pages. Rendered before page.run() like the topbar, so a page that
+# crashes or st.stop()s still leaves the primary navigation standing.
+if is_mobile():
+    render_bottom_nav(page.url_path)
 
 # Assistant overlay: a top-right launcher icon + slide-in chat panel, reachable
 # from every page and carrying the current view (page + focused ticker) as

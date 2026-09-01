@@ -53,14 +53,18 @@ def fetch_history(ticker: str, period: str = "1y", interval: str = "1d") -> pd.D
 
 
 def fetch_many(
-    tickers: list[str], period: str = "1y", interval: str = "1d"
+    tickers: list[str],
+    period: str = "1y",
+    interval: str = "1d",
+    auto_adjust: bool = True,
 ) -> dict[str, pd.DataFrame]:
     """OHLCV history for many tickers in ONE bulk request (yf.download).
 
     Tickers with no data are absent from the result. Results are keyed by the
     ticker as requested (broker code), not the resolved Yahoo symbol. This is
     the shared bulk path for the updater, portfolio analytics and the
-    dashboard picker.
+    dashboard picker. auto_adjust=False keeps dividend-unadjusted bars —
+    needed when comparing against as-traded ledger prices (portfolio.fees).
     """
     if not tickers:
         return {}
@@ -72,7 +76,7 @@ def fetch_many(
             period=period,
             interval=interval,
             group_by="ticker",
-            auto_adjust=True,
+            auto_adjust=auto_adjust,
             progress=False,
             threads=True,
         )

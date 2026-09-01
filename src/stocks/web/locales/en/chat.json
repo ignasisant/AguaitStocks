@@ -26,6 +26,8 @@
   "chat.placeholder": "Ask about your portfolio…",
   "chat.invalid_key": "Invalid {provider} API key.",
   "chat.api_error": "The assistant is unavailable right now — try again in a moment.",
+  "chat.provider_busy": "{provider} is overloaded right now — try again in a moment, or switch provider in AI settings.",
+  "chat.fallback_note": "Answered by {provider} — {chosen} didn't respond.",
   "chat.no_credits": "Your {provider} key has no credit or quota left. Add billing in the provider's console to keep using the assistant.",
   "chat.no_enc": "Persistence off — no [chat] enc_key secret configured; key kept for this session only.",
   "chat.free_note": "Free assistant on shared daily limits — replies may come from different AI models. Add your own API key in settings for a specific provider.",

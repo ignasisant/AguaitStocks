@@ -36,13 +36,21 @@ LANGUAGES = {"en": "English", "es": "Español"}
 DEFAULT_LANG = "en"
 
 
-@st.cache_data(show_spinner=False)
 def _catalog(lang: str) -> dict[str, str]:
     """Merge every locales/<lang>/*.json fragment into one flat dict.
 
-    Cached per language for the process; the JSON fragments are static assets,
-    so this reads the disk once per language and serves the merged dict after.
+    Cached per (language, fragment mtimes): the mtime key costs a handful of
+    stats per rerun but means an edited fragment is picked up on the next run
+    — Streamlit's file watcher doesn't reload JSON, so a plain per-language
+    cache served stale keys in dev until a server restart.
     """
+    d = _LOCALES / lang
+    files = sorted(d.glob("*.json")) if d.is_dir() else []
+    return _catalog_cached(lang, tuple(f.stat().st_mtime for f in files))
+
+
+@st.cache_data(show_spinner=False)
+def _catalog_cached(lang: str, mtimes: tuple[float, ...]) -> dict[str, str]:
     out: dict[str, str] = {}
     d = _LOCALES / lang
     if d.is_dir():

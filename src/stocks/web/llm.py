@@ -212,6 +212,11 @@ def _gemini_error(exc):
             return "chat.no_credits"
         return "chat.api_error"
     if isinstance(exc, errors.APIError):
+        # 503 UNAVAILABLE "experiencing high demand": the model is saturated,
+        # not broken — tell the user it's the provider and that switching
+        # helps, instead of the generic "assistant is unavailable".
+        if getattr(exc, "code", None) == 503:
+            return "chat.provider_busy"
         return "chat.api_error"
     return None
 

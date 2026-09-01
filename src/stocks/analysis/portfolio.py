@@ -13,6 +13,7 @@ equal-weighted so the risk/correlation view still works before you enter sizes.
 
 from __future__ import annotations
 
+import math
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import UTC
@@ -345,6 +346,55 @@ def time_weighted_returns(value: pd.Series, flows: pd.Series) -> pd.Series:
     prev = value.shift(1)
     r = (value - f) / prev - 1
     return r[prev > 1e-9]
+
+
+def money_weighted_return(
+    value: pd.Series, flows: pd.Series, start: pd.Timestamp | None = None
+) -> float:
+    """Annualised money-weighted return (IRR) of the book over [start, end].
+
+    Investor cash flows: the book's value at the window start counts as the
+    buy-in, every external flow inside the window lands on its date (`flows`
+    uses the flow_series convention — buys +, sells/dividends −), and the
+    final value is the terminal payoff. Unlike the TWR, deposit/withdrawal
+    *timing* moves this number: it answers "how did my money do", not "how
+    did the strategy do". `start` before the first value falls back to the
+    full history. NaN when the window is empty, has no time span, or no rate
+    in (-99.99%, 1000%) prices the flows to zero.
+    """
+    value = value.dropna()
+    if value.empty:
+        return float("nan")
+    if start is not None:
+        clipped = value[value.index >= start]
+        if not clipped.empty:
+            value = clipped
+    t0, t_end = value.index[0], value.index[-1]
+    years = (t_end - t0).days / 365.25
+    if years <= 0:
+        return float("nan")
+    # Flows arrive at day-t close (time_weighted_returns convention), so the
+    # opening value already contains any day-t0 flow; count strictly later ones.
+    cash = [(0.0, -float(value.iloc[0]))]
+    if not flows.empty:
+        inside = flows[(flows.index > t0) & (flows.index <= t_end)]
+        cash += [((ts - t0).days / 365.25, -float(f)) for ts, f in inside.items()]
+    cash.append((years, float(value.iloc[-1])))
+
+    def npv(rate: float) -> float:
+        return sum(cf / (1 + rate) ** t for t, cf in cash)
+
+    lo, hi = -0.9999, 10.0
+    f_lo, f_hi = npv(lo), npv(hi)
+    if math.isnan(f_lo) or math.isnan(f_hi) or (f_lo > 0) == (f_hi > 0):
+        return float("nan")
+    for _ in range(200):
+        mid = (lo + hi) / 2
+        if (npv(mid) > 0) == (f_lo > 0):
+            lo = mid
+        else:
+            hi = mid
+    return (lo + hi) / 2
 
 
 # ----------------------------------------------------------------- orchestration

@@ -13,6 +13,7 @@ table and the ledger-history chart load concurrently on a full rerun.
 
 from __future__ import annotations
 
+import math
 from collections import defaultdict
 from datetime import date
 from urllib.error import URLError
@@ -24,19 +25,24 @@ from yfinance.exceptions import YFRateLimitError
 
 from stocks.analysis.portfolio import (
     analyze,
+    annualized_return,
+    annualized_volatility,
     basket_change,
     correlation_matrix,
     cumulative_returns,
     effective_positions,
+    flow_series,
     holdings_from_positions,
     market_active,
     market_value_weights_eur,
+    max_drawdown,
+    money_weighted_return,
     portfolio_returns,
     top_n_weight,
     us_extended_session,
     us_market_open,
 )
-from stocks.portfolio import dividends
+from stocks.portfolio import dividends, fees
 from stocks.portfolio.tax_es import fiscal_year, modelo_720_flag
 from stocks.web import auth, notices, skeletons
 from stocks.web.i18n import t as tr
@@ -47,19 +53,36 @@ from stocks.web.portfolio_data import (
     ledger_history,
     ledger_state,
     positions_table,
+    trade_bars,
 )
 from stocks.web.widgets import (
+    BORDER,
+    CANDLE_DOWN,
+    CANDLE_UP,
+    CATEGORICAL_COLORS,
     DIVERGING_SCALE,
+    EVENT_LINE,
+    INFO_COLOR,
     LOSS_BAND,
     LOSS_COLOR,
     PROFIT_BAND,
     PROFIT_COLOR,
+    SEQUENTIAL_SCALE,
+    SURFACE_CARD,
+    SURFACE_PAGE,
+    SURFACE_SUNKEN,
+    TEXT_FAINT,
     TEXT_MUTED,
+    TEXT_SECONDARY,
+    TRANSPARENT,
+    WARN_ORANGE,
     chart_layout,
     data_table,
     db_mtime,
     is_mobile,
-    metric_cells,
+    kpi_delta_chip,
+    kpi_grid_html,
+    responsive_ticker_table_html,
     show_chart,
     ticker_table_html,
 )
@@ -84,10 +107,28 @@ if not positions and not realized:
     st.warning(tr("portfolio.ledger_no_positions"))
     st.stop()
 
-tab_pos, tab_risk, tab_tax, tab_div = st.tabs(
-    [tr("portfolio.tab_positions"), tr("portfolio.tab_alloc_risk"),
-     tr("portfolio.tab_realized_tax"), tr("portfolio.tab_dividends")],
-    on_change="rerun",
+# The active tab rides the URL (?tab=slug) so a reload — or a shared link —
+# lands on the same tab. Slugs, not labels: labels are localized and would
+# break bookmarks across language switches.
+_TAB_SLUGS = ("positions", "risk", "tax", "dividends", "fees")
+_TAB_LABELS = [tr("portfolio.tab_positions"), tr("portfolio.tab_alloc_risk"),
+               tr("portfolio.tab_realized_tax"), tr("portfolio.tab_dividends"),
+               tr("portfolio.tab_fees")]
+
+
+def _tab_to_url() -> None:
+    label = st.session_state.get("portfolio_tab")
+    if label in _TAB_LABELS:
+        st.query_params["tab"] = _TAB_SLUGS[_TAB_LABELS.index(label)]
+
+
+_qp_tab = st.query_params.get("tab")
+tab_pos, tab_risk, tab_tax, tab_div, tab_fees = st.tabs(
+    _TAB_LABELS,
+    default=(_TAB_LABELS[_TAB_SLUGS.index(_qp_tab)]
+             if _qp_tab in _TAB_SLUGS else None),
+    key="portfolio_tab",
+    on_change=_tab_to_url,
 )
 
 
@@ -134,22 +175,28 @@ def _positions_section() -> None:
             if fx is None:
                 ccy, fx = "EUR", 1.0
             sym = auth.CURRENCY_SYMBOL[ccy]
-            c1, c2, c3, c4 = metric_cells(4)
-            c1.metric(tr("portfolio.cost_basis"), f"{sym}{cost * fx:,.0f}")
-            c2.metric(tr("portfolio.market_value"), f"{sym}{value * fx:,.0f}")
-            c3.metric(
-                tr("portfolio.unrealised_pl"),
-                f"{sym}{(value - cost) * fx:,.0f}",
-                f"{(value / cost - 1) * 100:+.1f}%",
-            )
             realized_gain = sum(s.gain_eur for s in realized)
             realized_cost = sum(s.cost_eur for s in realized)
-            c4.metric(
-                tr("portfolio.realised_pl"),
-                f"{sym}{realized_gain * fx:,.0f}",
-                f"{realized_gain / realized_cost * 100:+.1f}%" if realized_cost else None,
-                help=tr("portfolio.realised_pl_help"),
-            )
+            # Same TIKR-style tiles as the Ticker fundamentals card (and the
+            # Home glance): value and its chip on one line, help as a "?" pill.
+            st.html(kpi_grid_html([
+                (tr("portfolio.cost_basis"), f"{sym}{cost * fx:,.0f}", None, None),
+                (tr("portfolio.market_value"), f"{sym}{value * fx:,.0f}", None, None),
+                (
+                    tr("portfolio.unrealised_pl"),
+                    f"{sym}{(value - cost) * fx:+,.0f}",
+                    kpi_delta_chip(value / cost - 1 if cost else None),
+                    None,
+                ),
+                (
+                    tr("portfolio.realised_pl"),
+                    f"{sym}{realized_gain * fx:+,.0f}",
+                    kpi_delta_chip(
+                        realized_gain / realized_cost if realized_cost else None
+                    ),
+                    tr("portfolio.realised_pl_help"),
+                ),
+            ]))
             if ccy != "EUR":
                 st.caption(tr("portfolio.headline_converted", ccy=ccy))
 
@@ -174,27 +221,28 @@ def _positions_section() -> None:
                 d_eur = tbl["day_eur"].dropna().sum()
                 base = value - d_eur
                 today_closed = (d_eur, d_eur / base if base else 0.0)
-            d1, d2, d3 = metric_cells(3)
-            for col, label, days in (
-                (d1, tr("portfolio.today"), 1),
-                (d2, tr("portfolio.one_week"), 7),
-                (d3, tr("portfolio.one_month"), 30),
+            delta_tiles = []
+            for label, days in (
+                (tr("portfolio.today"), 1),
+                (tr("portfolio.one_week"), 7),
+                (tr("portfolio.one_month"), 30),
             ):
                 chg = (today_closed if days == 1 and today_closed
                        else basket_change(vals, days))
                 if chg is None:
-                    col.metric(label, tr("portfolio.na"))
+                    delta_tiles.append((label, tr("portfolio.na"), None, None))
                 else:
-                    col.metric(
+                    delta_tiles.append((
                         label,
                         f"{sym}{chg[0] * fx:+,.0f}",
-                        f"{chg[1]:+.2%}",
-                        delta_color=(
-                            "off"
-                            if days == 1 and not mkt_open and not extended
-                            else "normal"
+                        kpi_delta_chip(
+                            chg[1],
+                            fmt="{:+.2%}",
+                            off=days == 1 and not mkt_open and not extended,
                         ),
-                    )
+                        None,
+                    ))
+            st.html(kpi_grid_html(delta_tiles))
             if not mkt_open:
                 st.caption(
                     tr(
@@ -263,6 +311,121 @@ def _positions_section() -> None:
                     tbl, fmt=fmt, signed=pnl_cols, muted=muted, muted_cols=day_cols,
                     pairs=pairs, labels=labels, sortable="positions"))
             st.caption(tr("portfolio.positions_caption"))
+
+
+def _alloc_pie(alloc: pd.Series, title: str) -> go.Figure:
+    """Allocation donut in the DS categorical palette.
+
+    Percentages ride the legend entries instead of the slices — sliver
+    slices under ~1% used to print their labels on top of each other. More
+    buckets than palette hues folds the tail into one muted "Others" slice
+    (fixed hue order, never cycled).
+    """
+    pct = (alloc / alloc.sum() * 100).sort_values(ascending=False)
+    colors = list(CATEGORICAL_COLORS)
+    n = len(colors)
+    if len(pct) > n:
+        pct = pd.concat([
+            pct.iloc[:n - 1],
+            pd.Series({tr("portfolio.alloc_other"): pct.iloc[n - 1:].sum()}),
+        ])
+        colors[-1] = TEXT_FAINT
+    fig = go.Figure(
+        go.Pie(
+            labels=[f"{name} · {v:.1f}%" for name, v in pct.items()],
+            values=pct.values,
+            hole=0.45,
+            sort=False,
+            textinfo="none",
+            marker=dict(
+                colors=colors[:len(pct)],
+                # 2px surface gap so adjacent fills never touch.
+                line=dict(color=SURFACE_CARD, width=2),
+            ),
+            hovertemplate="<b>%{label}</b><extra></extra>",
+        )
+    )
+    fig.update_layout(
+        **chart_layout(title=title, height=300),
+        legend=dict(font=dict(size=12, color=TEXT_SECONDARY)),
+    )
+    return fig
+
+
+# The Geography allocation cell offers two views — the classic donut and a
+# rotatable orthographic globe. Its own fragment so flipping the toggle
+# repaints this one cell instead of rerunning the whole history section. The
+# chart draws from session state and the toggle renders below it, keeping the
+# three allocation charts top-aligned across their columns.
+@st.fragment
+def _geography_cell(alloc: pd.Series, title: str) -> None:
+    view = st.session_state.get("geo_alloc_view", "map")
+    if view == "map":
+        pct = alloc[alloc > 0] / alloc.sum() * 100
+        # "Unknown" is allocation()'s bucket for tickers with no country in
+        # meta; it has no polygon, so it leaves the map for the caption below.
+        mapped = pct.drop("Unknown", errors="ignore")
+        fig = go.Figure(
+            go.Choropleth(
+                locations=list(mapped.index),
+                locationmode="country names",
+                # Log-spaced color: a 70% home market would otherwise pin
+                # every other holding onto the ramp's first step.
+                z=[math.log10(v) for v in mapped.values],
+                customdata=list(mapped.values),
+                hovertemplate=(
+                    "<b>%{location}</b><br>%{customdata:.1f}%<extra></extra>"),
+                colorscale=SEQUENTIAL_SCALE,
+                showscale=False,
+                marker_line_color=BORDER,
+                marker_line_width=0.5,
+            )
+        )
+        fig.update_layout(
+            **chart_layout(title=title, height=300),
+            geo=dict(
+                projection_type="orthographic",
+                # Start over the Atlantic: US and Europe (the usual bulk of
+                # the book) both on the visible hemisphere.
+                projection_rotation=dict(lon=-40, lat=25),
+                bgcolor=TRANSPARENT,
+                # The sphere must read as a circle: hairline frame around
+                # the disc, ocean one step darker than the card behind it,
+                # land lifted slightly off the ocean.
+                showframe=True,
+                framecolor=BORDER,
+                framewidth=1,
+                showcoastlines=False,
+                showland=True,
+                landcolor=SURFACE_SUNKEN,
+                showocean=True,
+                oceancolor=SURFACE_PAGE,
+                showcountries=True,
+                countrycolor=BORDER,
+            ),
+        )
+        # Default dragmode is "zoom" (a rectangle select on geo axes); "pan"
+        # is what spins an orthographic globe under the pointer. Mobile keeps
+        # drag off entirely — a rotating globe would swallow page scrolling.
+        fig.update_layout(dragmode=False if _MOBILE else "pan")
+        show_chart(fig, key="alloc_geo")
+        unmapped = 100 - mapped.sum()
+        if unmapped >= 0.05:
+            st.caption(tr("portfolio.geo_unmapped", pct=f"{unmapped:.1f}"))
+    else:
+        show_chart(_alloc_pie(alloc, title), key="alloc_geo")
+    st.segmented_control(
+        title,
+        options=("map", "chart"),
+        default="map",
+        format_func=lambda v: (
+            f":material/public: {tr('portfolio.geo_view_map')}" if v == "map"
+            else f":material/donut_small: {tr('portfolio.geo_view_chart')}"
+        ),
+        key="geo_alloc_view",
+        label_visibility="collapsed",
+        required=True,
+    )
 
 
 @st.fragment(parallel=True)
@@ -389,7 +552,13 @@ def _history_section() -> None:
                 hovermode="x",
                 yaxis=dict(title="EUR", fixedrange=True),
             )
-            fig.update_xaxes(showspikes=True, spikemode="across", spikethickness=1)
+            fig.update_xaxes(
+                showspikes=True, spikemode="across", spikethickness=1,
+                spikecolor=EVENT_LINE, spikedash="dot",
+            )
+            if _MOBILE:
+                # DS mobile chart spec: ~3 date labels on a phone.
+                fig.update_xaxes(nticks=3)
             show_chart(fig)
             notes = [tr("portfolio.hist_note_injected")]
             if missing:
@@ -410,26 +579,87 @@ if tab_risk.open:
         if not positions:
             st.caption(tr("portfolio.no_positions_analyse"))
         else:
-            with st.container(border=True):
-                FROM_START = tr("portfolio.from_start")
-                choice = st.selectbox(
-                    tr("portfolio.return_window"),
-                    [FROM_START, "6mo", "1y", "2y", "5y"], index=0,
+            FROM_START = tr("portfolio.from_start")
+            choice = st.selectbox(
+                tr("portfolio.return_window"),
+                [FROM_START, "6mo", "1y", "2y", "5y"], index=0,
+            )
+            tickers = tuple(p.ticker for p in positions)
+            first_tx = min(t.date for t in txs)
+            _WINDOW_DAYS = {"6mo": 182, "1y": 365, "2y": 730, "5y": 1826}
+            win_start = (
+                pd.Timestamp(first_tx)
+                if choice == FROM_START
+                else pd.Timestamp(date.today())
+                - pd.Timedelta(days=_WINDOW_DAYS[choice])
+            )
+            if choice == FROM_START:
+                # Fetch enough history to cover the ledger, then clip below so
+                # metrics start at the first transaction, not the stock's IPO.
+                span = (date.today() - date.fromisoformat(first_tx)).days
+                period = (
+                    "1y" if span <= 360
+                    else "2y" if span <= 700
+                    else "5y" if span <= 1780
+                    else "max"
                 )
-                tickers = tuple(p.ticker for p in positions)
-                first_tx = min(t.date for t in txs)
-                if choice == FROM_START:
-                    # Fetch enough history to cover the ledger, then clip below so
-                    # metrics start at the first transaction, not the stock's IPO.
-                    span = (date.today() - date.fromisoformat(first_tx)).days
-                    period = (
-                        "1y" if span <= 360
-                        else "2y" if span <= 700
-                        else "5y" if span <= 1780
-                        else "max"
+            else:
+                period = choice
+
+            def _pct(x: float) -> str:
+                return "—" if pd.isna(x) else f"{x * 100:.1f}%"
+
+            # ---- Real performance: the ledger TWR path in EUR — sold
+            # positions and dividends included, deposits/withdrawals excluded
+            # from the return itself (they only move the money-weighted view).
+            with st.container(border=True):
+                st.subheader(tr("portfolio.real_perf"))
+                perf_kpis = skeletons.reserve("metrics", n=4)
+                twr = None
+                try:
+                    hist, twr, _ = ledger_history(
+                        (len(txs), txs[-1].date, date.today()), DB
                     )
-                else:
-                    period = choice
+                except (YFRateLimitError, URLError) as exc:
+                    notices.data_toast(exc)
+                    perf_kpis.clear()
+                except Exception:
+                    perf_kpis.container().warning(tr("portfolio.report_failed"))
+                if twr is not None:
+                    twr_win = twr[twr.index >= win_start]
+                    mwr = (
+                        money_weighted_return(
+                            hist["value_eur"], flow_series(txs), start=win_start
+                        )
+                        if not hist.empty
+                        else float("nan")
+                    )
+                    with perf_kpis.container():
+                        st.html(kpi_grid_html([
+                            (tr("portfolio.annualised_return"),
+                             _pct(annualized_return(twr_win)),
+                             None,
+                             tr("portfolio.twr_return_help")),
+                            (tr("portfolio.mwr"),
+                             _pct(mwr),
+                             None,
+                             tr("portfolio.mwr_help")),
+                            (tr("portfolio.annualised_vol"),
+                             _pct(annualized_volatility(twr_win)),
+                             None,
+                             tr("portfolio.twr_vol_help")),
+                            (tr("portfolio.max_drawdown"),
+                             _pct(max_drawdown(cumulative_returns(twr_win) + 1)),
+                             None,
+                             tr("portfolio.twr_dd_help")),
+                        ]))
+                        st.caption(tr("portfolio.real_perf_note"))
+
+            # ---- Current basket risk: today's holdings backtested at fixed
+            # EUR weights over the window — a risk profile of what you hold
+            # now, not a performance figure (that's the card above).
+            with st.container(border=True):
+                st.subheader(tr("portfolio.basket_risk"))
 
                 # (db, mtime) must be arguments: st.cache_data keys on arguments
                 # only, and the cache is shared across sessions — reading the
@@ -443,9 +673,8 @@ if tab_risk.open:
                     return analyze(period=period, holdings=holds)
 
                 # Prices + company profiles for every held name — the fetch that
-                # gates this whole tab. The four risk KPIs shimmer under the
-                # window selector while it runs, so changing the window doesn't
-                # blank the card down to the dropdown alone.
+                # gates the rest of this tab. The four risk KPIs shimmer while it
+                # runs, so changing the window doesn't blank the card.
                 risk_kpis = skeletons.reserve("metrics", n=4)
                 try:
                     rep = _report(period, tickers, DB, db_mtime(DB))
@@ -476,27 +705,30 @@ if tab_risk.open:
                     rep.port_returns = portfolio_returns(rep.returns, rep.weights)
 
                     with risk_kpis.container():
-                        c1, c2, c3, c4 = metric_cells(4)
-                        c1.metric(tr("portfolio.annualised_return"),
-                                  f"{rep.cagr * 100:.1f}%",
-                                  help=tr("portfolio.annualised_return_help"))
-                        c2.metric(tr("portfolio.annualised_vol"),
-                                  f"{rep.volatility * 100:.1f}%",
-                                  help=tr("portfolio.annualised_vol_help"))
-                        c3.metric(tr("portfolio.max_drawdown"),
-                                  f"{rep.max_drawdown * 100:.1f}%",
-                                  help=tr("portfolio.max_drawdown_help"))
-                        c4.metric(tr("portfolio.effective_names"),
-                                  f"{effective_positions(rep.weights):.1f}",
-                                  help=tr("portfolio.effective_names_help"))
+                        st.html(kpi_grid_html([
+                            (tr("portfolio.annualised_vol"),
+                             _pct(rep.volatility),
+                             None,
+                             tr("portfolio.basket_vol_help")),
+                            (tr("portfolio.effective_names"),
+                             f"{effective_positions(rep.weights):.1f}",
+                             None,
+                             tr("portfolio.effective_names_help")),
+                            (tr("portfolio.top5"),
+                             f"{top_n_weight(rep.weights, 5) * 100:.0f}%",
+                             None,
+                             tr("portfolio.top5_help")),
+                            (tr("portfolio.max_drawdown"),
+                             _pct(rep.max_drawdown),
+                             None,
+                             tr("portfolio.basket_dd_help")),
+                        ]))
 
                         betas = " · ".join(
                             f"β {b} {rep.beta_vs(b):.2f}" for b in rep.bench_returns)
                         if betas:
                             st.caption(
-                                tr("portfolio.beta_caption", betas=betas,
-                                   pct=f"{top_n_weight(rep.weights, 5) * 100:.0f}")
-                            )
+                                tr("portfolio.basket_beta_caption", betas=betas))
 
             if rep is not None:
                 with st.container(border=True):
@@ -512,15 +744,11 @@ if tab_risk.open:
                         if alloc.empty:
                             col.caption(tr("portfolio.no_alloc_data", kind=title.lower()))
                             continue
-                        pie = go.Figure(
-                            go.Pie(
-                                labels=alloc.index, values=alloc.values, hole=0.45,
-                                hovertemplate=(
-                                    "<b>%{label}</b><br>%{percent}<extra></extra>"),
-                            )
-                        )
-                        pie.update_layout(**chart_layout(title=title, height=300))
-                        show_chart(pie, container=col)
+                        if key == "country":
+                            with col:
+                                _geography_cell(alloc, title)
+                            continue
+                        show_chart(_alloc_pie(alloc, title), container=col)
 
                 # Same full-span history the Positions tab builds, and cold
                 # whenever the reader opens this tab first — so the card holds
@@ -580,7 +808,8 @@ if tab_risk.open:
                         # One box per date comparing portfolio, basket and
                         # every benchmark.
                         line.update_layout(
-                            height=420, hovermode="x unified",
+                            **chart_layout(height=420, top_legend=True),
+                            hovermode="x unified",
                             yaxis=dict(title="%", fixedrange=True),
                         )
                         show_chart(line)
@@ -618,25 +847,95 @@ if tab_tax.open:
         if not sell_years:
             st.caption(tr("portfolio.no_realized_sales"))
         else:
+            buy_dates: dict[str, list[str]] = defaultdict(list)
+            for t in txs:
+                if t.action == "buy":
+                    buy_dates[t.ticker].append(t.date)
+            year_ty = {
+                y: fiscal_year(realized, y, buy_dates)
+                for y in sorted(sell_years)
+            }
+
+            # Year-by-year picture first: what each ejercicio adds to the
+            # savings base. Gains stack up, deductible losses (and losses
+            # recovered from earlier 2-month deferrals) stack down, and the
+            # diamond marks the resulting net base — the figure the brackets
+            # below tax.
+            if len(year_ty) > 1:
+                with st.container(border=True):
+                    st.subheader(tr("portfolio.realized_by_year"))
+                    yrs = list(year_ty)
+                    fig = go.Figure()
+                    def _hover(name: str) -> str:
+                        # Unified hover drops the trace name unless it is baked
+                        # into the template (same trick as the TWR chart).
+                        return f"{name}  <b>€%{{y:,.0f}}</b><extra></extra>"
+
+                    gains_lbl = tr("portfolio.chart_gains")
+                    losses_lbl = tr("portfolio.chart_losses")
+                    recovered_lbl = tr("portfolio.chart_recovered")
+                    net_lbl = tr("portfolio.chart_net")
+                    fig.add_bar(
+                        name=gains_lbl, x=yrs,
+                        y=[year_ty[y].realized_gain_eur for y in yrs],
+                        marker_color=CANDLE_UP,
+                        hovertemplate=_hover(gains_lbl),
+                    )
+                    fig.add_bar(
+                        name=losses_lbl, x=yrs,
+                        y=[-year_ty[y].deductible_loss_eur for y in yrs],
+                        marker_color=CANDLE_DOWN,
+                        hovertemplate=_hover(losses_lbl),
+                    )
+                    if any(t.recovered_loss_eur for t in year_ty.values()):
+                        fig.add_bar(
+                            name=recovered_lbl, x=yrs,
+                            y=[-year_ty[y].recovered_loss_eur for y in yrs],
+                            marker_color=WARN_ORANGE,
+                            hovertemplate=_hover(recovered_lbl),
+                        )
+                    fig.add_scatter(
+                        name=net_lbl, x=yrs,
+                        y=[year_ty[y].net_taxable_eur for y in yrs],
+                        mode="markers",
+                        marker=dict(symbol="diamond", size=10, color=INFO_COLOR),
+                        hovertemplate=_hover(net_lbl),
+                    )
+                    # One hover box per ejercicio: the year as header and every
+                    # component named inside, so a lone "€7,699" can't float
+                    # ambiguously between bars.
+                    fig.update_layout(
+                        **chart_layout(top_legend=True),
+                        barmode="relative",
+                        hovermode="x unified",
+                    )
+                    fig.update_xaxes(type="category")
+                    show_chart(fig)
+                    st.caption(tr("portfolio.realized_by_year_caption"))
+
             with st.container(border=True):
-                year = st.selectbox(
-                    tr("portfolio.fiscal_year"), sell_years, key="tax_year")
-                buy_dates: dict[str, list[str]] = defaultdict(list)
-                for t in txs:
-                    if t.action == "buy":
-                        buy_dates[t.ticker].append(t.date)
-                ty = fiscal_year(realized, year, buy_dates)
+                # Few ejercicios read faster as buttons than as a dropdown.
+                if len(sell_years) <= 3:
+                    year = st.segmented_control(
+                        tr("portfolio.fiscal_year"), sorted(sell_years),
+                        default=max(sell_years), key="tax_year",
+                    ) or max(sell_years)
+                else:
+                    year = st.selectbox(
+                        tr("portfolio.fiscal_year"), sell_years, key="tax_year")
+                ty = year_ty[year]
 
                 st.subheader(tr("portfolio.irpf_savings_base", year=year))
                 st.caption(tr("portfolio.irpf_caption"))
-                c1, c2, c3 = metric_cells(3)
-                c1.metric(tr("portfolio.net_taxable"), f"€{ty.net_taxable_eur:,.0f}",
-                          help=tr("portfolio.net_taxable_help"))
-                c2.metric(tr("portfolio.estimated_tax"), f"€{ty.estimated_tax_eur:,.0f}",
-                          help=tr("portfolio.estimated_tax_help"))
-                c3.metric(tr("portfolio.carryforward_loss"),
-                          f"€{ty.carryforward_loss_eur:,.0f}",
-                          help=tr("portfolio.carryforward_loss_help"))
+                st.html(kpi_grid_html([
+                    (tr("portfolio.net_taxable"), f"€{ty.net_taxable_eur:,.0f}",
+                     None, tr("portfolio.net_taxable_help")),
+                    (tr("portfolio.estimated_tax"), f"€{ty.estimated_tax_eur:,.0f}",
+                     None, tr("portfolio.estimated_tax_help")),
+                    (tr("portfolio.carryforward_loss"),
+                     f"€{ty.carryforward_loss_eur:,.0f}",
+                     None, tr("portfolio.carryforward_loss_help")),
+                ]))
                 summary = tr(
                     "portfolio.realized_summary",
                     gain=f"{ty.realized_gain_eur:,.0f}",
@@ -645,6 +944,11 @@ if tab_tax.open:
                 if ty.deferred_loss_eur:
                     summary += tr(
                         "portfolio.deferred_note", deferred=f"{ty.deferred_loss_eur:,.0f}"
+                    )
+                if ty.recovered_loss_eur:
+                    summary += tr(
+                        "portfolio.recovered_note",
+                        recovered=f"{ty.recovered_loss_eur:,.0f}",
                     )
                 st.caption(summary)
 
@@ -679,38 +983,39 @@ if tab_tax.open:
                         "proceeds_eur": tr("portfolio.col_proceeds"),
                         "gain_eur": tr("portfolio.col_gain"),
                     }
-                    # Seven columns pan off a 390px screen, so phones get the
-                    # same dense rows as the Positions tab: proceeds and the
-                    # signed gain on the right, the return as a pill beside the
-                    # symbol, dates + shares on the wrapping dim line (company
-                    # names dropped — that line is already three items long).
-                    # Full sortable table one expander below.
+                    # Seven columns pan off a 390px screen, so narrow
+                    # viewports get the same dense rows as the Positions tab:
+                    # proceeds and the signed gain on the right, the return as
+                    # a pill beside the symbol, dates + shares on the wrapping
+                    # dim line (company names dropped — that line is already
+                    # three items long). Both renderings ship; a 640px media
+                    # query picks by live width, so a resized desktop window
+                    # and desktop-UA tablets adapt too — not only "Mobi" UAs.
+                    st.html(responsive_ticker_table_html(
+                        sales_df, fmt=sales_fmt, signed=sales_signed,
+                        labels=sales_labels,
+                        left_cols=("buy", "sell"), sortable="realized",
+                        pairs=(("gain_eur", "gain_pct"),),
+                        mobile={
+                            "value": "proceeds_eur", "delta": "gain_eur",
+                            "badge": "gain_pct", "wrap": True,
+                            "sub": ("buy", "sell", "qty"),
+                            "sub_labels": {
+                                "buy": tr("portfolio.col_bought"),
+                                "sell": tr("portfolio.col_sold"),
+                                "qty": tr("portfolio.col_shares"),
+                            },
+                        }))
                     if _MOBILE:
-                        st.html(ticker_table_html(
-                            sales_df, fmt=sales_fmt, signed=sales_signed,
-                            labels=sales_labels, names=False,
-                            mobile={
-                                "value": "proceeds_eur", "delta": "gain_eur",
-                                "badge": "gain_pct", "wrap": True,
-                                "sub": ("buy", "sell", "qty"),
-                                "sub_labels": {
-                                    "buy": tr("portfolio.col_bought"),
-                                    "sell": tr("portfolio.col_sold"),
-                                    "qty": tr("portfolio.col_shares"),
-                                },
-                            }))
+                        # Phones lose the dense rows' hidden columns; the full
+                        # sortable table stays one expander away.
                         with st.expander(tr("portfolio.all_columns_realized")):
                             st.html(ticker_table_html(
                                 sales_df, fmt=sales_fmt, signed=sales_signed,
-                                left_cols=("buy", "sell"), sortable="realized",
+                                left_cols=("buy", "sell"),
+                                sortable="realized_all",
                                 pairs=(("gain_eur", "gain_pct"),),
                                 labels=sales_labels))
-                    else:
-                        st.html(ticker_table_html(
-                            sales_df, fmt=sales_fmt, signed=sales_signed,
-                            left_cols=("buy", "sell"), sortable="realized",
-                            pairs=(("gain_eur", "gain_pct"),),
-                            labels=sales_labels))
 
                 # Mark to market from the cached positions table — shares the
                 # Positions tab's price burst; unpriced names fall back to cost.
@@ -775,3 +1080,103 @@ if tab_div.open:
                     fmt=dict.fromkeys(div_frame.columns, "€{:,.0f}"),
                 )
                 st.caption(tr("portfolio.dividends_caption"))
+
+# ------------------------------------------------------------------- Fees
+if tab_fees.open:
+    with tab_fees:
+        brokers = fees.by_broker(txs)
+        if not brokers:
+            st.caption(tr("portfolio.no_fees"))
+        else:
+            # Spread needs the trade-day bars; explicit commissions don't —
+            # if Yahoo is down the tab degrades to the ledger-only columns.
+            spreads: dict[str, fees.SpreadStats] = {}
+            bars_ok = False
+            try:
+                bars = trade_bars(DB, db_mtime(DB))
+            except (YFRateLimitError, URLError) as exc:
+                notices.data_toast(exc)
+            except Exception:
+                st.warning(tr("portfolio.data_unavailable"))
+            else:
+                spreads = fees.spread_by_broker(txs, bars)
+                bars_ok = True
+
+            with st.container(border=True):
+                st.subheader(tr("portfolio.fees_title"))
+                volume = sum(b.volume_eur for b in brokers.values())
+                explicit = sum(b.explicit_eur for b in brokers.values())
+                spread = sum(s.spread_eur for s in spreads.values())
+                total = explicit + spread
+                st.html(kpi_grid_html([
+                    (tr("portfolio.fees_explicit"), f"€{explicit:,.2f}",
+                     None, tr("portfolio.fees_explicit_help")),
+                    (tr("portfolio.fees_spread"),
+                     f"€{spread:,.2f}" if bars_ok else tr("portfolio.na"),
+                     None, tr("portfolio.fees_spread_help")),
+                    (tr("portfolio.fees_pct_volume"),
+                     f"{total / volume:.2%}" if volume else tr("portfolio.na"),
+                     None, tr("portfolio.fees_pct_volume_help")),
+                ]))
+
+                any_other = any(b.other_fees_eur for b in brokers.values())
+                rows = []
+                for name in sorted(brokers, key=lambda n: -brokers[n].volume_eur):
+                    b, s = brokers[name], spreads.get(name)
+                    row = {
+                        "broker": name,
+                        "trades": b.trades,
+                        "volume_eur": b.volume_eur,
+                        "commission_eur": b.commission_eur,
+                    }
+                    if any_other:
+                        row["other_eur"] = b.other_fees_eur
+                    if bars_ok:
+                        row["spread_eur"] = s.spread_eur if s else 0.0
+                        row["spread_bps"] = s.spread_bps if s else 0.0
+                    row["total_eur"] = b.explicit_eur + (s.spread_eur if s else 0.0)
+                    row["cost_pct"] = (
+                        row["total_eur"] / b.volume_eur if b.volume_eur else None
+                    )
+                    rows.append(row)
+                fee_frame = pd.DataFrame(rows).set_index("broker").rename_axis(
+                    tr("portfolio.col_broker"))
+                fee_fmt = {
+                    tr("portfolio.col_trades"): "{:,.0f}",
+                    tr("portfolio.col_volume"): "€{:,.0f}",
+                    tr("portfolio.col_commissions"): "€{:,.2f}",
+                    tr("portfolio.col_other_fees"): "€{:,.2f}",
+                    tr("portfolio.col_spread"): "€{:,.2f}",
+                    tr("portfolio.col_spread_bps"): "{:,.1f}",
+                    tr("portfolio.col_total_cost"): "€{:,.2f}",
+                    tr("portfolio.col_cost_pct"): "{:.2%}",
+                }
+                fee_frame = fee_frame.rename(columns={
+                    "trades": tr("portfolio.col_trades"),
+                    "volume_eur": tr("portfolio.col_volume"),
+                    "commission_eur": tr("portfolio.col_commissions"),
+                    "other_eur": tr("portfolio.col_other_fees"),
+                    "spread_eur": tr("portfolio.col_spread"),
+                    "spread_bps": tr("portfolio.col_spread_bps"),
+                    "total_eur": tr("portfolio.col_total_cost"),
+                    "cost_pct": tr("portfolio.col_cost_pct"),
+                })
+                # Many money columns pan off a phone: there each broker becomes
+                # a card with one "label — value" line per column (data_table).
+                data_table(
+                    fee_frame,
+                    index_title=True,
+                    fmt={k: v for k, v in fee_fmt.items() if k in fee_frame.columns},
+                )
+                if bars_ok:
+                    measured = sum(s.measured for s in spreads.values())
+                    skipped = sum(s.skipped for s in spreads.values())
+                    if skipped:
+                        st.caption(tr("portfolio.fees_spread_coverage",
+                                      measured=measured,
+                                      total=measured + skipped))
+                    outside = sum(s.outside_range_eur for s in spreads.values())
+                    if outside > 0.005:
+                        st.caption(tr("portfolio.fees_outside_range",
+                                      val=f"{outside:,.2f}"))
+                st.caption(tr("portfolio.fees_caption"))

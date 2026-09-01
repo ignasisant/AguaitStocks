@@ -1,7 +1,8 @@
 """Home page — the daily glance: what's new plus the key portfolio metrics.
 
 The Portfolio page's headline metrics (cost basis, market value, unrealised &
-realised P/L, then today / 1 week / 1 month deltas) with a 30-day sparkline and
+realised P/L, then today / 1 week / 1 month deltas) with a range-selectable
+value-vs-injected sparkline and
 today's movers, then "What's new" cards (watchlist big moves, earnings,
 recent transactions, 52-week extremes), then the watchlist groups collapsed
 into expanders. Every ticker cell links to the Ticker page; the full ledger
@@ -52,8 +53,9 @@ from stocks.web.widgets import (
     company_name,
     db_mtime,
     is_mobile,
+    kpi_delta_chip,
+    kpi_grid_html,
     logo,
-    metric_cells,
     recent_closes,
     ticker_table_html,
 )
@@ -200,7 +202,7 @@ _setup_card()
 
 # ---------------------------------------------------------- portfolio glance
 # Daily-glance cut of the Portfolio page: value / today / unrealised P/L plus
-# a 30-day sparkline, then today's top movers. The full positions table, risk,
+# a range-selectable sparkline, then today's top movers. The full table, risk,
 # tax and dividends stay on the Portfolio page.
 # Movers table: ticker, live share price with the day move as a chip beside it
 # ("$226.10  +18.92%"), live market value (display currency), portfolio weight.
@@ -282,50 +284,57 @@ if auth.is_logged_in():
             # new" cards below — the same card the skeleton above was drawn
             # inside, so filling the slot swaps shimmer for figures without
             # moving the outline. `with`-scoped so bare st.* calls
-            # (metric_cells, st.columns) land inside it.
+            # (st.columns, st.caption) land inside it.
             with glance.container(border=True):
                 # Layout: desktop splits the glance into a 70%-wide KPI column
                 # and a 30%-wide sparkline column spanning both KPI rows — the
                 # chart no longer floats against the delta row alone. Mobile
-                # keeps the metric_cells wrap (tiles flow side by side instead
-                # of stacking below 640px) and drops the sparkline to a slot
-                # below.
+                # drops the sparkline to a slot below; the KPI grid wraps its
+                # own tiles (auto-fit), so no per-breakpoint cell carving.
                 # The sparkline's own fetch (ledger_history) runs at the bottom
                 # of the script, so its cell shimmers a chart-shaped slot until
                 # then rather than sitting blank beside finished KPIs.
                 if is_mobile():
-                    b1, b2, b3, b4 = metric_cells(4)
-                    d1, d2, d3 = metric_cells(3)
+                    kcol = st.container()
                     _spark_slot = skeletons.reserve("chart", height=132)
                 else:
                     kcol, ccol = st.columns([7, 3], vertical_alignment="center")
                     _spark_slot = skeletons.reserve(
                         "chart", container=ccol, height=190
                     )
-                    b1, b2, b3, b4 = kcol.columns(4)
-                    d1, d2, d3 = kcol.columns(3)
 
                 # Balance row — the same four headline figures as the Portfolio
-                # page: cost basis, market value, unrealised & realised P/L.
-                # Market value stays delta-free (its % return already shows on
+                # page, as kpi_grid_html tiles so the glance reads like the
+                # Ticker fundamentals card: value and its chip on one line.
+                # Market value stays chip-free (its % return already shows on
                 # Unrealised P/L; printing it twice reads as two numbers).
-                b1.metric(tr("home.cost_basis"), f"{sym}{cost * fx:,.0f}")
-                b2.metric(tr("home.market_value"), f"{sym}{value * fx:,.0f}")
-                b3.metric(
-                    tr("home.unrealised_pl"),
-                    f"{sym}{(value - cost) * fx:+,.0f}",
-                    f"{gain_pct:+.1%}" if gain_pct is not None else None,
-                )
-                b4.metric(
-                    tr("home.realised_pl"),
-                    f"{sym}{realized_gain * fx:+,.0f}",
-                    f"{realized_gain / realized_cost:+.1%}" if realized_cost else None,
-                    help=tr("home.realised_pl_help"),
-                )
+                kcol.html(kpi_grid_html([
+                    (tr("home.cost_basis"), f"{sym}{cost * fx:,.0f}", None, None),
+                    (
+                        tr("home.market_value"),
+                        f"{sym}{value * fx:,.0f}",
+                        None,
+                        None,
+                    ),
+                    (
+                        tr("home.unrealised_pl"),
+                        f"{sym}{(value - cost) * fx:+,.0f}",
+                        kpi_delta_chip(gain_pct),
+                        None,
+                    ),
+                    (
+                        tr("home.realised_pl"),
+                        f"{sym}{realized_gain * fx:+,.0f}",
+                        kpi_delta_chip(
+                            realized_gain / realized_cost if realized_cost else None
+                        ),
+                        tr("home.realised_pl_help"),
+                    ),
+                ]))
 
                 # Delta row — Today / 1 week / 1 month, mirroring the Portfolio
-                # page's second metric row. Cells (d1-d3) were carved above so
-                # they sit in the KPI column beside the sparkline.
+                # page's second metric row, in the KPI column beside the
+                # sparkline.
                 # Regular session closed → "Today" comes from the per-row
                 # day_eur (overridden to the live pre/after-hours quote, or the
                 # last completed session once those windows shut), not the
@@ -338,10 +347,11 @@ if auth.is_logged_in():
                     d_eur = tbl["day_eur"].dropna().sum()
                     base = value - d_eur
                     today_closed = (d_eur, d_eur / base if base else 0.0)
-                for col, label, days in (
-                    (d1, tr("home.today"), 1),
-                    (d2, tr("home.one_week"), 7),
-                    (d3, tr("home.one_month"), 30),
+                delta_tiles = []
+                for label, days in (
+                    (tr("home.today"), 1),
+                    (tr("home.one_week"), 7),
+                    (tr("home.one_month"), 30),
                 ):
                     chg = (
                         today_closed
@@ -349,18 +359,19 @@ if auth.is_logged_in():
                         else basket_change(hist, days)
                     )
                     if chg is None:
-                        col.metric(label, tr("home.na"))
+                        delta_tiles.append((label, tr("home.na"), None, None))
                     else:
-                        col.metric(
+                        delta_tiles.append((
                             label,
                             f"{sym}{chg[0] * fx:+,.0f}",
-                            f"{chg[1]:+.2%}",
-                            delta_color=(
-                                "off"
-                                if days == 1 and not mkt_open and not extended
-                                else "normal"
+                            kpi_delta_chip(
+                                chg[1],
+                                fmt="{:+.2%}",
+                                off=days == 1 and not mkt_open and not extended,
                             ),
-                        )
+                            None,
+                        ))
+                kcol.html(kpi_grid_html(delta_tiles))
                 if not mkt_open:
                     st.caption(
                         tr(
@@ -672,10 +683,9 @@ if _spark_slot is not None:
         _spark_slot.container().warning(tr("home.data_unavailable"))
         _hist = pd.DataFrame()
     if not _hist.empty:
-        # ffill BEFORE the 30-day slice so both lines enter the window
+        # ffill BEFORE any range slice so both lines enter the window
         # continuous instead of starting on the first in-window quote.
         _hist = _hist.ffill()
-        _hist = _hist.loc[_hist.index >= _hist.index[-1] - pd.Timedelta(days=30)]
     if len(_hist) >= 2:
 
         def _pct_span(p) -> str:
@@ -691,92 +701,123 @@ if _spark_slot is not None:
         def _spark_date(ts) -> str:
             return f"{ts.day:02d} {tr(f'home.mon_{ts.month}')} {ts.year}"
 
-        _custom = [
-            [inj, _pct_span(p), _spark_date(ts)]
-            for ts, inj, p in zip(
-                _hist.index, _hist["injected_eur"], _hist["pnl_pct"], strict=True
+        # Display window per range label, in calendar days (the ticker page's
+        # P/E range convention: literal labels, no i18n).
+        _SPARK_RANGES = {
+            "1w": 7, "1m": 30, "6m": 182, "1y": 365, "2y": 730, "5y": 1825,
+        }
+
+        @st.fragment
+        def _spark_chart() -> None:
+            """Value-vs-injected line with its own range selector. A fragment,
+            like the ticker page's valuation section: flipping the range
+            redraws only this cell, not the whole page."""
+            rng = (
+                st.segmented_control(
+                    tr("home.chart_value"),
+                    list(_SPARK_RANGES),
+                    default="1m",
+                    key="home_spark_range",
+                    label_visibility="collapsed",
+                )
+                or "1m"
             )
-        ]
-        fig = go.Figure()
-        # Injected is the reference line: muted gray step (contributions are
-        # steps, not slopes), visually secondary to the accent value line.
-        fig.add_trace(
-            go.Scatter(
-                x=_hist.index,
-                y=_hist["injected_eur"],
-                name=tr("home.chart_injected"),
-                line=dict(color=TEXT_MUTED, width=1.5, shape="hv", dash="dot"),
-                hoverinfo="skip",
+            win = _hist.loc[
+                _hist.index
+                >= _hist.index[-1] - pd.Timedelta(days=_SPARK_RANGES[rng])
+            ]
+            if len(win) < 2:
+                win = _hist  # book younger than the window — show the full span
+            _custom = [
+                [inj, _pct_span(p), _spark_date(ts)]
+                for ts, inj, p in zip(
+                    win.index, win["injected_eur"], win["pnl_pct"], strict=True
+                )
+            ]
+            fig = go.Figure()
+            # Injected is the reference line: muted gray step (contributions
+            # are steps, not slopes), visually secondary to the value line.
+            fig.add_trace(
+                go.Scatter(
+                    x=win.index,
+                    y=win["injected_eur"],
+                    name=tr("home.chart_injected"),
+                    line=dict(color=TEXT_MUTED, width=1.5, shape="hv", dash="dot"),
+                    hoverinfo="skip",
+                )
             )
-        )
-        # Sign-split value line (same mask-overlap trick as the Portfolio
-        # history chart): green above injected, red below; masks overlap one
-        # point at each crossing so the segments stay connected.
-        _gain = _hist["value_eur"] >= _hist["injected_eur"]
-        _up = _hist["value_eur"].where(_gain | _gain.shift(1, fill_value=False))
-        _down = _hist["value_eur"].where(
-            ~_gain | (~_gain).shift(1, fill_value=False)
-        )
-        # Both traces share the "Valor" legend name; only one shows in the
-        # legend (green wins when any point is in profit) to avoid a duplicate.
-        fig.add_trace(
-            go.Scatter(
-                x=_hist.index,
-                y=_up,
-                name=tr("home.chart_value"),
-                line=dict(color=PROFIT_COLOR, width=2),
-                hoverinfo="skip",
-                showlegend=bool(_gain.any()),
+            # Sign-split value line (same mask-overlap trick as the Portfolio
+            # history chart): green above injected, red below; masks overlap one
+            # point at each crossing so the segments stay connected.
+            _gain = win["value_eur"] >= win["injected_eur"]
+            _up = win["value_eur"].where(_gain | _gain.shift(1, fill_value=False))
+            _down = win["value_eur"].where(
+                ~_gain | (~_gain).shift(1, fill_value=False)
             )
-        )
-        fig.add_trace(
-            go.Scatter(
-                x=_hist.index,
-                y=_down,
-                name=tr("home.chart_value"),
-                line=dict(color=LOSS_COLOR, width=2),
-                hoverinfo="skip",
-                showlegend=not bool(_gain.any()),
+            # Both traces share the "Valor" legend name; only one shows in the
+            # legend (green wins when any point is in profit) — no duplicate.
+            fig.add_trace(
+                go.Scatter(
+                    x=win.index,
+                    y=_up,
+                    name=tr("home.chart_value"),
+                    line=dict(color=PROFIT_COLOR, width=2),
+                    hoverinfo="skip",
+                    showlegend=bool(_gain.any()),
+                )
             )
-        )
-        # Invisible full-coverage trace: one continuous tooltip regardless of
-        # which colored segment is under the cursor (as on the Portfolio page).
-        fig.add_trace(
-            go.Scatter(
-                x=_hist.index,
-                y=_hist["value_eur"],
-                line=dict(width=0),
-                opacity=0,
-                showlegend=False,
-                customdata=_custom,
-                hovertemplate=tr("home.spark_hover_tmpl"),
+            fig.add_trace(
+                go.Scatter(
+                    x=win.index,
+                    y=_down,
+                    name=tr("home.chart_value"),
+                    line=dict(color=LOSS_COLOR, width=2),
+                    hoverinfo="skip",
+                    showlegend=not bool(_gain.any()),
+                )
             )
-        )
-        fig.update_layout(
-            # Taller now the chart owns a full-height 30% column beside two KPI
-            # rows (was 132, sized for the old single delta-row slot).
-            height=190 if not is_mobile() else 132,
-            margin=dict(l=0, r=0, t=20, b=0),
-            hovermode="x",
-            legend=dict(
-                orientation="h", x=0, y=1.0, yanchor="bottom", font=dict(size=10)
-            ),
-            xaxis=dict(
-                nticks=3, tickfont=dict(size=10), showgrid=False,
-                fixedrange=True, automargin=True,
-            ),
-            yaxis=dict(
-                nticks=3, tickfont=dict(size=10), tickprefix="€",
-                tickformat="~s", showgrid=False, fixedrange=True,
-                automargin=True,
-            ),
-            hoverlabel=HOVERLABEL,
-            # Transparent so the sparkline blends into its card surface
-            # (same reason as show_chart), not Streamlit's darker page paper.
-            paper_bgcolor=TRANSPARENT,
-            plot_bgcolor=TRANSPARENT,
-        )
-        _spark_slot.container().plotly_chart(fig, config={"displayModeBar": False})
+            # Invisible full-coverage trace: one continuous tooltip regardless
+            # of which colored segment is under the cursor (as on Portfolio).
+            fig.add_trace(
+                go.Scatter(
+                    x=win.index,
+                    y=win["value_eur"],
+                    line=dict(width=0),
+                    opacity=0,
+                    showlegend=False,
+                    customdata=_custom,
+                    hovertemplate=tr("home.spark_hover_tmpl"),
+                )
+            )
+            fig.update_layout(
+                # Sized to fill the 30% column beside two KPI rows, minus the
+                # range selector row above the plot.
+                height=170 if not is_mobile() else 132,
+                margin=dict(l=0, r=0, t=20, b=0),
+                hovermode="x",
+                legend=dict(
+                    orientation="h", x=0, y=1.0, yanchor="bottom",
+                    font=dict(size=10),
+                ),
+                xaxis=dict(
+                    nticks=3, tickfont=dict(size=10), showgrid=False,
+                    fixedrange=True, automargin=True,
+                ),
+                yaxis=dict(
+                    nticks=3, tickfont=dict(size=10), tickprefix="€",
+                    tickformat="~s", showgrid=False, fixedrange=True,
+                    automargin=True,
+                ),
+                hoverlabel=HOVERLABEL,
+                # Transparent so the sparkline blends into its card surface
+                # (same reason as show_chart), not the darker page paper.
+                paper_bgcolor=TRANSPARENT,
+                plot_bgcolor=TRANSPARENT,
+            )
+            st.plotly_chart(fig, config={"displayModeBar": False})
+
+        with _spark_slot.container():
+            _spark_chart()
     elif not _spark_slot.resolved:
         # Nothing to plot — a throttled fetch, or a book younger than the two
         # points a line needs. Drop the shimmer rather than leave it sweeping

@@ -148,6 +148,28 @@ def ledger_history(fingerprint: tuple, db: str):
     return hist, twr, missing
 
 
+@st.cache_data(ttl=86400, show_spinner=False, max_entries=8)
+def trade_bars(db: str, mtime: float) -> dict[str, pd.DataFrame]:
+    """Daily UNADJUSTED OHLC per traded ticker, spanning the whole ledger.
+
+    Feeds the Fees tab's spread estimate: execution prices are as-traded, so
+    the reference bars must not be dividend-adjusted (auto_adjust=False —
+    splits are replayed from the ledger in portfolio.fees). Historical bars
+    never change, hence the day-long ttl; `mtime` refetches after an import
+    (new tickers / older first trade may widen the span)."""
+    from stocks.data.fetch import fetch_many
+
+    txs = ledger_state(db, mtime)[0]
+    trades = [t for t in txs if t.action in ("buy", "sell")]
+    if not trades:
+        return {}
+    tickers = sorted({t.ticker for t in trades})
+    first = min(t.date for t in trades)
+    span = (date.today() - date.fromisoformat(first)).days
+    period = "2y" if span <= 700 else "5y" if span <= 1780 else "max"
+    return fetch_many(tickers, period=period, auto_adjust=False)
+
+
 @st.cache_data(ttl=3600, show_spinner=False)
 def eur_spot(quote: str) -> float | None:
     """Latest EUR→quote rate for the display-currency preference."""

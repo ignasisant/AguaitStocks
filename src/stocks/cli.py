@@ -573,6 +573,8 @@ def cmd_tax(args: argparse.Namespace) -> None:
     if ty.deferred_loss_eur:
         print(f"  of which deferred:   {ty.deferred_loss_eur:>12,.0f} EUR (2-month rule)")
     print(f"deductible losses:     {ty.deductible_loss_eur:>12,.0f} EUR")
+    if ty.recovered_loss_eur:
+        print(f"recovered deferrals:   {ty.recovered_loss_eur:>12,.0f} EUR (replacement sold)")
     print(f"net taxable base:      {ty.net_taxable_eur:>12,.0f} EUR")
     print(f"estimated tax:         {ty.estimated_tax_eur:>12,.0f} EUR")
     if ty.carryforward_loss_eur:

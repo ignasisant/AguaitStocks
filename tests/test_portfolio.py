@@ -1,5 +1,7 @@
 """Portfolio analytics tests — synthetic price/return frames, no network."""
 
+import math
+
 import numpy as np
 import pandas as pd
 
@@ -288,6 +290,54 @@ def test_time_weighted_returns_credits_dividends():
 
 def test_time_weighted_returns_empty():
     assert time_weighted_returns(pd.Series(dtype=float), pd.Series(dtype=float)).empty
+
+
+# ------------------------------------------------------ money-weighted returns
+from stocks.analysis.portfolio import money_weighted_return  # noqa: E402
+
+
+def test_money_weighted_return_doubling_year():
+    idx = pd.to_datetime(["2023-01-01", "2024-01-01"])
+    value = pd.Series([1000.0, 2000.0], index=idx)
+    r = money_weighted_return(value, pd.Series(dtype=float))
+    assert abs(r - 1.0) < 0.01  # doubled in ~a year -> ~+100%/yr
+
+
+def test_money_weighted_return_flat_with_deposit_is_zero():
+    """No price move -> IRR 0 regardless of a mid-window deposit."""
+    idx = pd.to_datetime(["2024-01-01", "2024-02-20", "2024-04-10"])
+    value = pd.Series([1000.0, 2000.0, 2000.0], index=idx)
+    flows = pd.Series({pd.Timestamp("2024-02-20"): 1000.0})
+    r = money_weighted_return(value, flows)
+    assert abs(r) < 1e-6
+
+
+def test_money_weighted_return_punishes_badly_timed_deposit():
+    """Big deposit right before a -50% leg: IRR must read worse than -50%/yr
+    (the TWR of the same path would be exactly -50% annualised)."""
+    idx = pd.to_datetime(["2023-01-01", "2023-07-02", "2023-12-31"])
+    value = pd.Series([100.0, 1000.0, 500.0], index=idx)
+    flows = pd.Series({pd.Timestamp("2023-07-02"): 900.0})
+    r = money_weighted_return(value, flows)
+    assert r < -0.5
+
+
+def test_money_weighted_return_start_clips_window():
+    """Opening value at `start` counts as the buy-in; earlier flat history
+    must not dilute the windowed rate."""
+    idx = pd.to_datetime(["2022-06-01", "2023-01-01", "2024-01-01"])
+    value = pd.Series([1000.0, 1000.0, 2000.0], index=idx)
+    r = money_weighted_return(
+        value, pd.Series(dtype=float), start=pd.Timestamp("2023-01-01")
+    )
+    assert abs(r - 1.0) < 0.01
+
+
+def test_money_weighted_return_degenerate():
+    empty = pd.Series(dtype=float)
+    assert math.isnan(money_weighted_return(empty, empty))
+    one = pd.Series([100.0], index=pd.to_datetime(["2024-01-01"]))
+    assert math.isnan(money_weighted_return(one, pd.Series(dtype=float)))
 
 
 from stocks.analysis.portfolio import basket_change  # noqa: E402

@@ -798,23 +798,25 @@ def render_result_body(
     with skeletons.slot("metrics", n=3) as tiles:
         move = reaction(ticker, iso)
         with tiles.container():
-            m1, m2, m3 = st.columns(3)
-            m1.metric(
-                tr("earnings.reported_eps"),
-                f"{r.reported_eps:.2f}" if r.reported_eps is not None else "—",
-                delta=tr("earnings.surprise_vs_est", pct=f"{r.surprise_pct:+.2f}")
-                if r.surprise_pct is not None
-                else None,
-            )
-            m2.metric(
-                tr("earnings.eps_estimate"),
-                f"{r.eps_estimate:.2f}" if r.eps_estimate is not None else "—",
-            )
-            m3.metric(
-                tr("earnings.price_reaction"),
-                f"{move:+.2f}%" if move is not None else "—",
-                delta=f"{move:+.2f}%" if move is not None else None,
-            )
-            st.caption(tr("earnings.price_reaction_caption"))
+            st.html(kpi_grid_html([
+                (
+                    tr("earnings.reported_eps"),
+                    _eps(r.reported_eps),
+                    (
+                        tr("earnings.surprise_vs_est", pct=f"{r.surprise_pct:+.2f}"),
+                        _tone(r.surprise_pct),
+                    )
+                    if r.surprise_pct is not None
+                    else None,
+                    None,
+                ),
+                (tr("earnings.eps_estimate"), _eps(r.eps_estimate), None, None),
+                (
+                    tr("earnings.price_reaction"),
+                    f"{move:+.2f}%" if move is not None else "—",
+                    None,
+                    tr("earnings.price_reaction_caption"),
+                ),
+            ]))
 
     _breakdown(r, results)

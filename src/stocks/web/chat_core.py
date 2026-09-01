@@ -24,6 +24,7 @@ import pandas as pd
 import streamlit as st
 from cryptography.fernet import Fernet
 
+from stocks import obs
 from stocks.chat import engine, market, tools
 from stocks.config import load_watchlist
 from stocks.portfolio import autodetect, last_import, llm_map
@@ -440,6 +441,66 @@ def _retire_on_first_chunk(pending, chunks):
     finally:
         if not pending.resolved:
             pending.clear()
+
+
+def _stream_with_fallback(pending, provider: llm.Provider, api_key: str,
+                          model: str, system: str, msgs: list[dict],
+                          prefs: dict) -> str:
+    """The answer stream, retried down the provider chain when the chosen
+    provider dies: chosen first, then the other saved keys, then the keyless
+    free chain — the same resolution order as the Telegram bot
+    (engine.attempts). Before this, one saturated provider (a Gemini 503)
+    killed the whole turn even with a healthy chain behind it.
+
+    A later candidate only runs while the bubble is still empty: once a first
+    token is on screen, switching providers would splice two answers into one
+    bubble, so a mid-answer failure propagates as before. The provider that
+    actually raised rides on the exception (``chat_provider``) so the caller
+    classifies and names the right one.
+    """
+    cands = [(provider, api_key, model or provider.default_model)]
+    for p, k, m in engine.attempts(prefs):
+        if p.id != provider.id:
+            cands.append((p, k, m or p.default_model))
+    last_exc: Exception | None = None
+    for i, (p, k, m) in enumerate(cands):
+        # The chosen free provider's quota is spent by the caller before the
+        # turn starts; a fallback into the free chain spends here, and a spent
+        # cap just skips the candidate — the cap message would bury the real
+        # story (the chosen provider failing).
+        if i and p.id == "free" and not _spend_free_quota():
+            continue
+        started: list[bool] = []
+
+        def _tap(chunks, seen=started):
+            for c in chunks:
+                seen.append(True)
+                yield c
+
+        try:
+            answer = st.write_stream(_retire_on_first_chunk(
+                pending, _tap(p.stream(k, m, system, msgs))))
+        except Exception as exc:
+            try:
+                exc.chat_provider = p
+            except Exception:
+                pass
+            if started or i == len(cands) - 1:
+                raise
+            last_exc = exc
+            obs.warn("chat.provider_fallthrough", provider=p.id, model=m,
+                     error_type=type(exc).__name__, error=str(exc)[:300])
+            continue
+        if i:
+            st.caption(tr("chat.fallback_note", provider=p.label,
+                          chosen=provider.label))
+            obs.event("chat.fallback_answered", provider=p.id,
+                      chosen=provider.id)
+        return answer
+    # Every fallback was skipped (free cap spent) — surface the chosen
+    # provider's original failure rather than inventing a new one.
+    assert last_exc is not None
+    raise last_exc
 
 
 # ------------------------------------------------------------- context
@@ -913,24 +974,23 @@ def render_conversation(ns: str, provider: llm.Provider, model: str,
                     if live:
                         msgs[-1]["content"] = market.augment(
                             msgs[-1]["content"], live)
-                    answer = st.write_stream(
-                        _retire_on_first_chunk(
-                            pending,
-                            provider.stream(api_key, model,
-                                            _system_prompt(skills), msgs),
-                        )
-                    )
+                    answer = _stream_with_fallback(
+                        pending, provider, api_key, model,
+                        _system_prompt(skills), msgs, prefs)
                     web_sources = chat_web.sources(hits)
                     if web_sources:
                         st.caption(_sources_label(web_sources))
                 except Exception as exc:  # classified per provider; unknown -> re-raise
                     pending.clear()
-                    err = provider.error_key(exc)
+                    # The chain tags the exception with the provider that
+                    # actually raised (the chosen one, or the last fallback).
+                    failed = getattr(exc, "chat_provider", provider)
+                    err = failed.error_key(exc)
                     if err is None:
                         raise
                     history.pop()  # drop the unanswered user turn
                     auth.save_chat(history)
-                    st.error(tr(err, provider=provider.label))
+                    st.error(tr(err, provider=failed.label))
                     st.stop()
             turn: dict = {"role": "assistant", "content": answer}
             if skills:
@@ -998,6 +1058,12 @@ _PANEL_CSS = """
   color: var(--ag-text-primary) !important;
 }
 .st-key-chatfab button * { color: var(--ag-text-primary) !important; }
+/* Phones: DS 44px touch target, centered in the 3.75rem native header.
+   After the base button rule above, so the mobile size wins on source order. */
+@media (max-width: 640px) {
+  .st-key-chatfab { top: 8px; }
+  .st-key-chatfab button { width: 44px; height: 44px; }
+}
 .st-key-chatpanel {
   position: fixed; top: 0; right: 0; bottom: 0;   /* full height */
   /* width driven by the --chat-w var (set live by the width slider), never
