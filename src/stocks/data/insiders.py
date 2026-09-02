@@ -41,6 +41,9 @@ CODE_LABELS = {
     "X": "Option exercise",
     "G": "Gift",
     "W": "Inherited/will",
+    # Not a Form 4 code: what `bafin.py` maps a non-purchase/sale notification
+    # to (Zeichnung, Ausübung, Sonstiges…), so the row still reads as a word.
+    "O": "Other",
 }
 BUY_CODE = "P"
 SELL_CODE = "S"
@@ -58,10 +61,16 @@ class InsiderTx:
     shares: float
     price: float | None
     ticker: str = ""
+    # Form 4 is priced in USD and filed with the SEC; the EU regulators that
+    # publish the same disclosure (see `bafin.py`) report in EUR. Carrying both
+    # on the row keeps a mixed list honest about what a value means and where
+    # it came from — callers must not add across currencies.
+    currency: str = "USD"
+    source: str = "SEC"
 
     @property
     def value(self) -> float | None:
-        """Notional dollar value (shares × price); None when price is absent."""
+        """Notional value in `currency` (shares × price); None without a price."""
         return None if self.price is None else self.shares * self.price
 
     @property

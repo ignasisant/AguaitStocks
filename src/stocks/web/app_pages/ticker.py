@@ -1,7 +1,7 @@
 """Ticker page — per-company dashboard: price, fundamentals, insiders, comps.
 
-Page config, CSS, navigation and the sidebar ticker picker live in web/app.py;
-this module is content only and reads the picker's shared selection. The price
+Page config, CSS, navigation and the top-bar ticker search live in web/app.py;
+this module is content only and reads the shared selection. The price
 section is a fragment so period changes redraw the chart without re-running
 fundamentals, insiders and comparables below it.
 """
@@ -33,7 +33,9 @@ from stocks.analysis.indicators import add_indicators
 from stocks.analysis.moat import PILLAR_WEIGHTS, MoatScore, moat_score
 from stocks.analysis.pe_history import pe_vs_history, window_stats
 from stocks.config import load_watchlist
+from stocks.data.bafin import insider_transactions as bafin_transactions
 from stocks.data.crypto import is_crypto, split_pair
+from stocks.data.edgar import cik_for
 from stocks.data.estimates import (
     RawEstimates,
     estimate_currency,
@@ -43,7 +45,7 @@ from stocks.data.estimates import (
 from stocks.data.fetch import fetch_history
 from stocks.data.fundamentals import fetch_fundamentals
 from stocks.data.funds import FundProfile, fetch_profile, is_fund
-from stocks.data.fx import usd_eur
+from stocks.data.fx import spot
 from stocks.data.insiders import (
     BUY_CODE,
     insider_transactions,
@@ -51,6 +53,7 @@ from stocks.data.insiders import (
     transactions_frame,
 )
 from stocks.formatting import compact_money
+from stocks.portfolio.custody import Custody, by_position, mix
 from stocks.portfolio.ledger import all_transactions
 from stocks.portfolio.positions import build as build_positions
 from stocks.web import auth, notices, skeletons
@@ -88,6 +91,7 @@ from stocks.web.widgets import (
     TRANSPARENT,
     UP_COLOR,
     WARN_COLOR,
+    broker_chips_html,
     chart_layout,
     company_name,
     data_table,
@@ -105,8 +109,13 @@ from stocks.web.widgets import (
 from stocks.web.widgets import logo as _logo
 
 _MOBILE = is_mobile()
+# The account's reporting currency: the "≈" line under a position's native
+# value is converted into it, and the ledger replay behind that value uses it
+# as its base (see web/portfolio_data.py).
+REPORT_CCY = auth.reporting_currency()
+REPORT_SYM = auth.CURRENCY_SYMBOL[REPORT_CCY]
 
-# Selection comes from the global sidebar picker (web/app.py); the ?ticker=
+# Selection comes from the top-bar search (web/app.py); the ?ticker=
 # deep-link handling there feeds the same session key.
 ticker = (st.session_state.get("picker_selected") or "").strip().upper()
 if not ticker:
@@ -296,19 +305,31 @@ def _event_markers(
 def _held(db: str):
     """Open positions with *native-currency* cost (identity FX: no network)."""
     try:
-        positions, _ = build_positions(_ledger(db), to_eur=lambda a, c, d: a)
+        positions, _ = build_positions(_ledger(db), to_base=lambda a, c, d: a)
         return {p.ticker: p for p in positions}
     except Exception:
         return {}
 
 
+@st.cache_data(ttl=60, show_spinner=False)
+def _custody(db: str) -> dict[str, dict[str, Custody]]:
+    """Open shares per (ticker, broker): which broker's account holds them.
+
+    Identity FX like `_held` — the header only needs the share split, not a
+    EUR basis, so this stays off the network."""
+    try:
+        return by_position(_ledger(db), to_base=lambda a, c, d: a)
+    except Exception:
+        return {}
+
+
 @st.cache_data(ttl=300, show_spinner=False)
-def _position_values_eur(db: str) -> dict[str, float]:
-    """Live EUR market value per open position (latest price × ECB spot)."""
-    from stocks.analysis.portfolio import market_values_eur
+def _position_values(db: str, base: str = "EUR") -> dict[str, float]:
+    """Live market value per open position in `base` (price × spot)."""
+    from stocks.analysis.portfolio import market_values
 
     held = _held(db)
-    return market_values_eur(list(held.values())) if held else {}
+    return market_values(list(held.values()), base=base) if held else {}
 
 
 def _live_quote(ticker: str) -> dict | None:
@@ -458,21 +479,21 @@ def _mobile_summary_html(
         + "</span></div>"
     ]
     if my_pos:
-        values_eur = _position_values_eur(db)
-        total_eur = sum(values_eur.values())
-        value_eur = values_eur.get(my_pos.ticker)
+        values_base = _position_values(db, REPORT_CCY)
+        total = sum(values_base.values())
+        value = values_base.get(my_pos.ticker)
         value_native = my_pos.quantity * last
         pnl_native = value_native - my_pos.cost_native
         pnl_pct = (
             (last / my_pos.avg_cost_native - 1) * 100 if my_pos.avg_cost_native else 0.0
         )
-        weight = f"{value_eur / total_eur * 100:.1f}%" if value_eur and total_eur else "—"
+        weight = f"{value / total * 100:.1f}%" if value and total else "—"
         parts.append(
             '<div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">'
             + _tile(
                 tr("ticker.position_value"),
                 f"{value_native:,.2f} {my_pos.currency}",
-                _muted(f"≈ €{value_eur:,.2f}") if value_eur else "",
+                _muted(f"≈ {REPORT_SYM}{value:,.2f}") if value else "",
             )
             + _tile(
                 tr("ticker.unrealised_pl"),
@@ -504,17 +525,17 @@ def _position_metrics(cols, pos, last: float) -> None:
     value_native = pos.quantity * last
     pnl_native = value_native - pos.cost_native
     pnl_pct = (last / pos.avg_cost_native - 1) * 100 if pos.avg_cost_native else 0.0
-    values_eur = _position_values_eur(str(auth.db_path()))
-    total_eur = sum(values_eur.values())
-    value_eur = values_eur.get(pos.ticker)
+    values_base = _position_values(str(auth.db_path()), REPORT_CCY)
+    total = sum(values_base.values())
+    value = values_base.get(pos.ticker)
 
     p1, p2, p3, p4 = cols
     p1.metric(tr("ticker.position_value"), f"{value_native:,.2f} {pos.currency}")
-    if value_eur:
-        p1.caption(f"≈ €{value_eur:,.2f}")
+    if value:
+        p1.caption(f"≈ {REPORT_SYM}{value:,.2f}")
     p2.metric(
         tr("ticker.pct_portfolio"),
-        f"{value_eur / total_eur * 100:.1f}%" if value_eur and total_eur else "—",
+        f"{value / total * 100:.1f}%" if value and total else "—",
         help=tr("ticker.pct_portfolio_help"),
     )
     p3.metric(
@@ -1045,7 +1066,8 @@ def _header_html() -> str:
                 f'<span style="font-size:{FS_BASE};color:{TEXT_MUTED}">'
                 f"{html.escape(label)}</span>"
             )
-    if ticker in _held(str(auth.db_path())):
+    db = str(auth.db_path())
+    if ticker in _held(db):
         # Purple-800 fill / purple-300 text — the DS brand badge pair on dark.
         parts.append(
             f'<span style="background:{PURPLE_800};color:{PURPLE_300};'
@@ -1053,6 +1075,14 @@ def _header_html() -> str:
             "padding:2px 8px;white-space:nowrap;"
             f'{"margin-left:auto" if _MOBILE else ""}">'
             f'{html.escape(tr("ticker.in_portfolio"))}</span>'
+        )
+        # Whose account the shares sit in, right beside the badge: one brand
+        # mark per custodian (two when a holding is split), each one's share
+        # of the position on its tooltip.
+        parts.append(
+            broker_chips_html(
+                mix(_custody(db).get(ticker, {})), size=20 if _MOBILE else 22
+            )
         )
     return (
         '<div style="display:flex;align-items:center;gap:'
@@ -1270,6 +1300,15 @@ if _fund_profile is not None:
     st.stop()
 
 
+def _yoy_pct(cur: float | None, prev: float | None) -> float | None:
+    """Growth measured against the magnitude of the base, so a loss deepening
+    from -56M to -187M reads -233% instead of the +233% a plain cur/prev - 1
+    reports once the two negatives cancel. None when there is no usable base."""
+    if cur is None or prev is None or pd.isna(cur) or pd.isna(prev) or prev == 0:
+        return None
+    return (cur - prev) / abs(prev) * 100
+
+
 def _annual_combined_chart(fin: pd.DataFrame, proj: pd.DataFrame) -> None:
     """Grouped revenue / net income bars with diluted EPS overlaid on a
     right-hand axis; forward consensus appended for both (hatched translucent
@@ -1300,10 +1339,10 @@ def _annual_combined_chart(fin: pd.DataFrame, proj: pd.DataFrame) -> None:
         has_bars = True
         s = fin[col]
         # Year-over-year growth as the per-bar label (blank for first year).
-        yoy = s.pct_change() * 100
+        yoy = [_yoy_pct(cur, prev) for prev, cur in zip(s.shift(), s, strict=True)]
         x = list(years)
         y = list(s)
-        text = [f"{v:+.0f}%" if pd.notna(v) else "" for v in yoy]
+        text = [f"{v:+.0f}%" if v is not None else "" for v in yoy]
         kind = ["reported"] * len(x)
         pattern = [""] * len(x)
         opacity = [1.0] * len(x)
@@ -1313,7 +1352,8 @@ def _annual_combined_chart(fin: pd.DataFrame, proj: pd.DataFrame) -> None:
             for lbl, v in rev_est.items():
                 x.append(lbl)
                 y.append(v)
-                text.append(f"{(v / prev - 1) * 100:+.0f}%" if prev else "")
+                pct = _yoy_pct(v, prev)
+                text.append(f"{pct:+.0f}%" if pct is not None else "")
                 kind.append(
                     tr("ticker.k_extrapolated")
                     if proj.loc[lbl, "RevenueExt"]
@@ -1535,8 +1575,9 @@ def _metrics(t: str) -> dict:
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
-def _fx_usd_eur() -> tuple[float, str]:
-    return usd_eur()
+def _fx_usd_base(base: str) -> tuple[float, str]:
+    """(rate, as_of) for USD -> the account's reporting currency."""
+    return spot("USD", base)
 
 
 def _kpi(label: str, key: str, help: str | None = None) -> tuple:
@@ -1586,13 +1627,14 @@ with _fund_card.container(border=True):
 
         if mets.get("market_cap") and mets.get("currency") == "USD":
             try:
-                rate, as_of = _fx_usd_eur()
-                cap_eur = float(mets["market_cap"]) * rate
+                rate, as_of = _fx_usd_base(REPORT_CCY)
+                cap = float(mets["market_cap"]) * rate
                 st.caption(
                     tr(
                         "ticker.market_cap_fx",
                         usd=format_value("market_cap", mets["market_cap"]),
-                        eur=format_value("market_cap", cap_eur),
+                        conv=format_value("market_cap", cap),
+                        ccy=REPORT_CCY,
                         rate=f"{rate:.4f}",
                         as_of=as_of,
                     )
@@ -1772,36 +1814,79 @@ def _insiders(t: str):
     return insider_transactions(t)
 
 
+@st.cache_data(ttl=86400, show_spinner=False)
+def _sec_filer(t: str) -> bool | None:
+    """Does this symbol appear in the SEC ticker map? None if the lookup failed.
+
+    An empty Form 4 list means two different things and they read very
+    differently: a US filer whose insiders simply haven't traded, versus a
+    foreign issuer that never files Form 4 at all. The CIK map is the same
+    thing `insider_transactions` keys off, so asking it here costs nothing
+    beyond the cached lookup.
+    """
+    try:
+        return cik_for(t) is not None
+    except (URLError, TimeoutError, OSError):
+        return None
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def _insiders_de(t: str, issuer: str | None):
+    return bafin_transactions(t, issuer=issuer)
+
+
 # Form 4 filings come from EDGAR, not the yfinance cache, so this is its own
 # round trip — four summary tiles reserved while it runs.
 _ins_card = skeletons.reserve("metrics", border=True, title=True, n=4)
 txs = _insiders(ticker)
+# A symbol EDGAR has never heard of is not a symbol without insider trades: the
+# EU discloses the same thing under MAR Art. 19, and BaFin republishes the
+# German half. Only reached when EDGAR came back empty AND the SEC ticker map
+# has no CIK, so a US filer in a quiet quarter never pays for this request.
+if not txs and _sec_filer(ticker) is False:
+    issuer = _raw(ticker).info.get("longName") or company_name(ticker)
+    txs = _insiders_de(ticker, issuer)
+# Every row of one list shares a currency: EDGAR is USD, BaFin is EUR.
+_ccy = txs[0].currency if txs else "USD"
+_sym = {"EUR": "€", "USD": "$", "GBP": "£"}.get(_ccy, "")
+_from_bafin = bool(txs) and txs[0].source == "BaFin"
 
 with _ins_card.container(border=True):
     st.subheader(tr("ticker.insider_activity"))
-    st.caption(tr("ticker.insider_caption"))
     if not txs:
-        st.caption(tr("ticker.no_form4"))
+        # Nothing filed anywhere we can reach: the Form 4 methodology blurb
+        # explains a table that isn't there, so the empty state stands alone
+        # (same shape as the P/E-history section). Which empty state depends on
+        # whether the SEC has ever heard of the symbol.
+        filer = _sec_filer(ticker)
+        st.caption(
+            tr("ticker.no_form4_non_us") if filer is False
+            else tr("ticker.no_form4")
+        )
     else:
+        st.caption(
+            tr("ticker.insider_caption_bafin") if _from_bafin
+            else tr("ticker.insider_caption")
+        )
         summ = summarize(txs, ref=date.today())
         st.html(kpi_grid_html([
             (
                 tr("ticker.buys_open_market"),
                 str(summ.buy_count),
-                (f"+{_fmt_money(summ.buy_value)}", "green")
+                (f"+{_fmt_money(summ.buy_value, _sym)}", "green")
                 if summ.buy_value else None,
                 None,
             ),
             (
                 tr("ticker.sells_open_market"),
                 str(summ.sell_count),
-                (f"-{_fmt_money(summ.sell_value)}", "red")
+                (f"-{_fmt_money(summ.sell_value, _sym)}", "red")
                 if summ.sell_value else None,
                 None,
             ),
             (
                 tr("ticker.net_window", days=summ.window_days),
-                _fmt_money(summ.net_value),
+                _fmt_money(summ.net_value, _sym),
                 None,
                 None,
             ),
@@ -1844,14 +1929,14 @@ with _ins_card.container(border=True):
                             x=pivot.index, y=pivot[side], name=side_labels[side],
                             marker_color=color,
                             hovertemplate=(
-                                f"{side_labels[side]}  <b>$%{{y:.3s}}</b>"
+                                f"{side_labels[side]}  <b>{_sym}%{{y:.3s}}</b>"
                                 "<extra></extra>"
                             ),
                         )
                     )
             bar.update_layout(
                 **chart_layout(
-                    title=tr("ticker.chart_insider_title"),
+                    title=tr("ticker.chart_insider_title", ccy=_sym),
                     top_legend=True,
                     height=220,
                 ),
@@ -1867,7 +1952,11 @@ with _ins_card.container(border=True):
         data_table(
             transactions_frame(txs).head(30),
             title="Insider",
-            fmt={"Shares": "{:+,.0f}", "Price": "${:,.2f}", "Value": "${:+,.0f}"},
+            fmt={
+                "Shares": "{:+,.0f}",
+                "Price": f"{_sym}{{:,.2f}}",
+                "Value": f"{_sym}{{:+,.0f}}",
+            },
             signed=("Shares", "Value"),
             labels={
                 "Date": tr("ticker.col_date"),
@@ -1885,10 +1974,10 @@ with _ins_card.container(border=True):
                     tr("ticker.col_shares"), format="%d"
                 ),
                 "Price": st.column_config.NumberColumn(
-                    tr("ticker.col_price"), format="$%.2f"
+                    tr("ticker.col_price"), format=f"{_sym}%.2f"
                 ),
                 "Value": st.column_config.NumberColumn(
-                    tr("ticker.col_value"), format="$%.0f"
+                    tr("ticker.col_value"), format=f"{_sym}%.0f"
                 ),
             },
         )
