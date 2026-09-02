@@ -169,6 +169,7 @@ uv run stocks tx import trades.csv   # bulk load (our schema: date,ticker,action
 uv run stocks positions              # open positions + unrealized P/L (EUR)
 uv run stocks realized --year 2025   # FIFO-matched realized sales (EUR)
 uv run stocks tax --year 2025        # IRPF savings-base summary + estimated tax
+uv run stocks tax --year 2025 -j US --other-income 100000  # US federal, short/long
 uv run stocks dividends --year 2025  # dividend income + foreign withholding (EUR)
 ```
 
@@ -314,7 +315,7 @@ Loading vs verification are separate concerns:
 |---|---|---|
 | Load prices + fundamentals | yfinance | none |
 | Verify facts (primary, US filers) | SEC EDGAR companyfacts API | none (`EDGAR_USER_AGENT` in `.env`) |
-| Spot FX EUR (ES tax basis) | frankfurter.dev (ECB rates) | none |
+| Spot FX (tax basis, any base ccy) | frankfurter.dev (ECB rates) | none |
 | Manual cross-check: 10y ratios | stockanalysis.com | — |
 | Manual cross-check: 15-20y trends | macrotrends.net | — |
 | Manual cross-check: consensus/comps | Koyfin / TIKR | — |
@@ -374,17 +375,50 @@ Decision-support layer over the watchlist — dashboard pages (Streamlit
 Pure logic (screening, portfolio math, alert evaluation, earnings-date
 selection) is unit-tested offline; only the fetchers touch the network.
 
-## Portfolio, FIFO & Spanish tax
+## Portfolio, FIFO & tax
 
 Positions and tax derive from one source of truth: a transaction ledger in
 SQLite (`data/portfolio.db`, gitignored — it's your private book). Record
 `buy | sell | dividend | fee | split` events; everything else is computed.
 
+**Reporting currency.** Profile → *Reporting currency* (EUR, USD, GBP, CHF,
+SEK, NOK, DKK, PLN, CZK, CAD, AUD) is
+not a display setting: the ledger is replayed *in* it, every leg at the rate for
+its own trade date, so positions, P/L, the TWR series, dividends and fees are
+computed in it rather than converted at the end (`positions.build(base=…)`,
+`analysis.portfolio.*(base=…)`, and the cached web loaders key on it). The CLI
+takes `-c/--currency` on the money commands. The **Realized & tax** tab is the
+exception — it follows the tax residence, which is a legal fact, not a taste.
+
+Tax is per **jurisdiction** (`src/stocks/portfolio/tax/`): Spain (IRPF), the
+United States (federal capital gains), the United Kingdom (CGT) and Germany
+(Abgeltungsteuer) ship today. A jurisdiction also owns two things beyond its
+rates: the **share-matching rule** the replay uses (`positions.build(matching=…)`
+— FIFO, or the UK's s.104 pool) and the **tax-year boundary** (6 April in the
+UK, 1 January elsewhere), so the year selector and the period filter follow the
+country rather than the calendar. Pick yours on the Profile
+page — *Tax residence*, defaulting to your browser's region and falling back to
+Spain — or pass `-j ES|US` to `stocks tax`. The choice sets the rules, the
+reporting currency and the wording: the ledger is replayed **at** that currency
+(EUR at the ECB rate of each transaction date for Spain, USD at that date's
+rate for the US), because a cost basis is a per-transaction conversion and not
+something you can convert once at the end. Adding a country means one module
+plus its `portfolio.<code>_*` catalog keys — no page edits.
+
+The marketing landing argues one country's case per page, so it ships four
+URLs: `/` (English, US rules), `/es/` (Spanish, Spain), `/en-es/` (English,
+Spain) and `/es-us/` (Spanish, US). hreflang pairs translations only — the two
+Spain-tax pages with each other, the two US-tax ones with each other — and the
+in-page toggles switch one axis at a time.
+
+### Spain (IRPF)
+
 - **FIFO** (art. 37 LIRPF): sales match oldest lots first. Acquisition cost
   includes buy commissions; proceeds are net of sell commissions.
 - **EUR at transaction date**: every leg converts to EUR at the ECB rate for
   its date (frankfurter.dev, cached in `data/fx_history.json`; weekends resolve
-  to the prior business day). This is the Hacienda basis, not spot.
+  to the prior business day). This is the Hacienda basis, not spot. The same
+  machinery values a book in any reporting currency — see below.
 - **IRPF savings base**: progressive brackets (19/21/23/27/28%); losses net
   against gains; net loss carries forward 4 years.
 - **Regla de los 2 meses** (art. 33.5.f): a loss is auto-deferred when
@@ -393,9 +427,68 @@ SQLite (`data/portfolio.db`, gitignored — it's your private book). Record
   (treaty cap ~15%) and the reclaimable excess (e.g. French over-withholding).
 - **Modelo 720 flag**: warns when foreign holdings clear the 50.000 EUR line.
 
+### United States (IRS, federal)
+
+- **Short vs long term**: long-term needs *more* than a year of holding (the
+  anniversary itself is still short). Ordinary rates on the net short-term
+  gain, stacked on the other taxable income you set in Profile; 0/15/20% on the
+  net long-term gain; optional 3.8% NIIT above the MAGI threshold.
+- **Wash sale** (IRC 1091): a loss is disallowed when the same security is
+  bought back within 30 days either side, and is restored — with its original
+  short/long character — as the replacement shares are sold.
+- **Loss limits** (IRC 1211/1212): net capital losses deduct $3,000 against
+  ordinary income ($1,500 filing separately); the rest carries forward
+  indefinitely.
+- **FBAR / Form 8938 flags**: thresholds crossed by holdings abroad
+  ($10,000 aggregate; $50k/$75k single, $100k/$150k joint). Federal only — no
+  state tax, no lot elections, no Section 1256.
+
+### United Kingdom (CGT)
+
+- **Share identification** (TCGA 1992 s.105/106A), in the replay rather than
+  the tax module: same-day acquisitions first, then anything bought in the 30
+  days *after* a disposal (the bed-and-breakfast rule — sell and buy back next
+  week and no loss is banked), then the Section 104 pool at average cost. The
+  Realized table names the rule each parcel used, because a pooled "cost" is
+  not the lot you thought you sold.
+- **Tax year 6 April – 5 April**: a February disposal belongs to the year that
+  opened the previous April, and the selector reads "2025/26".
+- **Annual Exempt Amount** £3,000 (£6,000 in 2023/24, £12,300 before). Losses
+  come off *before* it, so a loss-making year can waste the allowance — the tab
+  says how much went to waste.
+- **Rates**: 18% inside the remaining basic-rate band, 24% above (from 30
+  October 2024; 2024/25 straddled the change and is flagged as priced
+  post-Budget). Losses carry forward indefinitely once claimed.
+- **£50,000 proceeds test**: flagged as a note when disposals pass it, since a
+  return is due then even with no gain.
+
+### Germany (Abgeltungsteuer)
+
+- **Flat rate**: 25% plus the 5.5% solidarity surcharge *on the tax*
+  (26.375%), plus church tax at 8% or 9% of the tax where it applies (~27.99%).
+- **Two loss circles** (§20(6) EStG): losses on shares offset only gains on
+  shares; fund and other losses offset capital income generally, share gains
+  included. Both carry forward indefinitely, and separately.
+- **Teilfreistellung**: 30% of an equity fund's result is exempt — losses as
+  well as gains. Applied to the holdings classified as funds from the learned
+  Yahoo `quoteType` cache; an unclassified book computes without it and says so.
+- **Sparer-Pauschbetrag**: €1,000, €2,000 on a joint return.
+- **Anlage KAP / AWV flags**: a foreign broker withholds no Abgeltungsteuer, so
+  the income has to be declared; €5m in foreign securities adds Bundesbank
+  statistical reporting. No Vorabpauschale and no Günstigerprüfung — both are
+  stated in the tab rather than silently skipped.
+
+- **Custody per broker**: each row's import note says where the shares are, so
+  the Positions table names the broker behind every holding (a split holding as
+  "Revolut 67% · ClickTrade 33%"), the Ticker header shows each custodian's
+  brand mark next to the "in portfolio" badge, and the allocation card adds a
+  broker donut whenever the book spans more than one. Tax stays FIFO across
+  brokers.
+
 Planning aid, not tax advice. All tax/FIFO logic is pure and unit-tested
-(`tests/test_ledger.py`, `tests/test_tax_es.py`); FX is injectable so tests run
-offline.
+(`tests/test_ledger.py`, `tests/test_positions_s104.py`, `tests/test_tax_es.py`,
+`tests/test_tax_us.py`, `tests/test_tax_uk.py`, `tests/test_tax_de.py`,
+`tests/test_portfolio_tax_tab.py`); FX is injectable so tests run offline.
 
 ## Layout
 
@@ -408,8 +501,12 @@ src/stocks/
   data/fx.py           ECB FX (frankfurter.dev): spot + cached historical
   data/earnings.py     upcoming earnings dates (yfinance) + look-ahead window
   portfolio/ledger.py       SQLite transaction ledger (+ CSV import)
-  portfolio/positions.py    FIFO lot matching -> positions + realized gains
-  portfolio/tax_es.py       Spanish IRPF savings base, 2-month rule, 720 flag
+  portfolio/positions.py    share matching (FIFO / UK s.104 pool) -> positions
+  portfolio/tax/base.py     jurisdiction scaffolding (brackets, repurchase rules)
+  portfolio/tax/es.py       Spanish IRPF savings base, 2-month rule, 720 flag
+  portfolio/tax/us.py       US federal capital gains, wash sale, FBAR/8938 flags
+  portfolio/tax/uk.py       UK CGT, 6 April year, AEA, 18/24% band stacking
+  portfolio/tax/de.py       German Abgeltungsteuer, loss circles, Teilfreistellung
   portfolio/dividends.py    dividend income + foreign withholding (EUR)
   analysis/indicators  SMA, EMA, RSI, returns
   analysis/fundamentals.py  KPI computation + KPI_SOURCES source-of-truth map
@@ -569,9 +666,10 @@ next sign-in and are marked `~` — dated, but not exact.
 
 ### User feedback
 
-Every page carries a "Send feedback" popover at the bottom of the sidebar
-(guests included, burst-limited). Submissions land as JSON under
-`data/feedback/` (mirrored to the bucket) *and* as a `feedback` log event.
+Every page carries a "Send feedback" button at the bottom of the sidebar,
+opening a modal with the comment form (guests included, burst-limited).
+Submissions land as JSON under `data/feedback/` (mirrored to the bucket)
+*and* as a `feedback` log event.
 Read them with `stocks feedback`, or in the timeline via
 `stocks logs tail --event feedback`.
 

@@ -26,6 +26,10 @@
   "import.skipped_rows": "Filas omitidas ({n}) — por diseño, no se pierde nada",
   "import.skipped_caption_revolut": "Los movimientos de efectivo, las recompensas y las correcciones de retención sobre dividendos no afectan a las posiciones. Los splits se resuelven automáticamente cuando la proporción es derivable; los no derivables se quedan aquí — añádelos manualmente.",
   "import.skipped_caption_generic": "Cada fila indica por qué no pudo convertirse en transacción — corrige el CSV y vuelve a subirlo, o añade esas filas manualmente.",
+  "import.broker": "¿De qué bróker viene?",
+  "import.broker_pick": "Elige el origen",
+  "import.broker_other": "Otro bróker",
+  "import.broker_help": "Este formato no dice de qué bróker es: elige el que corresponda — o escribe su nombre si no está en la lista. Se marca en cada fila; Comisiones y Custodia agrupan tu cartera por ahí.",
   "import.commit_button": "Confirmar en el libro",
   "import.commit_success": "Se importaron {n} transacciones. El libro contiene ahora {total}.",
   "import.commit_help": "Las filas confirmadas persisten en el libro entre recargas — no hace falta volver a subir nada. Abre **Cartera** para posiciones e impuestos, o **Resumen** para ver tus compras/ventas en el gráfico de precios."

@@ -62,3 +62,64 @@ def test_stored_merges_local_and_bucket_and_sorts(sandbox, monkeypatch):
 
 def test_stored_is_empty_when_nothing_anywhere(sandbox):
     assert feedback.stored() == []
+
+
+# --------------------------------------------------------------- the modal UI
+
+
+APP = """
+import streamlit as st
+from stocks.web import feedback
+
+st.write("page body")
+feedback.render_sidebar("Cartera")
+"""
+
+
+@pytest.fixture
+def app(sandbox):
+    """The sidebar entry point running in a real script run."""
+    from streamlit.testing.v1 import AppTest
+
+    at = AppTest.from_string(APP, default_timeout=30)
+    at.run()
+    return at
+
+
+def _send(at):
+    return at.button(key="FormSubmitter:fb_form-Send")
+
+
+def test_the_button_opens_a_dialog_with_a_writable_text_area(app):
+    """The whole point of the modal: the comment field is reachable. The old
+    sidebar popover died the moment the pointer left the drawer to reach it."""
+    assert [b.key for b in app.sidebar.button] == ["fb_open"]
+    assert not app.text_area  # nothing rendered until the button is pressed
+    app.sidebar.button(key="fb_open").click().run()
+    assert [t.key for t in app.text_area] == ["fb_text"]
+    assert [s.key for s in app.segmented_control] == ["fb_kind"]
+    assert not app.exception
+
+
+def test_send_stores_the_comment_closes_the_modal_and_toasts(app, sandbox):
+    app.sidebar.button(key="fb_open").click().run()
+    app.text_area(key="fb_text").set_value("  the chart is upside down  ")
+    app.segmented_control(key="fb_kind").set_value("bug")
+    _send(app).click().run()
+
+    stored = json.loads(next(sandbox.glob("*.json")).read_text())
+    assert (stored["text"], stored["kind"], stored["page"]) == (
+        "the chart is upside down", "bug", "Cartera")
+    assert not app.text_area  # modal closed
+    assert [t.value for t in app.toast] == ["Thanks — received!"]
+    assert not app.exception
+
+
+def test_an_empty_send_warns_and_keeps_the_modal_open(app, sandbox):
+    """A rejected submission must not close the modal or eat the draft —
+    the user would have to retype everything."""
+    app.sidebar.button(key="fb_open").click().run()
+    _send(app).click().run()
+    assert [w.value for w in app.warning] == ["Write something first."]
+    assert [t.key for t in app.text_area] == ["fb_text"]
+    assert not sandbox.exists()  # nothing stored

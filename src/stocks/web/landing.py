@@ -37,8 +37,9 @@ from contextvars import ContextVar
 
 import streamlit as st
 
+from stocks.portfolio import tax
 from stocks.web import auth
-from stocks.web.i18n import DEFAULT_LANG, LANGUAGES, translate
+from stocks.web.i18n import DEFAULT_LANG, LANGUAGES, has, translate
 
 # Query parameters the in-page anchors set. Read by consume_params().
 PARAM_SIGNIN = "signin"
@@ -50,6 +51,13 @@ PARAM_GUEST = "guest"
 # resolve against the wrong directory there.
 PATH_EN = "/"
 PATH_ES = "/es/"
+# Language and tax residence are independent: an English-reading filer in Spain
+# and a Spanish-reading filer in the US both exist, and the pitch is a
+# country's case, so each combination is its own indexable page rather than a
+# query parameter (any query parameter on `/` is what hands the request to the
+# app). The two defaults keep their short URLs; the cross pairs are explicit.
+PATH_EN_ES = "/en-es/"  # English copy, Spanish rules
+PATH_ES_US = "/es-us/"  # Spanish copy, US rules
 ASSET_BASE = "/lp/"
 
 # The language this render is for. A ContextVar rather than an argument because
@@ -57,15 +65,65 @@ ASSET_BASE = "/lp/"
 # builders to reach a dict lookup would be all noise. Set by render_language().
 _LANG: ContextVar[str] = ContextVar("landing_lang", default=DEFAULT_LANG)
 
+# The tax jurisdiction this render argues from. The page makes a *country's*
+# case — the euro basis and the two-month rule, or the USD basis and the wash
+# sale — so it follows the reader's language rather than a separate control:
+# an anonymous visitor has no profile to read a tax residence from, and a
+# fourth landing variant per language pair would be four indexed pages arguing
+# past each other. The language toggle switches both, and `render_language`
+# takes an explicit override for the day that stops being true.
+JURISDICTION_BY_LANG = {"en": "US", "es": "ES"}
+# Unset rather than defaulting to one country: outside a render (seo.py called
+# directly, a test) the right jurisdiction is the language's own, not Spain's.
+_JUR: ContextVar[str | None] = ContextVar("landing_jur", default=None)
+
+# (language, jurisdiction) -> the one URL that serves it. Two pages became four
+# when the copy split by country; the pairs a language defaults to keep the
+# short paths so nothing already indexed moves.
+VARIANTS: dict[tuple[str, str], str] = {
+    ("en", "US"): PATH_EN,
+    ("es", "ES"): PATH_ES,
+    ("en", "ES"): PATH_EN_ES,
+    ("es", "US"): PATH_ES_US,
+}
+LANDING_PATHS: tuple[str, ...] = tuple(VARIANTS.values())
+
+
+def jurisdiction_for(lang: str) -> str:
+    return tax.normalize(JURISDICTION_BY_LANG.get(lang, tax.DEFAULT_CODE))
+
+
+def variant_path(lang: str, jurisdiction: str | None = None) -> str:
+    """The URL serving `lang` under `jurisdiction` (its default if unset)."""
+    code = lang if lang in LANGUAGES else DEFAULT_LANG
+    jur = tax.normalize(jurisdiction or jurisdiction_for(code))
+    return VARIANTS.get((code, jur), PATH_EN)
+
+
+def variant_for(path: str) -> tuple[str, str] | None:
+    """(language, jurisdiction) a landing path serves, or None if it isn't one.
+
+    Accepts the path with or without its trailing slash, so the redirect that
+    canonicalizes `/es` can ask about `/es` directly.
+    """
+    wanted = path if path.endswith("/") else f"{path}/"
+    for (lang, jur), p in VARIANTS.items():
+        if p == wanted or p.rstrip("/") == path.rstrip("/"):
+            return lang, jur
+    return None
+
 
 @contextmanager
-def render_language(lang: str):
+def render_language(lang: str, jurisdiction: str | None = None):
     """Render the sections in `lang`. Wraps every landing_static build."""
-    token = _LANG.set(lang if lang in LANGUAGES else DEFAULT_LANG)
+    code = lang if lang in LANGUAGES else DEFAULT_LANG
+    lang_token = _LANG.set(code)
+    jur_token = _JUR.set(tax.normalize(jurisdiction or jurisdiction_for(code)))
     try:
         yield
     finally:
-        _LANG.reset(token)
+        _JUR.reset(jur_token)
+        _LANG.reset(lang_token)
 
 
 def active_language() -> str:
@@ -77,9 +135,40 @@ def active_language() -> str:
     return _LANG.get()
 
 
+def active_jurisdiction() -> str:
+    """The tax jurisdiction this render argues from ("ES", "US")."""
+    return active_jurisdiction_for(active_language())
+
+
+def active_jurisdiction_for(lang: str) -> str:
+    """The render's jurisdiction, or the one `lang` defaults to outside one.
+
+    seo.py takes its language as an argument rather than from the context (the
+    cron and the tests call it directly), so it has to be able to ask "which
+    country goes with *this* language" without a render in progress.
+    """
+    return _JUR.get() or jurisdiction_for(lang)
+
+
+def jur_key(key: str, jurisdiction: str | None = None) -> str:
+    """`landing.us_hero_title` when that copy exists, else `landing.hero_title`.
+
+    Most of the page is country-neutral, so only the keys a jurisdiction
+    actually disputes need an override — the rest fall through to one string
+    per language. seo.py resolves through here too, so the title, description
+    and FAQ rich result argue the same case as the page.
+    """
+    prefix = "landing."
+    if not key.startswith(prefix):
+        return key
+    jur = jurisdiction or active_jurisdiction()
+    scoped = f"{prefix}{jur.lower()}_{key[len(prefix):]}"
+    return scoped if has(scoped) else key
+
+
 def tr(key: str, /, **kwargs) -> str:
-    """`i18n.t()` bound to the render language instead of the session."""
-    return translate(key, _LANG.get(), **kwargs)
+    """`i18n.t()` bound to the render language and jurisdiction."""
+    return translate(jur_key(key), _LANG.get(), **kwargs)
 
 # Illustrative figures for the product mocks. Plausible, obviously a sample —
 # never presented as anyone's real book.
@@ -134,12 +223,18 @@ def _group(digits: str) -> str:
     return "".join(reversed(out))
 
 
-def _eur(amount: int, *, signed: bool = False) -> str:
+def _symbol() -> str:
+    """The currency the mocks are denominated in, per jurisdiction."""
+    return "$" if tax.get(active_jurisdiction()).currency == "USD" else "€"
+
+
+def _money(amount: int, *, signed: bool = False) -> str:
     sign = ""
     if signed:
         sign = "−" if amount < 0 else "+"
     body = _group(str(abs(amount)))
-    return f"{sign}{body} €" if _is_es() else f"{sign}€{body}"
+    sym = _symbol()
+    return f"{sign}{body} {sym}" if _is_es() else f"{sign}{sym}{body}"
 
 
 def _plain(amount: int, *, signed: bool = False) -> str:
@@ -768,6 +863,14 @@ a:focus-visible, button:focus-visible, summary:focus-visible {
   border-radius: 10px; padding: 12px 16px;
   font-size: var(--ag-fs-md); line-height: 1.55; color: var(--ag-text-secondary);
 }
+/* The "filing in the other country?" link under the tax panel — the reader
+   who needs it is the one the page is arguing the wrong rules at. */
+.ag-l-jurswitch {
+  align-self: start; font-size: var(--ag-fs-sm); font-weight: 600;
+  color: var(--ag-landing-info); text-decoration: none;
+  border-bottom: 1px solid currentColor;
+}
+.ag-l-jurswitch:hover { color: var(--ag-text-primary); }
 
 /* --- trust --- */
 .ag-l-trustgrid {
@@ -1042,13 +1145,53 @@ def _mark(width_class: str = "") -> str:
 
 
 def _lang_toggle(*, footer: bool = False) -> str:
-    """EN / ES switch — one indexable URL each, paired by hreflang in the head."""
+    """EN / ES switch — one indexable URL each, paired by hreflang in the head.
+
+    The switch keeps the jurisdiction: a reader on the Spanish-tax page who
+    wants English wants the English *Spanish-tax* page, not a different
+    country's argument.
+    """
     es = _is_es()
-    en_part = '<span class="on">EN</span>' if not es else f'<a href="{PATH_EN}">EN</a>'
-    es_part = '<span class="on">ES</span>' if es else f'<a href="{PATH_ES}">ES</a>'
+    jur = active_jurisdiction()
+    en_href, es_href = variant_path("en", jur), variant_path("es", jur)
+    en_part = '<span class="on">EN</span>' if not es else f'<a href="{en_href}">EN</a>'
+    es_part = '<span class="on">ES</span>' if es else f'<a href="{es_href}">ES</a>'
     if footer:
         return f'<div class="ag-l-foot-lang">{en_part}<span>·</span>{es_part}</div>'
     return f'<div class="ag-l-lang">{en_part}{es_part}</div>'
+
+
+def _jur_toggle(*, footer: bool = False) -> str:
+    """Spain-tax / US-tax switch, keeping the language.
+
+    Footer-only in the chrome (the header has no room on a phone) plus one
+    contextual link in the tax section, which is where a reader discovers the
+    page is arguing the wrong country at them.
+    """
+    lang = active_language()
+    here = active_jurisdiction()
+    parts = []
+    for code in ("ES", "US"):
+        label = _esc(tr(f"landing.jur_{code.lower()}"))
+        parts.append(
+            f'<span class="on">{label}</span>' if code == here
+            else f'<a href="{variant_path(lang, code)}">{label}</a>'
+        )
+    if footer:
+        return (
+            f'<div class="ag-l-foot-lang">{parts[0]}<span>·</span>{parts[1]}</div>'
+        )
+    return f'<div class="ag-l-lang">{parts[0]}{parts[1]}</div>'
+
+
+def _jur_switch_link() -> str:
+    """"Filing in the US instead?" — the other country's page, same language."""
+    other = "US" if active_jurisdiction() == "ES" else "ES"
+    href = variant_path(active_language(), other)
+    return (
+        f'<a class="ag-l-jurswitch" href="{href}">'
+        f'{_esc(tr(f"landing.jur_switch_{other.lower()}"))}</a>'
+    )
 
 
 def _legal_lang_q() -> str:
@@ -1093,12 +1236,12 @@ def _top_bar() -> str:
 
 def _hero() -> str:
     kpis = (
-        (tr("landing.kpi_cost"), _eur(48230), ""),
-        (tr("landing.kpi_value"), _eur(61484), ""),
-        (tr("landing.kpi_unrealised"), _eur(13254, signed=True), "ag-l-up"),
+        (tr("landing.kpi_cost"), _money(48230), ""),
+        (tr("landing.kpi_value"), _money(61484), ""),
+        (tr("landing.kpi_unrealised"), _money(13254, signed=True), "ag-l-up"),
         (
             tr("landing.kpi_realised", year=_FISCAL_YEAR),
-            _eur(2141, signed=True),
+            _money(2141, signed=True),
             "ag-l-up",
         ),
     )
@@ -1250,9 +1393,9 @@ def _gap() -> str:
   </div>
   <div class="ag-l-compare">
     <div class="broker"><small>{_esc(tr("landing.fx_broker"))}</small>
-      <b class="ag-l-num">{_esc(_eur(1412, signed=True))}</b></div>
+      <b class="ag-l-num">{_esc(_money(1412, signed=True))}</b></div>
     <div class="ours"><small>{_esc(tr("landing.fx_topstocks"))}</small>
-      <b class="ag-l-num">{_esc(_eur(1168, signed=True))}</b></div>
+      <b class="ag-l-num">{_esc(_money(1168, signed=True))}</b></div>
   </div>
   <span class="ag-l-note">{_esc(tr("landing.fx_note"))}</span>
 </div>"""
@@ -1364,14 +1507,16 @@ def _provenance() -> str:
 
 def _bento() -> str:
     # Pills are symbols and statute references — language-neutral, so they stay
-    # literal data rather than catalog entries.
+    # literal data rather than catalog entries. The tax ones are still
+    # jurisdiction-specific: a statute cite is the one thing that cannot be
+    # translated across borders.
     risk_pills = (
         f"TWR {_pct(18.4)}",
         f"1/HHI {_dec(6.8, 1)}",
         f"β {_dec(1.12, 2)} vs {_BENCHMARK}",
         f"max DD {_pct(-22.6)}",
     )
-    tax_pills = ("art. 37 LIRPF", "art. 33.5.f", "Modelo 720", "19–28%")
+    tax_pills = _TAX_PILLS.get(active_jurisdiction(), _TAX_PILLS["ES"])
 
     def pills(items: tuple[str, ...]) -> str:
         inner = "".join(f'<span class="ag-l-pill">{_esc(p)}</span>' for p in items)
@@ -1433,31 +1578,42 @@ def _depth_a() -> str:
     <div class="ag-l-legs">{"".join(leg_html)}</div>
     <div class="ag-l-split">
       <div class="broker"><small>{_esc(tr("landing.depthA_broker"))}</small>
-        <b class="ag-l-num">{_esc(_eur(1412, signed=True))}</b></div>
+        <b class="ag-l-num">{_esc(_money(1412, signed=True))}</b></div>
       <div class="ours"><small>{_esc(tr("landing.depthA_topstocks"))}</small>
-        <b class="ag-l-num">{_esc(_eur(1168, signed=True))}</b></div>
+        <b class="ag-l-num">{_esc(_money(1168, signed=True))}</b></div>
     </div>
   </div>
 </div></section>"""
 
 
+# Statute pills on the tax feature card, per jurisdiction.
+_TAX_PILLS = {
+    "ES": ("art. 37 LIRPF", "art. 33.5.f", "Modelo 720", "19–28%"),
+    "US": ("FIFO", "IRC 1091", "Form 8938", "0/15/20%"),
+}
+
+# Headline rate on the panel's sample base: Spain's first savings-base bracket,
+# the US long-term middle rate. Illustrative, like every figure in the mocks.
+_PANEL_RATE = {"ES": 19.0, "US": 15.0}
+
+
 def _depth_b() -> str:
-    rate = _pct(19.0, signed=False)
+    rate = _pct(_PANEL_RATE.get(active_jurisdiction(), 19.0), signed=False)
     rows = f"""
 <div class="ag-l-irpf-r"><span>{_esc(tr("landing.irpf_gains"))}</span>
-  <b class="ag-l-up">{_esc(_eur(2521, signed=True))}</b></div>
+  <b class="ag-l-up">{_esc(_money(2521, signed=True))}</b></div>
 <div class="ag-l-irpf-r"><span>{_esc(tr("landing.irpf_losses"))}</span>
-  <b class="ag-l-down">{_esc(_eur(-380, signed=True))}</b></div>
+  <b class="ag-l-down">{_esc(_money(-380, signed=True))}</b></div>
 <div class="ag-l-irpf-r ag-l-warnrow">
   <span>{_WARN_MARK}{_esc(tr("landing.irpf_deferred"))}</span>
-  <b class="ag-l-struck">{_esc(_eur(-612, signed=True))}</b></div>
+  <b class="ag-l-struck">{_esc(_money(-612, signed=True))}</b></div>
 <div class="ag-l-irpf-r total"><span>{_esc(tr("landing.irpf_net"))}</span>
-  <b>{_esc(_eur(2141))}</b></div>
+  <b>{_esc(_money(2141))}</b></div>
 <div class="ag-l-irpf-r total">
   <span>{_esc(tr("landing.irpf_tax", rate=rate))}</span>
-  <b>{_esc(_eur(407))}</b></div>
+  <b>{_esc(_money(407))}</b></div>
 <div class="ag-l-irpf-r"><span>{_esc(tr("landing.irpf_carry"))}</span>
-  <b class="ag-l-down">{_esc(_eur(-612, signed=True))}</b></div>"""
+  <b class="ag-l-down">{_esc(_money(-612, signed=True))}</b></div>"""
 
     return f"""
 <section class="ag-l-band"><div class="ag-l-wrap ag-l-depth">
@@ -1471,6 +1627,7 @@ def _depth_b() -> str:
     <h2>{_esc(tr("landing.depthB_title"))}</h2>
     <p>{_esc(tr("landing.depthB_body"))}</p>
     <div class="ag-l-disclaimer">{_esc(tr("landing.depthB_disclaimer"))}</div>
+    {_jur_switch_link()}
   </div>
 </div></section>"""
 
@@ -1522,6 +1679,7 @@ def _footer() -> str:
     <a href="/legal/privacy{_legal_lang_q()}">{_esc(tr("landing.footer_privacy"))}</a>
     <a href="/legal/terms{_legal_lang_q()}">{_esc(tr("landing.footer_terms"))}</a>
     {_lang_toggle(footer=True)}
+    {_jur_toggle(footer=True)}
   </div>
   <p class="ag-l-fine">{_esc(tr("landing.footer_disclaimer"))}</p>
 </div></footer>"""

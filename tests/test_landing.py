@@ -110,11 +110,16 @@ def test_unknown_lang_param_is_ignored(gate):
 
 @pytest.fixture
 def as_lang():
-    """Enter landing.render_language(lang) for the rest of the test."""
+    """Enter landing.render_language(lang, jurisdiction) for the test.
+
+    The jurisdiction defaults to the language's own — English pitches the US
+    rules, Spanish the Spanish ones — so a test that cares about the country
+    passes it explicitly.
+    """
     with ExitStack() as stack:
 
-        def _set(lang):
-            stack.enter_context(landing.render_language(lang))
+        def _set(lang, jurisdiction=None):
+            stack.enter_context(landing.render_language(lang, jurisdiction))
 
         yield _set
 
@@ -133,8 +138,40 @@ def as_lang():
     ],
 )
 def test_currency_follows_the_reader(as_lang, lang, amount, signed, expected):
-    as_lang(lang)
-    assert landing._eur(amount, signed=signed) == expected
+    """Separators follow the language; the symbol follows the jurisdiction."""
+    as_lang(lang, "ES")
+    assert landing._money(amount, signed=signed) == expected
+
+
+@pytest.mark.parametrize(
+    ("lang", "amount", "signed", "expected"),
+    [
+        ("en", 48230, False, "$48,230"),
+        ("es", 48230, False, "48.230 $"),
+        ("en", -612, True, "−$612"),
+    ],
+)
+def test_a_us_reader_gets_dollars(as_lang, lang, amount, signed, expected):
+    as_lang(lang, "US")
+    assert landing._money(amount, signed=signed) == expected
+
+
+def test_english_pitches_the_us_rules_and_spanish_the_spanish_ones(as_lang):
+    as_lang("en")
+    assert landing.active_jurisdiction() == "US"
+    assert landing._symbol() == "$"
+    as_lang("es")
+    assert landing.active_jurisdiction() == "ES"
+    assert landing._symbol() == "€"
+
+
+def test_jurisdiction_scoped_copy_falls_back_to_the_neutral_string(as_lang):
+    as_lang("en", "US")
+    # Overridden for the US pitch…
+    assert landing.jur_key("landing.hero_title") == "landing.us_hero_title"
+    # …but the shared strings have one version.
+    assert landing.jur_key("landing.faq_q1") == "landing.faq_q1"
+    assert landing.jur_key("common.sign_in_google") == "common.sign_in_google"
 
 
 @pytest.mark.parametrize(
@@ -231,6 +268,20 @@ def body(as_lang):
     return _build
 
 
+def test_the_english_page_argues_the_us_rules(body):
+    """The pitch is a country's case, so the copy has to be that country's."""
+    html = body("en")
+    assert "IRS" in html and "IRC 1091" in html
+    assert "Modelo 720" not in html and "LIRPF" not in html
+    assert "$" in html
+
+
+def test_the_spanish_page_argues_the_spanish_ones(body):
+    html = body("es")
+    assert "Modelo 720" in html and "33.5.f" in html
+    assert "IRC 1091" not in html
+
+
 def test_the_page_is_one_element_with_every_section(body):
     html = body()
     assert html.startswith('<div class="ag-l">') and html.endswith("</div>")
@@ -263,11 +314,32 @@ def test_every_cta_leaves_the_landing_for_the_app(body):
         assert 'href="?signin=1"' not in html, "relative CTA would stay on the page"
 
 
-def test_the_language_toggle_pairs_the_two_indexable_urls(body):
-    en = body("en")
-    assert f'href="{landing.PATH_ES}"' in en
-    assert '<span class="on">EN</span>' in en
-    assert "?lang=" not in en.replace("&lang=es", ""), "no ?lang= toggle links"
+def test_the_language_toggle_stays_inside_the_jurisdiction(as_lang):
+    """A reader on the Spanish-tax page wants that page in English, not the
+    US-tax one — so the switch keeps the country and changes the language."""
+    as_lang("en", "US")
+    en_us = landing.page_body()
+    assert f'href="{landing.PATH_ES_US}"' in en_us
+    assert '<span class="on">EN</span>' in en_us
+    assert f'href="{landing.PATH_ES}"' not in en_us
+    assert "?lang=" not in en_us.replace("&lang=es", ""), "no ?lang= toggle links"
+
+    as_lang("en", "ES")
+    assert f'href="{landing.PATH_ES}"' in landing.page_body()
+
+
+def test_the_jurisdiction_toggle_keeps_the_language(as_lang):
+    as_lang("es", "ES")
+    es_es = landing.page_body()
+    # The other country, same language — from the tax panel and the footer.
+    assert f'class="ag-l-jurswitch" href="{landing.PATH_ES_US}"' in es_es
+    assert es_es.count(f'href="{landing.PATH_ES_US}"') >= 2
+    # …while the language switch on the same page keeps the Spanish rules.
+    assert f'href="{landing.PATH_EN_ES}"' in es_es
+
+    as_lang("en", "US")
+    en_us = landing.page_body()
+    assert f'class="ag-l-jurswitch" href="{landing.PATH_EN_ES}"' in en_us
 
 
 def test_the_brand_mark_is_absolute(body):

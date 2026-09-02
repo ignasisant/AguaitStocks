@@ -38,11 +38,10 @@ from stocks.web.i18n import t as tr
 from stocks.web.portfolio_data import (
     basket_history,
     enriched_positions,
-    eur_spot,
     last_session_moves,
     ledger_history,
     ledger_state,
-    native_eur_rates,
+    native_base_rates,
     positions_table,
 )
 from stocks.web.widgets import (
@@ -243,9 +242,13 @@ held_moves: dict[str, float] = {}  # {ticker: day_pct}, feeds the Big-moves card
 _spark_slot = None  # reserved in the glance row, filled at the bottom
 if auth.is_logged_in():
     DB = str(auth.db_path())
+    # The account's reporting currency: the ledger is replayed in it, so it
+    # keys every cached loader below (see web/portfolio_data.py).
+    REPORT_CCY = auth.reporting_currency()
+    REPORT_SYM = auth.CURRENCY_SYMBOL[REPORT_CCY]
     realized: list = []
     try:
-        txs, positions, realized = ledger_state(DB, db_mtime(DB))
+        txs, positions, realized = ledger_state(DB, db_mtime(DB), REPORT_CCY)
     except (YFRateLimitError, URLError) as exc:
         # Throttled/offline: toast it and leave the glance empty (txs/positions
         # keep their empty defaults above). Not cached, so a rerun retries.
@@ -266,7 +269,7 @@ if auth.is_logged_in():
         # in the slot, so the shimmer is always replaced by what it stood for.
         glance = skeletons.reserve("metrics", border=True, n=(4, 3))
         try:
-            tbl = enriched_positions(DB, db_mtime(DB))
+            tbl = enriched_positions(DB, db_mtime(DB), REPORT_CCY)
         except (YFRateLimitError, URLError) as exc:
             notices.data_toast(exc)
             tbl = pd.DataFrame()  # empty (not None) -> the softer price caption
@@ -277,17 +280,11 @@ if auth.is_logged_in():
         elif tbl.empty:
             glance.container().caption(tr("home.prices_unavailable"))
         else:
-            cost = tbl["cost_eur"].sum()
-            value = tbl["value_eur"].dropna().sum()
-            # Headline figures honor the profile's display-currency preference
-            # (spot-converted); the tables stay EUR.
-            ccy = auth.display_currency()
-            fx = 1.0 if ccy == "EUR" else eur_spot(ccy)
-            if fx is None:
-                ccy, fx = "EUR", 1.0
-            sym = auth.CURRENCY_SYMBOL[ccy]
+            cost = tbl["cost"].sum()
+            value = tbl["value"].dropna().sum()
+            ccy, sym = REPORT_CCY, REPORT_SYM
             try:
-                hist = basket_history(DB, db_mtime(DB))
+                hist = basket_history(DB, db_mtime(DB), REPORT_CCY)
             except (YFRateLimitError, URLError) as exc:
                 notices.data_toast(exc)
                 hist = pd.DataFrame()  # 1w/1m deltas read n/a
@@ -296,8 +293,8 @@ if auth.is_logged_in():
                 # degrade to their "n/a" cells instead of crashing the card.
                 hist = pd.DataFrame()
             gain_pct = (value / cost - 1) if cost else None
-            realized_gain = sum(s.gain_eur for s in realized)
-            realized_cost = sum(s.cost_eur for s in realized)
+            realized_gain = sum(s.gain for s in realized)
+            realized_cost = sum(s.cost for s in realized)
 
             # KPIs + sparkline live in a bordered card, matching the "What's
             # new" cards below — the same card the skeleton above was drawn
@@ -328,22 +325,22 @@ if auth.is_logged_in():
                 # Market value stays chip-free (its % return already shows on
                 # Unrealised P/L; printing it twice reads as two numbers).
                 kcol.html(kpi_grid_html([
-                    (tr("home.cost_basis"), f"{sym}{cost * fx:,.0f}", None, None),
+                    (tr("home.cost_basis"), f"{sym}{cost:,.0f}", None, None),
                     (
                         tr("home.market_value"),
-                        f"{sym}{value * fx:,.0f}",
+                        f"{sym}{value:,.0f}",
                         None,
                         None,
                     ),
                     (
                         tr("home.unrealised_pl"),
-                        f"{sym}{(value - cost) * fx:+,.0f}",
+                        f"{sym}{value - cost:+,.0f}",
                         kpi_delta_chip(gain_pct),
                         None,
                     ),
                     (
                         tr("home.realised_pl"),
-                        f"{sym}{realized_gain * fx:+,.0f}",
+                        f"{sym}{realized_gain:+,.0f}",
                         kpi_delta_chip(
                             realized_gain / realized_cost if realized_cost else None
                         ),
@@ -355,7 +352,7 @@ if auth.is_logged_in():
                 # page's second metric row, in the KPI column beside the
                 # sparkline.
                 # Regular session closed → "Today" comes from the per-row
-                # day_eur (overridden to the live pre/after-hours quote, or the
+                # day (overridden to the live pre/after-hours quote, or the
                 # last completed session once those windows shut), not the
                 # basket's flat premarket 0%. Only a fully shut market greys
                 # its delta ("off") — an extended-hours quote is live.
@@ -363,9 +360,9 @@ if auth.is_logged_in():
                 extended = None if mkt_open else us_extended_session()
                 today_closed = None
                 if not mkt_open:
-                    d_eur = tbl["day_eur"].dropna().sum()
-                    base = value - d_eur
-                    today_closed = (d_eur, d_eur / base if base else 0.0)
+                    d_base = tbl["day"].dropna().sum()
+                    base = value - d_base
+                    today_closed = (d_base, d_base / base if base else 0.0)
                 delta_tiles = []
                 for label, days in (
                     (tr("home.today"), 1),
@@ -382,7 +379,7 @@ if auth.is_logged_in():
                     else:
                         delta_tiles.append((
                             label,
-                            f"{sym}{chg[0] * fx:+,.0f}",
+                            f"{sym}{chg[0]:+,.0f}",
                             kpi_delta_chip(
                                 chg[1],
                                 fmt="{:+.2%}",
@@ -428,17 +425,17 @@ if auth.is_logged_in():
                         # Price per share in the currency the ticker trades in
                         # ($ for a US name, € for a European one) — a share
                         # price is quoted by its own market, unlike the EUR
-                        # value/weight columns beside it. value_eur / shares
-                        # rather than a second quote burst (value_eur is already
+                        # value/weight columns beside it. value / shares
+                        # rather than a second quote burst (value is already
                         # live-priced), then divided back by the native->EUR
                         # rate it was built with. Unpriced rows read "n/a".
                         shares = tbl["shares"].reindex(idx).replace(0, float("nan"))
-                        per_share = tbl["value_eur"].reindex(idx) / shares
+                        per_share = tbl["value"].reindex(idx) / shares
                         ccys = [
-                            "EUR" if pd.isna(c) or not c else str(c).upper()
+                            REPORT_CCY if pd.isna(c) or not c else str(c).upper()
                             for c in tbl["ccy"].reindex(idx)
                         ]
-                        rates = native_eur_rates(tuple(sorted(set(ccys))))
+                        rates = native_base_rates(tuple(sorted(set(ccys))), REPORT_CCY)
                         price = [
                             _native_price(v, c, rates)
                             for v, c in zip(per_share, ccys, strict=True)
@@ -450,8 +447,7 @@ if auth.is_logged_in():
                                         "ticker": idx,
                                         "price": price,
                                         "day_pct": series.values,
-                                        "value": tbl["value_eur"].reindex(idx).values
-                                        * fx,
+                                        "value": tbl["value"].reindex(idx).values,
                                         "weight": tbl["weight"].reindex(idx).values,
                                     }
                                 ),
@@ -459,7 +455,7 @@ if auth.is_logged_in():
                                 signed=("day_pct",),
                                 # Price + its day move in one cell, the % as a
                                 # tinted chip — same treatment as the Positions
-                                # table's "€-97 (-1.1%)" cells.
+                                # table's "-97 (-1.1%)" cells.
                                 pairs=(("price", "day_pct"),),
                                 labels=MOVER_LABELS,
                                 names=False,
@@ -527,7 +523,7 @@ if txs:
     with _r1a, st.container(border=True, height="stretch"):
         st.markdown(tr("home.recent_transactions"))
 
-        def _tx_amount_eur(t) -> float:
+        def _tx_amount(t) -> float:
             """Cash amount in EUR at the trade date (split has none). The
             ledger replay above already prefetched these FX dates, so rate_on
             resolves from the on-disk cache."""
@@ -553,20 +549,20 @@ if txs:
                         "date": t.date,
                         "action": t.action,
                         "ticker": t.ticker,
-                        "amount_eur": _tx_amount_eur(t),
+                        "amount": _tx_amount(t),
                     }
                     for t in txs[-5:][::-1]
                 ),
-                fmt={"amount_eur": "€{:,.2f}"},
+                fmt={"amount": f"{REPORT_SYM}{{:,.2f}}"},
                 left_cols=("date", "action"),
                 labels={
                     "date": tr("home.col_date"),
                     "action": tr("home.col_type"),
                     "ticker": tr("home.col_ticker"),
-                    "amount_eur": "EUR",
+                    "amount": "EUR",
                 },
                 names=False,
-                mobile={"value": "amount_eur", "sub": ("date", "action")},
+                mobile={"value": "amount", "sub": ("date", "action")},
             )
         )
         st.page_link(
@@ -705,7 +701,9 @@ if _spark_slot is not None:
     # The chart skeleton reserved up in the glance card is on screen for this
     # call; every path below either fills that slot or clears it.
     try:
-        _hist, _, _ = ledger_history((len(txs), txs[-1].date, date.today()), DB)
+        _hist, _, _ = ledger_history(
+            (len(txs), txs[-1].date, date.today()), DB, REPORT_CCY
+        )
     except (YFRateLimitError, URLError) as exc:
         notices.data_toast(exc)
         _hist = pd.DataFrame()  # sparkline dropped, rest of the page stands
@@ -719,13 +717,18 @@ if _spark_slot is not None:
         _hist = _hist.ffill()
     if len(_hist) >= 2:
 
-        def _pct_span(p) -> str:
-            """Gain % as a colored <b> span for the hovertemplate (same
-            inline-HTML trick as the Portfolio page's history chart)."""
+        def _pl_span(pnl, p) -> str:
+            """Nominal P/L plus the % as a colored <b> span for the
+            hovertemplate (same inline-HTML trick as the Portfolio page's
+            history chart)."""
             if pd.isna(p):
                 return "—"
             color = PROFIT_COLOR if p >= 0 else LOSS_COLOR
-            return f'<span style="color:{color}"><b>{p:+.1%}</b></span>'
+            sign = "+" if pnl >= 0 else "-"
+            return (
+                f'<span style="color:{color}"><b>{sign}{REPORT_SYM}{abs(pnl):,.0f}</b>'
+                f" ({p:+.1%})</span>"
+            )
 
         # Localized date for the hover (plotly's %{x|%b} would render the month
         # in English); day/year stay numeric, month name comes from the catalog.
@@ -760,9 +763,13 @@ if _spark_slot is not None:
             if len(win) < 2:
                 win = _hist  # book younger than the window — show the full span
             _custom = [
-                [inj, _pct_span(p), _spark_date(ts)]
-                for ts, inj, p in zip(
-                    win.index, win["injected_eur"], win["pnl_pct"], strict=True
+                [inj, _pl_span(val - inj, p), _spark_date(ts)]
+                for ts, val, inj, p in zip(
+                    win.index,
+                    win["value"],
+                    win["injected"],
+                    win["pnl_pct"],
+                    strict=True,
                 )
             ]
             fig = go.Figure()
@@ -771,7 +778,7 @@ if _spark_slot is not None:
             fig.add_trace(
                 go.Scatter(
                     x=win.index,
-                    y=win["injected_eur"],
+                    y=win["injected"],
                     name=tr("home.chart_injected"),
                     line=dict(color=TEXT_MUTED, width=1.5, shape="hv", dash="dot"),
                     hoverinfo="skip",
@@ -780,9 +787,9 @@ if _spark_slot is not None:
             # Sign-split value line (same mask-overlap trick as the Portfolio
             # history chart): green above injected, red below; masks overlap one
             # point at each crossing so the segments stay connected.
-            _gain = win["value_eur"] >= win["injected_eur"]
-            _up = win["value_eur"].where(_gain | _gain.shift(1, fill_value=False))
-            _down = win["value_eur"].where(
+            _gain = win["value"] >= win["injected"]
+            _up = win["value"].where(_gain | _gain.shift(1, fill_value=False))
+            _down = win["value"].where(
                 ~_gain | (~_gain).shift(1, fill_value=False)
             )
             # Both traces share the "Valor" legend name; only one shows in the
@@ -812,12 +819,16 @@ if _spark_slot is not None:
             fig.add_trace(
                 go.Scatter(
                     x=win.index,
-                    y=win["value_eur"],
+                    y=win["value"],
                     line=dict(width=0),
                     opacity=0,
                     showlegend=False,
                     customdata=_custom,
-                    hovertemplate=tr("home.spark_hover_tmpl"),
+                    # str.format would choke on Plotly's %{...} fields (see the
+                    # Portfolio page's history chart), so substitute in place.
+                    hovertemplate=tr("home.spark_hover_tmpl").replace(
+                        "{sym}", REPORT_SYM
+                    ),
                 )
             )
             fig.update_layout(
@@ -835,7 +846,7 @@ if _spark_slot is not None:
                     fixedrange=True, automargin=True,
                 ),
                 yaxis=dict(
-                    nticks=3, tickfont=dict(size=10), tickprefix="€",
+                    nticks=3, tickfont=dict(size=10), tickprefix=REPORT_SYM,
                     tickformat="~s", showgrid=False, fixedrange=True,
                     automargin=True,
                 ),

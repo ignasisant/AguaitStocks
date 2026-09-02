@@ -102,17 +102,22 @@ def test_the_app_is_marked_noindex(client):
         assert client.get(path).headers["x-robots-tag"] == "noindex, nofollow"
 
 
-@pytest.mark.parametrize("path", ["/", "/es/", "/robots.txt", "/sitemap.xml"])
+@pytest.mark.parametrize(
+    "path", ["/", "/es/", "/en-es/", "/es-us/", "/robots.txt", "/sitemap.xml"]
+)
 def test_the_marketing_pages_are_indexable(client, path):
     assert "x-robots-tag" not in client.get(path).headers
 
 
-def test_the_landing_is_revalidated_but_the_spanish_page_is_cacheable(client):
+def test_only_the_root_is_revalidated_the_other_variants_are_cacheable(client):
+    """`/` alone answers two documents on a cookie; the rest have own URLs."""
     en = client.get("/")
     assert en.headers["cache-control"] == "no-cache"
     assert "Cookie" in en.headers["vary"]
-    es = client.get("/es/")
-    assert es.headers["cache-control"] == "public, max-age=300"
+    for path in ("/es/", "/en-es/", "/es-us/"):
+        r = client.get(path)
+        assert r.headers["cache-control"] == "public, max-age=300"
+        assert "Cookie" not in r.headers["vary"]
 
 
 # ------------------------------------------------------------------- spanish
@@ -125,10 +130,46 @@ def test_the_spanish_page_is_served_in_spanish(client):
     assert "Tu rentabilidad real" in r.text
 
 
-def test_the_unslashed_spanish_url_redirects_once_and_permanently(client):
-    r = client.get("/es", follow_redirects=False)
+@pytest.mark.parametrize("path", ["/es", "/en-es", "/es-us"])
+def test_an_unslashed_landing_url_redirects_once_and_permanently(client, path):
+    r = client.get(path, follow_redirects=False)
     assert r.status_code == 301
-    assert r.headers["location"] == "/es/"
+    assert r.headers["location"] == f"{path}/"
+
+
+# ------------------------------------------------- language x tax jurisdiction
+# Four pages: the pitch is one country's case, and language and tax residence
+# are independent (an English reader who files in Spain, a Spanish reader who
+# files in the US).
+
+
+def test_the_english_root_argues_the_us_rules(client):
+    r = client.get("/")
+    assert 'lang="en"' in r.text
+    assert "IRS" in r.text and "Modelo 720" not in r.text
+
+
+def test_the_english_spain_page_argues_the_spanish_rules(client):
+    r = client.get("/en-es/")
+    assert r.status_code == 200
+    assert 'lang="en"' in r.text
+    assert "Modelo 720" in r.text and "IRC 1091" not in r.text
+    assert 'rel="canonical" href="https://topstocks.example/en-es/"' in r.text
+
+
+def test_the_spanish_us_page_argues_the_us_rules(client):
+    r = client.get("/es-us/")
+    assert r.status_code == 200
+    assert 'lang="es"' in r.text
+    assert "IRC 1091" in r.text and "Modelo 720" not in r.text
+    assert 'rel="canonical" href="https://topstocks.example/es-us/"' in r.text
+
+
+def test_the_cross_variants_pair_with_their_own_language_alternate(client):
+    """hreflang pairs translations, never two different countries' arguments."""
+    r = client.get("/en-es/")
+    assert 'hreflang="es" href="https://topstocks.example/es/"' in r.text
+    assert 'hreflang="en" href="https://topstocks.example/en-es/"' in r.text
 
 
 # --------------------------------------------------------- robots and sitemap

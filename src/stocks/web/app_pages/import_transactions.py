@@ -278,11 +278,33 @@ if result.skipped:
         else:
             st.caption(tr("import.skipped_caption_generic"))
 
+# Attribution. Every broker parser stamps its own name as the note's first
+# word, which is what the Fees and Custody views read the book by
+# (fees.broker_of); a generic ledger CSV can come from anywhere and stamps
+# nothing, so its origin is asked for here and written in on commit. Required:
+# a batch imported unattributed shows up in those views under whatever its
+# notes happened to start with, and is tedious to fix afterwards.
+origin = platforms.detected_broker(importable)
+if importable and not origin:
+    origin = st.selectbox(
+        tr("import.broker"),
+        platforms.broker_options(),
+        index=None,
+        format_func=lambda k: (
+            tr("import.broker_other") if k == platforms.OTHER
+            else platforms.broker_label(k)
+        ),
+        placeholder=tr("import.broker_pick"),
+        accept_new_options=True,  # naming the real broker beats "other"
+        help=tr("import.broker_help"),
+    ) or ""
+
 st.divider()
-if st.button(tr("import.commit_button"), type="primary", disabled=not importable):
+if st.button(tr("import.commit_button"), type="primary",
+             disabled=not importable or not origin):
     if wipe:
         clear(paths.db)
-    ids = add_many(importable, paths.db)
+    ids = add_many(platforms.stamp_broker(importable, origin), paths.db)
     last_import.save(
         last_import.ImportRecord(
             filename=uploaded.name,

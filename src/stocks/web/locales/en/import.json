@@ -26,6 +26,10 @@
   "import.skipped_rows": "Skipped rows ({n}) — by design, nothing lost",
   "import.skipped_caption_revolut": "Cash movements, rewards and dividend-tax corrections don't affect positions. Splits are auto-resolved when the ratio is derivable; underivable ones stay here — add those manually.",
   "import.skipped_caption_generic": "Each row lists why it couldn't become a transaction — fix the CSV and re-upload, or add those rows manually.",
+  "import.broker": "Which broker is this from?",
+  "import.broker_pick": "Pick the origin",
+  "import.broker_other": "Other broker",
+  "import.broker_help": "This format names no broker, so pick the one the file came from — or type its name if it isn't listed. It is stamped on every row; the Fees and Custody views group your book by it.",
   "import.commit_button": "Commit to ledger",
   "import.commit_success": "Imported {n} transactions. Ledger now holds {total}.",
   "import.commit_help": "Committed rows persist in the ledger across reloads — no need to re-upload. Open **Portfolio** for positions & tax, or **Overview** to see your buys/sells on the price chart."

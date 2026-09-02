@@ -31,8 +31,15 @@ import json
 from functools import lru_cache
 from pathlib import Path
 
+from stocks.web import landing
 from stocks.web.i18n import DEFAULT_LANG, LANGUAGES, translate
-from stocks.web.landing import ASSET_BASE, FAQ_COUNT, PATH_EN, PATH_ES
+from stocks.web.landing import (
+    ASSET_BASE,
+    FAQ_COUNT,
+    LANDING_PATHS,
+    PATH_EN,
+    jur_key,
+)
 
 SITE_NAME = "TopStocks"
 REPO_URL = "https://github.com/ignasi-sant/stocks"
@@ -62,9 +69,17 @@ FONTS_HREF = (
     "&display=swap"
 )
 
-# hreflang code -> the page that serves it. x-default is where an unmatched
-# locale should land, which is the source language.
-_ALTERNATES = {"en": PATH_EN, "es": PATH_ES, "x-default": PATH_EN}
+# hreflang pairs the *same* content in two languages, so the set is per
+# jurisdiction: the English and Spanish Spain-tax pages are translations of
+# each other, while the English Spain-tax and English US-tax pages are two
+# different arguments and must not be declared as alternates. x-default is
+# where an unmatched locale lands, which is the source language of that pair.
+def _alternates(jurisdiction: str) -> dict[str, str]:
+    en, es = (
+        landing.variant_path("en", jurisdiction),
+        landing.variant_path("es", jurisdiction),
+    )
+    return {"en": en, "es": es, "x-default": en}
 
 # Open Graph wants a locale, not a language code.
 _OG_LOCALE = {"en": "en_US", "es": "es_ES"}
@@ -108,9 +123,9 @@ def _esc(value: object) -> str:
     return html.escape(str(value), quote=True)
 
 
-def path_for(lang: str) -> str:
-    """The landing path serving `lang`."""
-    return PATH_ES if lang == "es" else PATH_EN
+def path_for(lang: str, jurisdiction: str | None = None) -> str:
+    """The landing path serving `lang` (under `jurisdiction`, or its default)."""
+    return landing.variant_path(lang, jurisdiction)
 
 
 def _abs(base_url: str, path: str) -> str:
@@ -126,7 +141,7 @@ def _prop(prop: str, content: str) -> str:
     return f'<meta property="{prop}" content="{_esc(content)}">'
 
 
-def json_ld(lang: str, base_url: str) -> str:
+def json_ld(lang: str, base_url: str, jurisdiction: str | None = None) -> str:
     """The page's structured data, as one `<script type="application/ld+json">`.
 
     A single `@graph` rather than three separate blocks — Google reads them the
@@ -141,7 +156,8 @@ def json_ld(lang: str, base_url: str) -> str:
     assistants — not for a Google rich result: those were restricted to
     government and health sites in 2023 and this page will not get one.
     """
-    page = _abs(base_url, path_for(lang))
+    jur = jurisdiction or landing.active_jurisdiction_for(lang)
+    page = _abs(base_url, path_for(lang, jur))
     graph = [
         {
             "@type": "WebSite",
@@ -149,7 +165,7 @@ def json_ld(lang: str, base_url: str) -> str:
             "url": page,
             "name": SITE_NAME,
             "inLanguage": lang,
-            "description": translate("landing.seo_description", lang),
+            "description": translate(jur_key("landing.seo_description", jur), lang),
         },
         {
             "@type": "SoftwareApplication",
@@ -159,7 +175,7 @@ def json_ld(lang: str, base_url: str) -> str:
             "applicationCategory": "FinanceApplication",
             "operatingSystem": "Web browser",
             "inLanguage": sorted(LANGUAGES),
-            "description": translate("landing.seo_description", lang),
+            "description": translate(jur_key("landing.seo_description", jur), lang),
             "image": _abs(base_url, OG_IMAGE),
             "license": "https://opensource.org/licenses/MIT",
             "isAccessibleForFree": True,
@@ -179,10 +195,10 @@ def json_ld(lang: str, base_url: str) -> str:
             "mainEntity": [
                 {
                     "@type": "Question",
-                    "name": translate(f"landing.faq_q{i}", lang),
+                    "name": translate(jur_key(f"landing.faq_q{i}", jur), lang),
                     "acceptedAnswer": {
                         "@type": "Answer",
-                        "text": translate(f"landing.faq_a{i}", lang),
+                        "text": translate(jur_key(f"landing.faq_a{i}", jur), lang),
                     },
                 }
                 for i in range(1, FAQ_COUNT + 1)
@@ -223,23 +239,32 @@ def _font_links() -> str:
     )
 
 
-def head(lang: str, base_url: str, *, extra_styles: str = "") -> str:
+def head(
+    lang: str,
+    base_url: str,
+    *,
+    extra_styles: str = "",
+    jurisdiction: str | None = None,
+) -> str:
     """Everything between `<head>` and `</head>` for the landing in `lang`.
 
     `extra_styles` is appended last (the design tokens and the page stylesheet),
     so the caller keeps control of CSS order while the metadata stays here.
+    `jurisdiction` defaults to the render context's, which is how the title,
+    description and FAQ rich result end up arguing the same country as the page.
     """
     lang = lang if lang in LANGUAGES else DEFAULT_LANG
-    title = translate("landing.seo_title", lang)
-    description = translate("landing.seo_description", lang)
-    image_alt = translate("landing.seo_image_alt", lang)
-    canonical = _abs(base_url, path_for(lang))
+    jur = jurisdiction or landing.active_jurisdiction_for(lang)
+    title = translate(jur_key("landing.seo_title", jur), lang)
+    description = translate(jur_key("landing.seo_description", jur), lang)
+    image_alt = translate(jur_key("landing.seo_image_alt", jur), lang)
+    canonical = _abs(base_url, path_for(lang, jur))
     image = _abs(base_url, OG_IMAGE)
 
     alternates = "".join(
         f'<link rel="alternate" hreflang="{code}" '
         f'href="{_esc(_abs(base_url, path))}">'
-        for code, path in _ALTERNATES.items()
+        for code, path in _alternates(jur).items()
     )
     other_locales = "".join(
         _prop("og:locale:alternate", _OG_LOCALE[code])
@@ -284,9 +309,36 @@ def head(lang: str, base_url: str, *, extra_styles: str = "") -> str:
         + '<link rel="preconnect" href="https://fonts.googleapis.com">'
         + '<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>'
         + _font_links()
-        + json_ld(lang, base_url)
+        + json_ld(lang, base_url, jur)
         + extra_styles
     )
+
+
+# Crawlers that collect text to train or ground models rather than to send
+# readers back. Blocking them is a request, not a control — robots.txt is
+# voluntary and only the well-behaved ones honour it — but the well-behaved
+# ones are most of the volume, and the landing copy is the only thing here
+# they could take (the app is disallowed below and noindex besides).
+AI_CRAWLERS = (
+    "GPTBot",             # OpenAI, training
+    "OAI-SearchBot",      # OpenAI, search index
+    "ChatGPT-User",       # OpenAI, user-initiated fetch
+    "ClaudeBot",          # Anthropic, training
+    "Claude-User",        # Anthropic, user-initiated fetch
+    "Claude-SearchBot",   # Anthropic, search index
+    "anthropic-ai",       # Anthropic, legacy token
+    "PerplexityBot",
+    "Perplexity-User",
+    "Google-Extended",    # Gemini training; does NOT affect Google Search
+    "Applebot-Extended",  # Apple Intelligence training; Applebot still indexes
+    "Bytespider",
+    "CCBot",              # Common Crawl, the corpus most others are built from
+    "Meta-ExternalAgent",
+    "Amazonbot",
+    "cohere-ai",
+    "Diffbot",
+    "Omgilibot",
+)
 
 
 def robots_txt(base_url: str) -> str:
@@ -296,8 +348,18 @@ def robots_txt(base_url: str) -> str:
     stay crawlable (it is the landing for anyone without the app cookie), so
     "Disallow: /" is not available. Streamlit's own machinery gets the same
     treatment — those URLs are transport, never content.
+
+    AI crawlers get their own blanket block first. Order matters: a robots.txt
+    parser applies the *most specific* matching group, so a named agent reads
+    its own group and never the `*` one — which is why the disallow list below
+    has to be repeated there rather than inherited.
     """
-    lines = ["User-agent: *", "Allow: /$", f"Allow: {PATH_ES}", f"Allow: {ASSET_BASE}"]
+    lines = []
+    for agent in AI_CRAWLERS:
+        lines += [f"User-agent: {agent}", "Disallow: /", ""]
+    lines += ["User-agent: *", "Allow: /$"]
+    lines += [f"Allow: {p}" for p in LANDING_PATHS if p != PATH_EN]
+    lines += [f"Allow: {ASSET_BASE}"]
     # The OIDC return is the only exact path worth naming; Streamlit's root
     # files (favicon, manifest) are left crawlable on purpose — they are not
     # content, they carry `noindex` anyway, and blocking a favicon is how a
@@ -309,25 +371,31 @@ def robots_txt(base_url: str) -> str:
 
 
 def sitemap_xml(base_url: str, *, lastmod: str | None = None) -> str:
-    """`/sitemap.xml` — the landing in both languages, cross-linked.
+    """`/sitemap.xml` — every landing variant, cross-linked within its pair.
 
-    Each URL carries the full `xhtml:link` alternate set (including itself, as
-    the spec requires), which is the machine-readable half of the hreflang
-    pairing in the head.
+    Each URL carries its jurisdiction's full `xhtml:link` alternate set
+    (including itself, as the spec requires), which is the machine-readable
+    half of the hreflang pairing in the head. Priority ranks the two default
+    pairs above the cross ones — same content, less likely to be what a
+    searcher meant.
     """
     mod = f"<lastmod>{_esc(lastmod)}</lastmod>" if lastmod else ""
     entries = []
-    for code in sorted(LANGUAGES):
-        loc = _abs(base_url, path_for(code))
+    for (code, jur), loc_path in landing.VARIANTS.items():
+        loc = _abs(base_url, loc_path)
         links = "".join(
             f'<xhtml:link rel="alternate" hreflang="{alt}" '
             f'href="{_esc(_abs(base_url, path))}"/>'
-            for alt, path in _ALTERNATES.items()
+            for alt, path in _alternates(jur).items()
         )
+        if jur != landing.jurisdiction_for(code):
+            priority = "0.7"
+        else:
+            priority = "1.0" if code == DEFAULT_LANG else "0.9"
         entries.append(
             f"<url><loc>{_esc(loc)}</loc>{mod}"
             f"<changefreq>weekly</changefreq>"
-            f"<priority>{'1.0' if code == DEFAULT_LANG else '0.9'}</priority>"
+            f"<priority>{priority}</priority>"
             f"{links}</url>"
         )
     return (

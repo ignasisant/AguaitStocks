@@ -1,4 +1,4 @@
-"""In-app feedback: a small sidebar popover on every page, stored durably.
+"""In-app feedback: a sidebar button opening a modal, stored durably.
 
 Two sinks, deliberately redundant:
 
@@ -70,11 +70,54 @@ def submit(text: str, kind: str, page: str = "") -> Path:
 
 
 def render_sidebar(page_title: str) -> None:
-    """The entry point: one popover at the bottom of the sidebar, every page."""
-    with st.sidebar.popover(
-        f":material/rate_review: {tr('feedback.button')}", width="stretch"
+    """The entry point: one sidebar button on every page, opening the modal.
+
+    A modal, not a sidebar popover: the collapsed desktop sidebar is a
+    hover-expanded overlay rail, and app.py hides the drawer's own content
+    (`stSidebarUserContent`) whenever the rail is not hovered — so a popover
+    anchored to a button in there died the moment the pointer left the sidebar
+    to reach it, i.e. before the user could type a word. It was also capped at
+    the drawer's width. The dialog is centered in the page, independent of the
+    sidebar's hover state, and roomy enough to write in.
+    """
+    # The success toast belongs to the run AFTER the modal closes — a toast
+    # emitted inside the dialog dies with the rerun that shuts it.
+    if st.session_state.pop("_fb_sent", False):
+        st.toast(tr("feedback.sent"), icon=":material/favorite:")
+    if st.sidebar.button(
+        tr("feedback.button"),
+        icon=":material/rate_review:",
+        width="stretch",
+        key="fb_open",
     ):
-        st.caption(tr("feedback.caption"))
+        st.session_state["_fb_open"] = True
+    if not st.session_state.get("_fb_open"):
+        return
+    # Kept open by a session flag rather than by the button's own run: every
+    # full rerun in this app (top-bar search, chat panel, page nav) would
+    # otherwise drop the modal mid-sentence. Dismissing clears the flag —
+    # without the callback the next full rerun would pop it straight back up.
+    # Built at call time (not @st.dialog) so the title resolves in the run's
+    # active language rather than freezing at import — same as the login and
+    # investor-profile modals.
+    st.dialog(
+        tr("feedback.button"), width="small", on_dismiss=_close
+    )(_dialog_body)(page_title)
+
+
+def _close() -> None:
+    st.session_state["_fb_open"] = False
+
+
+def _dialog_body(page_title: str) -> None:
+    """The modal's body: type picker + comment + send, batched in a form.
+
+    A form on purpose: outside one, the text area's blur rerun eats the first
+    click on the send button (the classic type-then-click miss), so the user
+    has to press Send twice. Submitting commits both widgets in one go.
+    """
+    st.caption(tr("feedback.caption"))
+    with st.form("fb_form", border=False, enter_to_submit=False):
         kind = st.segmented_control(
             tr("feedback.kind"),
             KINDS,
@@ -86,26 +129,36 @@ def render_sidebar(page_title: str) -> None:
             tr("feedback.text"),
             placeholder=tr("feedback.placeholder"),
             max_chars=MAX_CHARS,
+            height=200,
             key="fb_text",
         )
-        if st.button(tr("feedback.send"), type="primary",
-                     icon=":material/send:", key="fb_send"):
-            if not text.strip():
-                st.warning(tr("feedback.empty"))
-                return
-            if not ratelimit.allow(f"feedback::{_sender()}",
-                                   max_events=_MAX_PER_HOUR, window_s=3600):
-                st.warning(tr("feedback.rate_limited"))
-                return
-            try:
-                submit(text, kind or "other", page_title)
-            except Exception:
-                # The local file may have been written even if the mirror
-                # failed; the user shouldn't retry into a duplicate.
-                st.error(tr("feedback.failed"))
-                obs.event("feedback.store_failed")
-                return
-            st.toast(tr("feedback.sent"), icon=":material/favorite:")
+        sent = st.form_submit_button(
+            tr("feedback.send"), type="primary",
+            icon=":material/send:", width="stretch",
+        )
+    if not sent:
+        return
+    if not text.strip():
+        st.warning(tr("feedback.empty"))
+        return
+    if not ratelimit.allow(f"feedback::{_sender()}",
+                           max_events=_MAX_PER_HOUR, window_s=3600):
+        st.warning(tr("feedback.rate_limited"))
+        return
+    try:
+        submit(text, kind or "other", page_title)
+    except Exception:
+        # The local file may have been written even if the mirror failed; the
+        # user shouldn't retry into a duplicate. Their text stays in the form.
+        st.error(tr("feedback.failed"))
+        obs.event("feedback.store_failed")
+        return
+    # Stored: drop the draft so the next open starts blank, then close the
+    # modal with a full rerun (which also renders the toast above).
+    st.session_state.pop("fb_text", None)
+    st.session_state["_fb_sent"] = True
+    _close()
+    st.rerun()
 
 
 # ------------------------------------------------------------------ read side

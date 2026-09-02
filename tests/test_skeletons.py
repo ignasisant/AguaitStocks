@@ -100,8 +100,9 @@ def test_every_design_token_the_css_reads_is_defined():
 
 def test_css_is_injected_once_at_the_entry_point():
     """Shapes assume the style block is already on the page; nothing injects
-    it per call, so app.py has to."""
-    assert "st.html(skeletons.CSS)" in (WEB / "app.py").read_text()
+    it per call, so app.py has to — through `css.inject`, never `st.html`
+    (see tests/test_css_sink.py)."""
+    assert "css.inject(skeletons.CSS)" in (WEB / "app.py").read_text()
 
 
 def test_table_falls_back_to_dense_rows_on_phones(monkeypatch):

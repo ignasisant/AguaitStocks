@@ -33,6 +33,8 @@ wheels/
 # cache; the catalog in funds.py seeds the common funds without it
 /data/quote_types.json
 /data/last_import.json
+# Daily counter for the keyless assistant's global allowance (runtime state).
+/data/free_llm_global.json
 
 # Production log snapshots (`stocks logs export`) — they carry account slugs
 # and user-typed queries, and they are a copy of Cloud Logging, not source.

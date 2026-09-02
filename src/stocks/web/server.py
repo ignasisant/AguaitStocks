@@ -49,9 +49,16 @@ from starlette.requests import Request
 from starlette.responses import FileResponse, RedirectResponse, Response
 from starlette.routing import Route
 
+from stocks import obs
 from stocks.secrets_env import secret
-from stocks.web import landing_static, legal, seo
-from stocks.web.landing import ASSET_BASE, PATH_EN, PATH_ES
+from stocks.web import landing, landing_static, legal, ratelimit, seo
+from stocks.web.landing import (
+    ASSET_BASE,
+    LANDING_PATHS,
+    PATH_EN,
+    PATH_ES,
+    variant_for,
+)
 
 _HERE = Path(__file__).parent
 _ASSETS = _HERE / "assets"
@@ -74,7 +81,8 @@ PARAM_LANDING = "landing"
 # along: they are public documents that must not set the app cookie (an uptime
 # probe or a privacy-page reader has not "been to the app").
 _MARKETING_PREFIXES = (
-    PATH_ES, ASSET_BASE, "/robots.txt", "/sitemap.xml", "/livez", "/healthz",
+    *(p for p in LANDING_PATHS if p != PATH_EN),
+    ASSET_BASE, "/robots.txt", "/sitemap.xml", "/livez", "/healthz",
     "/status", "/legal/",
 )
 
@@ -140,30 +148,35 @@ def base_url(request: Request) -> str:
     return f"{scheme}://{host}"
 
 
-@lru_cache(maxsize=8)
-def _gzipped(lang: str, origin: str) -> bytes:
-    """The landing document, pre-compressed once per language and host.
+@lru_cache(maxsize=16)
+def _gzipped(lang: str, origin: str, jurisdiction: str) -> bytes:
+    """The landing document, pre-compressed once per variant and host.
 
     Streamlit's own gzip middleware sits *inside* this module's, and the gate
     answers before reaching it, so compressing here is what keeps a ~90KB
     document from going out uncompressed. mtime is zeroed to keep the bytes
     reproducible.
     """
-    body = landing_static.document(lang, origin).encode("utf-8")
+    body = landing_static.document(lang, origin, jurisdiction).encode("utf-8")
     return gzip.compress(body, compresslevel=9, mtime=0)
 
 
-def landing_response(request: Request, lang: str) -> Response:
-    """The landing document for `lang`, gzipped when the client takes it."""
+def landing_response(
+    request: Request, lang: str, jurisdiction: str | None = None
+) -> Response:
+    """The landing document for one variant, gzipped when the client takes it."""
     origin = base_url(request)
     accepts_gzip = "gzip" in request.headers.get("accept-encoding", "").lower()
+    jur = jurisdiction or landing.jurisdiction_for(lang)
+    root = request.url.path == PATH_EN
 
-    headers = {"Vary": "Accept-Encoding" + (", Cookie" if lang == "en" else "")}
-    if lang == "en":
+    headers = {"Vary": "Accept-Encoding" + (", Cookie" if root else "")}
+    if root:
         # `/` answers with two different documents depending on the cookie, so
         # it must be revalidated rather than reused from the browser cache —
         # otherwise the click that sets the cookie would still land on the
-        # landing. `/es/` has no such split and can simply be cached.
+        # landing. Every other variant has a path of its own, no cookie split,
+        # and can simply be cached.
         headers["Cache-Control"] = "no-cache"
     else:
         headers["Cache-Control"] = "public, max-age=300"
@@ -171,10 +184,12 @@ def landing_response(request: Request, lang: str) -> Response:
     if accepts_gzip:
         headers["Content-Encoding"] = "gzip"
         return Response(
-            _gzipped(lang, origin), media_type=_HTML, headers=headers
+            _gzipped(lang, origin, jur), media_type=_HTML, headers=headers
         )
     return Response(
-        landing_static.document(lang, origin), media_type=_HTML, headers=headers
+        landing_static.document(lang, origin, jur),
+        media_type=_HTML,
+        headers=headers,
     )
 
 
@@ -266,6 +281,91 @@ def not_found(request: Request) -> Response:
                     headers={"X-Robots-Tag": "noindex"})
 
 
+# Requests one client may make per window before it is turned away. Counted
+# per document, not per asset: one page load pulls dozens of Streamlit bundles
+# and every websocket frame is a chat message, so metering those would either
+# lock out a normal first visit or have to be set so high it meters nothing.
+# Documents are the expensive part anyway — a landing render, an app shell.
+CLIENT_MAX_DOCS = 60
+CLIENT_WINDOW_S = 60
+
+# Not metered: the transport Streamlit needs to keep a session alive (the app
+# has its own per-account limit on what arrives over it, see
+# web/ratelimit.py's use in chat_core), the mirrored logos and landing assets,
+# and the probes an uptime monitor hits on a schedule.
+_UNMETERED = ("/_stcore/", "/static/", ASSET_BASE, "/livez", "/healthz",
+              "/favicon", "/app/static/")
+
+# How many proxies sit in front of this process. Cloud Run's frontend appends
+# its own hop to X-Forwarded-For, so the client is the entry before the last.
+# Behind a second proxy (a CDN in front of Cloud Run) it is two before, and
+# with no proxy at all the socket peer is the client.
+TRUSTED_PROXY_HOPS = 1
+
+
+def _trusted_hops() -> int:
+    try:
+        return max(0, int(os.environ.get("TRUSTED_PROXY_HOPS",
+                                         TRUSTED_PROXY_HOPS)))
+    except ValueError:
+        return TRUSTED_PROXY_HOPS
+
+
+def client_ip(request: Request) -> str:
+    """The caller's address as far as it can be trusted.
+
+    X-Forwarded-For is client-supplied up to the first proxy that appends to
+    it, so only the entries our own infrastructure wrote mean anything: with
+    one trusted hop, the last entry is Cloud Run's frontend and the one before
+    it is what that frontend saw. Everything to the left of that a client can
+    write itself.
+
+    A determined attacker still has as many "addresses" as it has real ones,
+    which is why this is a speed bump in front of the account-level limits,
+    not the thing keeping anyone honest.
+    """
+    parts = [p.strip() for p in
+             request.headers.get("x-forwarded-for", "").split(",") if p.strip()]
+    hops = _trusted_hops()
+    if parts and hops and len(parts) > hops:
+        return parts[-(hops + 1)]
+    if parts and not hops:
+        return parts[0]
+    return request.client.host if request.client else "unknown"
+
+
+class ClientThrottle(BaseHTTPMiddleware):
+    """Per-client burst limit on document requests, outermost in the stack.
+
+    The service runs at --max-instances 1, so one container answers everyone:
+    a script hammering `/` does not just cost egress, it takes the app away
+    from real users. The app's own limiter (web/ratelimit.py) only starts
+    after a Google sign-in, which leaves everything before the login unmetered
+    — this is that half.
+
+    Fails open. A limiter that starts refusing traffic because of a bug in
+    itself is worse than the flood it was added to stop.
+    """
+
+    async def dispatch(self, request: Request, call_next):
+        path = request.url.path
+        if any(path.startswith(prefix) for prefix in _UNMETERED):
+            return await call_next(request)
+        try:
+            key = f"http::{client_ip(request)}"
+            allowed = ratelimit.allow(key, max_events=CLIENT_MAX_DOCS,
+                                      window_s=CLIENT_WINDOW_S)
+        except Exception:
+            return await call_next(request)
+        if not allowed:
+            wait = ratelimit.retry_after(key, window_s=CLIENT_WINDOW_S)
+            obs.warn("http.throttled", path=path, retry_after=wait)
+            return Response("Too many requests\n", status_code=429,
+                            media_type="text/plain; charset=utf-8",
+                            headers={"Retry-After": str(max(1, wait))})
+        return await call_next(request)
+
+
 class SecurityHeaders(BaseHTTPMiddleware):
     """Baseline hardening headers on every response, marketing and app alike.
 
@@ -337,13 +437,23 @@ class LandingGate(BaseHTTPMiddleware):
         return response
 
 
-async def es_landing(request: Request) -> Response:
-    return landing_response(request, "es")
+async def variant_landing(request: Request) -> Response:
+    """Any landing path but `/`: the language and jurisdiction it stands for.
+
+    One handler for all of them — the path *is* the variant (landing.VARIANTS),
+    so another pair needs a route and no new code.
+    """
+    lang, jur = variant_for(request.url.path) or ("es", "ES")
+    return landing_response(request, lang, jur)
 
 
-async def es_redirect(request: Request) -> Response:
-    """`/es` -> `/es/`: one canonical address per language, permanently."""
-    return RedirectResponse(PATH_ES, status_code=301)
+async def variant_redirect(request: Request) -> Response:
+    """`/es` -> `/es/`: one canonical address per variant, permanently."""
+    path = request.url.path
+    target = next(
+        (p for p in LANDING_PATHS if p.rstrip("/") == path.rstrip("/")), PATH_ES
+    )
+    return RedirectResponse(target, status_code=301)
 
 
 def _landing_sources() -> list[Path]:
@@ -487,8 +597,18 @@ async def asset(request: Request) -> Response:
 
 
 routes = [
-    Route(PATH_ES, es_landing, methods=["GET", "HEAD"]),
-    Route(PATH_ES.rstrip("/"), es_redirect, methods=["GET", "HEAD"]),
+    # Every landing variant but `/`, which the gate answers so Streamlit can
+    # keep owning that path (see LandingGate).
+    *(
+        Route(p, variant_landing, methods=["GET", "HEAD"])
+        for p in LANDING_PATHS
+        if p != PATH_EN
+    ),
+    *(
+        Route(p.rstrip("/"), variant_redirect, methods=["GET", "HEAD"])
+        for p in LANDING_PATHS
+        if p != PATH_EN
+    ),
     Route("/robots.txt", robots, methods=["GET", "HEAD"]),
     Route("/sitemap.xml", sitemap, methods=["GET", "HEAD"]),
     Route("/livez", healthz, methods=["GET", "HEAD"]),
@@ -506,5 +626,6 @@ app = st.App(
     routes=routes,
     # First is outermost: the security headers wrap everything, including the
     # gate's own short-circuit responses (landing, redirects, 404s).
-    middleware=[Middleware(SecurityHeaders), Middleware(LandingGate)],
+    middleware=[Middleware(ClientThrottle), Middleware(SecurityHeaders),
+                Middleware(LandingGate)],
 )

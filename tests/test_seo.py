@@ -13,9 +13,15 @@ from xml.etree import ElementTree
 
 import pytest
 
-from stocks.web import seo
+from stocks.web import landing, seo
 from stocks.web.i18n import LANGUAGES, translate
-from stocks.web.landing import ASSET_BASE, FAQ_COUNT, PATH_ES
+from stocks.web.landing import (
+    ASSET_BASE,
+    FAQ_COUNT,
+    PATH_EN_ES,
+    PATH_ES,
+    PATH_ES_US,
+)
 
 BASE = "https://topstocks.example"
 
@@ -27,19 +33,25 @@ DESCRIPTION_MAX = 160
 
 
 @pytest.mark.parametrize("lang", sorted(LANGUAGES))
-def test_title_and_description_fit_a_search_result(lang):
-    assert len(translate("landing.seo_title", lang)) <= TITLE_MAX
-    assert len(translate("landing.seo_description", lang)) <= DESCRIPTION_MAX
+@pytest.mark.parametrize("jur", ["ES", "US"])
+def test_title_and_description_fit_a_search_result(lang, jur):
+    """Every variant's own copy, not just the default pair's."""
+    for key, cap in (("seo_title", TITLE_MAX), ("seo_description", DESCRIPTION_MAX)):
+        assert len(translate(landing.jur_key(f"landing.{key}", jur), lang)) <= cap
 
 
 @pytest.mark.parametrize("lang", sorted(LANGUAGES))
 def test_head_carries_the_page_identity(lang):
     head = seo.head(lang, BASE)
-    title = translate("landing.seo_title", lang)
-    description = translate("landing.seo_description", lang)
+    # The head argues the language's own jurisdiction, so the copy it carries
+    # is that variant's — the override where one exists, the shared string
+    # where it doesn't. jur_key is the same resolution the page itself uses.
+    jur = landing.jurisdiction_for(lang)
+    title = translate(landing.jur_key("landing.seo_title", jur), lang)
+    description = translate(landing.jur_key("landing.seo_description", jur), lang)
 
-    assert f"<title>{title}</title>" in head
-    assert f'<meta name="description" content="{description}">' in head
+    assert f"<title>{seo._esc(title)}</title>" in head
+    assert f'<meta name="description" content="{seo._esc(description)}">' in head
     assert f'<link rel="canonical" href="{BASE}{seo.path_for(lang)}">' in head
     assert '<meta charset="utf-8">' in head
     assert "width=device-width" in head
@@ -48,13 +60,35 @@ def test_head_carries_the_page_identity(lang):
 def test_canonical_differs_per_language():
     assert f'href="{BASE}/"' in seo.head("en", BASE)
     assert f'href="{BASE}{PATH_ES}"' in seo.head("es", BASE)
+    # And the cross variants are addressable on their own URLs.
+    assert (
+        f'<link rel="canonical" href="{BASE}{PATH_EN_ES}">'
+        in seo.head("en", BASE, jurisdiction="ES")
+    )
+    assert (
+        f'<link rel="canonical" href="{BASE}{PATH_ES_US}">'
+        in seo.head("es", BASE, jurisdiction="US")
+    )
 
 
 @pytest.mark.parametrize("lang", sorted(LANGUAGES))
 def test_both_languages_declare_each_other_and_a_default(lang):
     head = seo.head(lang, BASE)
-    for code, path in (("en", "/"), ("es", PATH_ES), ("x-default", "/")):
+    # The pair is per jurisdiction: the English US-tax page's Spanish
+    # alternate is the Spanish US-tax page, not the Spanish-tax one (different
+    # content, and declaring it an alternate would be a lie to the crawler).
+    expected = {
+        "en": ("/", PATH_EN_ES),
+        "es": (PATH_ES_US, PATH_ES),
+    }
+    jur = "US" if lang == "en" else "ES"
+    for code, paths in expected.items():
+        path = paths[0] if jur == "US" else paths[1]
         assert f'<link rel="alternate" hreflang="{code}" href="{BASE}{path}">' in head
+    default = "/" if jur == "US" else PATH_EN_ES
+    assert (
+        f'<link rel="alternate" hreflang="x-default" href="{BASE}{default}">' in head
+    )
 
 
 @pytest.mark.parametrize("lang", sorted(LANGUAGES))
@@ -144,26 +178,55 @@ def test_robots_allows_the_landing_and_disallows_the_app():
     # "/" cannot be blanket-disallowed: it is the landing for anyone without
     # the app cookie, which includes every crawler.
     assert "Allow: /$" in body
-    assert f"Allow: {PATH_ES}" in body
+    for path in (PATH_ES, PATH_EN_ES, PATH_ES_US):
+        assert f"Allow: {path}" in body
     for private in ("/portfolio", "/profile", "/import_transactions", "/_stcore/"):
         assert f"Disallow: {private}" in body
     assert f"Sitemap: {BASE}/sitemap.xml" in body
 
 
+def _robots_group(agent: str) -> list[str]:
+    """The rules a crawler calling itself `agent` would apply."""
+    out, active = [], False
+    for line in seo.robots_txt(BASE).splitlines():
+        if line.lower().startswith("user-agent:"):
+            active = line.split(":", 1)[1].strip() == agent
+        elif active and line.strip():
+            out.append(line.strip())
+    return out
+
+
 def test_robots_never_disallows_the_landing_itself():
-    lines = seo.robots_txt(BASE).splitlines()
-    assert "Disallow: /" not in lines, "would delist the landing page"
+    # Scoped to the "*" group: the AI-crawler groups below it *do* say
+    # "Disallow: /", and that is the point of them.
+    assert "Disallow: /" not in _robots_group("*"), "would delist the landing page"
+
+
+def test_ai_crawlers_are_turned_away_from_everything():
+    for agent in seo.AI_CRAWLERS:
+        assert _robots_group(agent) == ["Disallow: /"], agent
+
+
+def test_a_search_crawler_is_still_welcome():
+    # Google-Extended is the Gemini-training token and blocking it must not
+    # touch Googlebot, which is what puts the landing in search results.
+    assert "Google-Extended" in seo.AI_CRAWLERS
+    assert "Googlebot" not in seo.AI_CRAWLERS
+    assert "Applebot" not in seo.AI_CRAWLERS  # only Applebot-Extended is blocked
+    assert _robots_group("Googlebot") == []  # falls through to the "*" group
 
 
 # ------------------------------------------------------------------- sitemap
 
 
-def test_sitemap_is_well_formed_and_lists_both_languages():
+def test_sitemap_is_well_formed_and_lists_every_variant():
     xml = seo.sitemap_xml(BASE, lastmod="2026-08-31")
     root = ElementTree.fromstring(xml)
     ns = {"s": "http://www.sitemaps.org/schemas/sitemap/0.9"}
     locs = [e.text for e in root.findall(".//s:loc", ns)]
-    assert locs == [f"{BASE}/", f"{BASE}{PATH_ES}"]
+    assert locs == [
+        f"{BASE}/", f"{BASE}{PATH_ES}", f"{BASE}{PATH_EN_ES}", f"{BASE}{PATH_ES_US}"
+    ]
     assert all(e.text == "2026-08-31" for e in root.findall(".//s:lastmod", ns))
 
 

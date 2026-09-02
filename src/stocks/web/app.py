@@ -29,6 +29,7 @@ from stocks import obs  # noqa: E402
 from stocks.web import (  # noqa: E402
     auth,
     chat_core,
+    css,
     feedback,
     i18n,
     landing,
@@ -42,7 +43,7 @@ from stocks.web.widgets import (  # noqa: E402
     is_mobile,
     render_bottom_nav,
     render_topbar,
-    ticker_picker,
+    seed_selection,
 )
 
 _ASSETS = Path(__file__).parent / "assets"
@@ -61,11 +62,11 @@ st.logo(
 # the CCv2 shadow roots) reads its colors, radii, elevations and type steps
 # from the `--ag-*` custom properties this emits. widgets.py owns the values;
 # nothing downstream writes a raw hex. Must precede the blocks that use them.
-st.html(ds_vars_css())
+css.inject(ds_vars_css())
 
 # Dense layout: kill Streamlit's default top padding and wide element gaps so
 # charts and metrics sit high and tight instead of floating in whitespace.
-st.html(
+css.inject(
     """
     <style>
       /* Epilogue — the DS display face for KPI numbers; config.toml can only
@@ -534,7 +535,7 @@ stroke-linecap='round' stroke-linejoin='round'%3E\
 # placeholder in its own shape instead of a spinner. Its style block lives with
 # the shapes it paints; injected here so it is on the page before any page body
 # runs, and once per rerun rather than once per skeleton.
-st.html(skeletons.CSS)
+css.inject(skeletons.CSS)
 
 # Mobile KPI figures. metric_cells packs the headline numbers into ~110px
 # fixed-width tiles on phones, where the 1.35rem base value (€112,432) overruns
@@ -545,7 +546,7 @@ st.html(skeletons.CSS)
 # tiles render — and kill the clip so the whole number always shows. Loaded
 # after the base <style> above, so it wins on source order.
 if is_mobile():
-    st.html(
+    css.inject(
         """
         <style>
           [data-testid="stMetricValue"] {
@@ -856,8 +857,8 @@ st.html(
 # glyphs, and expand the full panel on hover. The expand is an OVERLAY — the
 # rail's flex box stays --rail-w wide so the main content never reflows on
 # hover; the inner scroll wrapper (which carries the opaque panel bg) is what
-# grows out over the page. Phones keep the popover picker and hidden sidebar.
-st.html(
+# grows out over the page. Phones keep the hidden sidebar.
+css.inject(
     """
     <style>
     @media (min-width: 641px) {
@@ -990,9 +991,9 @@ st.html(
         height: var(--ag-icon-nav) !important;
       }
 
-      /* Minimized rail carries only the app logo + nav glyphs. Hide the whole
-         ticker picker (sign-in button, "Valores" title, search + sort row and
-         the watchlist itself) — it slides back in with the panel on hover. */
+      /* Minimized rail carries only the app logo + nav glyphs. Hide the rest
+         of the drawer's own content (sign-in button, feedback entry point) —
+         it slides back in with the panel on hover. */
       section[data-testid="stSidebar"][aria-expanded="false"]:not(:hover)
         [data-testid="stSidebarUserContent"] {
         display: none !important;
@@ -1047,6 +1048,18 @@ ticker_page = st.Page(
     url_path="ticker",
 )
 
+_portfolio_pages = [
+    st.Page(
+        "app_pages/portfolio.py",
+        title=tr("nav.portfolio"),
+        icon=":material/pie_chart:",
+    ),
+    st.Page(
+        "app_pages/import_transactions.py",
+        title=tr("nav.import"),
+        icon=":material/upload_file:",
+    ),
+]
 # Grouped like the design's left menu: Inicio on top, then the Cartera and
 # Mercado sections, with the account entry in its own bottom group.
 page = st.navigation(
@@ -1059,18 +1072,7 @@ page = st.navigation(
                 default=True,
             ),
         ],
-        tr("nav.section_portfolio"): [
-            st.Page(
-                "app_pages/portfolio.py",
-                title=tr("nav.portfolio"),
-                icon=":material/pie_chart:",
-            ),
-            st.Page(
-                "app_pages/import_transactions.py",
-                title=tr("nav.import"),
-                icon=":material/upload_file:",
-            ),
-        ],
+        tr("nav.section_portfolio"): _portfolio_pages,
         tr("nav.section_market"): [
             ticker_page,
             st.Page(
@@ -1105,7 +1107,7 @@ if "auth" in st.secrets and not auth.is_logged_in():
     )
 
 # Deep link: ?ticker=SYM selects that symbol (applied once per new URL value,
-# so it doesn't fight the picker). Away from the Ticker page it also jumps
+# so it doesn't fight the search box). Away from the Ticker page it also jumps
 # there — keeps pre-refactor /?ticker= bookmarks and table links working.
 _qp = (st.query_params.get("ticker") or "").strip().upper()
 if _qp and st.session_state.get("_url_ticker") != _qp:
@@ -1114,11 +1116,11 @@ if _qp and st.session_state.get("_url_ticker") != _qp:
     if page.url_path != ticker_page.url_path:
         st.switch_page(ticker_page)
 
-# The ticker picker lives here, above page.run(), so every page carries it:
-# sidebar searchbar + watchlist on desktop, popover on phones. Clicking any
-# ticker row navigates to the Ticker page (the picker's on_click sets the
-# flag); on the Ticker page itself the rerun just redraws the selection.
-ticker_picker(key="nav")
+# Selection only, no UI: ticker navigation is the top-bar search (plus
+# ?ticker= links), so the drawer carries just the page nav. Seeding runs above
+# page.run() so every page starts with a ticker in hand. A pick from the
+# top-bar results sets "picker_clicked", which routes to the Ticker page.
+seed_selection()
 _clicked = st.session_state.pop("picker_clicked", False)
 if _clicked and page.url_path != ticker_page.url_path:
     st.switch_page(ticker_page)

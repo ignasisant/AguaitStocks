@@ -1,10 +1,10 @@
-"""Shared Streamlit widgets — chiefly the ticker picker used across pages.
+"""Shared Streamlit widgets — top bar, tables, chips and ticker actions.
 
-Every place that selects a ticker uses `ticker_picker`: a searchbar on top of a
-fixed-height, scrollable, logo-tagged list of the watchlist (favorites first),
-with an "Analyze <SYMBOL>" escape hatch for symbols not on the list. Keeping it
-in one place means the main dashboard and the valuation page get the identical
-picker instead of a bespoke `text_input` each.
+Ticker selection is the top bar's search dropdown (`render_topbar` /
+`_topbar_matches`): the watchlist matched by symbol, name or tag-group, then
+coins, funds, the SEC map and a worldwide Yahoo lookup, with an
+"Analyze <SYMBOL>" escape hatch. It writes the shared "picker_selected"
+session key that every page reads.
 """
 
 from __future__ import annotations
@@ -12,17 +12,18 @@ from __future__ import annotations
 import html
 import re
 from pathlib import Path
-from urllib.error import URLError
 from urllib.parse import quote
 
 import pandas as pd
 import streamlit as st
-from yfinance.exceptions import YFRateLimitError
 
 from stocks.config import Alert, load_watchlist
 from stocks.data.logo import brand_logo_url, logo_url, mirror_brand, mirror_logo
 from stocks.fuzzy import FUZZY_CUTOFF, MIN_QUERY, fuzzy_ratio
-from stocks.web import auth, notices, skeletons
+from stocks.portfolio import platforms
+from stocks.portfolio.custody import UNKNOWN as BROKER_UNKNOWN
+from stocks.web import auth
+from stocks.web import css as css_util
 from stocks.web.i18n import t as tr
 
 # ─────────────────────────────────────────────────── TopStocks design tokens
@@ -136,6 +137,10 @@ RADIUS_SM = "8px"       # inputs, buttons, table cells
 RADIUS_MD = "12px"      # inset tiles, chat bubbles, Plotly hover box
 RADIUS_LG = "16px"      # section cards
 RADIUS_PILL = "9999px"  # delta pills
+# Plotly wants a number, not a CSS length: bar-cap radius in px, the "6 · nav"
+# step. Plotly clamps it to half the bar width (thin monthly bars stay
+# square-ish) and rounds only the ends of a stack, never the joins inside it.
+BAR_RADIUS = 6
 
 # Type scale — config.toml's headingFontSizes (28/22/18/16/14/12) extended
 # down with the three chrome steps the app needs. px, like the DS scale, so a
@@ -427,6 +432,10 @@ def chart_layout(
             font=dict(size=12, color=TEXT_SECONDARY),
         )
     layout["margin"] = dict(l=0, r=0, t=top, b=0)
+    # Rounded bar caps, app-wide: every bar chart splats this helper, and a
+    # no-op on line/pie/heatmap figures. Stacked bars keep square joins —
+    # plotly only rounds the ends of a stack.
+    layout["barcornerradius"] = BAR_RADIUS
     if mobile:
         # DS mobile chart spec: a finger drag drives the crosshair and the
         # reading row (app.py's touch bridge), so nothing may pan under it.
@@ -480,6 +489,61 @@ def brand_logo(key: str, domain: str | None) -> str | None:
     if name := mirror_brand(key, domain, _STATIC_LOGO_DIR):
         return _static_logo_src(name)
     return brand_logo_url(domain)
+
+
+def broker_name(key: str) -> str:
+    """Display name for a ledger broker prefix ("clicktrade" -> "ClickTrade").
+
+    Brand names come from the import registry; the two generic buckets — a
+    hand-entered row and a holding no note attributes — are localized.
+    """
+    if key == "manual":
+        return tr("portfolio.broker_manual")
+    if key == BROKER_UNKNOWN:
+        return tr("portfolio.broker_unknown")
+    return platforms.broker_label(key)
+
+
+def broker_chips_html(
+    mix: list[tuple[str, float]], *, size: int = 22, shares: bool = True
+) -> str:
+    """Custody marks for one holding: a brand logo per broker holding it.
+
+    `mix` is `custody.mix()`'s (broker, share of shares) list. A broker with
+    no brand domain of its own (a hand-entered row, a one-off note) shows a
+    muted name pill instead of a logo, so the row never renders as a gap. The
+    share of the position rides each mark's tooltip — the marks sit next to a
+    badge, where a second number would crowd it — and `shares=False` drops it
+    for a single-custodian holding.
+    """
+    marks = []
+    for key, share in mix:
+        name = broker_name(key)
+        title = f"{name} · {share:.0%}" if shares and len(mix) > 1 else name
+        title = html.escape(title, quote=True)
+        src = brand_logo(key, platforms.broker_domain(key))
+        if src:
+            marks.append(
+                f'<img src="{html.escape(src, quote=True)}" alt="{title}"'
+                f' title="{title}" style="width:{size}px;height:{size}px;'
+                f"border-radius:{RADIUS_XS};background:{TEXT_PRIMARY};"
+                f"border:1px solid {BORDER};box-sizing:border-box;"
+                f'padding:2px;object-fit:contain">'
+            )
+        else:
+            marks.append(
+                f'<span title="{title}" style="font-size:{FS_XS};'
+                f"font-weight:600;color:{TEXT_MUTED};border:1px solid {BORDER};"
+                f"border-radius:{RADIUS_XS};padding:2px 6px;"
+                f'white-space:nowrap">{html.escape(name)}</span>'
+            )
+    if not marks:
+        return ""
+    return (
+        '<span style="display:inline-flex;align-items:center;gap:4px">'
+        + "".join(marks)
+        + "</span>"
+    )
 
 
 @st.cache_data(show_spinner=False)
@@ -1192,7 +1256,7 @@ def _fuzzy_order(
 ) -> list[str]:
     """Tickers whose symbol, name or tag fuzzy-matches `q`, best score first.
 
-    Typo fallback shared by the top-bar dropdown and the drawer picker; both
+    Typo fallback for the top-bar dropdown search;
     call it only after exact substring matching came up empty.
     """
     if len(q) < MIN_QUERY:
@@ -1212,9 +1276,9 @@ def _fuzzy_order(
 def _topbar_matches(raw: str):
     """Picker-parity search for the top-bar dropdown.
 
-    Mirrors the left-drawer `ticker_picker` exactly: the watchlist is matched by
-    symbol, company name OR tag-group (favorites first, and open-but-unlisted
-    positions from the ledger folded in), then coins, then the SEC ticker map,
+    The watchlist is matched by symbol, company name OR tag-group (favorites
+    first, and open-but-unlisted positions from the ledger folded in), then
+    coins, then the SEC ticker map,
     then a worldwide Yahoo lookup for everything the US-only map can't see,
     plus an "Analyze <SYMBOL>" fallback for a symbol none of them know. Returns
     `(watch, crypto, funds, sec, world, analyze)` where watch rows carry their
@@ -1342,15 +1406,28 @@ def _search_row(t: str, label: str, key: str) -> None:
     st.button(label, key=key, on_click=_go_ticker, args=(t,), width="stretch")
 
 
+def inline_style(css: str) -> None:
+    """Emit bare CSS in the page flow — a thin alias for `css_util.inject`.
+
+    Kept as its own name because the callers below read better with it: rules
+    computed per rerun (the dropdown's logo backgrounds, the collapsed mobile
+    field) rather than a page-level stylesheet. See `stocks.web.css` for why
+    nothing here may reach `st.html()` as style-only content.
+    """
+    css_util.inject(css)
+
+
 def _render_ticker_rows(
     rows: list[tuple[str, str, str]], *, key_prefix: str = "tbres"
 ) -> None:
     """Render `(symbol, name, mark)` rows as logo'd buttons in the dropdown.
 
     Each carries its watchlist logo (CSS background, like the picker) and its
-    star/briefcase mark. Logo rules are scoped under the results container so they beat
-    the base row rule's specificity — otherwise its `background: transparent`
-    shorthand wipes the logo back to none.
+    star/briefcase mark. Logo rules are scoped under the results container so
+    they beat the base row rule's specificity, and every row rule sets
+    `background-color` only — the `background` shorthand resets
+    background-image and wiped the logo (base rule, then hover once the base
+    was scoped: same specificity as this rule, so source order decided).
     """
     logo_rules = [
         f'[class*="st-key-topbar_results"] .st-key-{key_prefix}_{_slug(t)} button {{'
@@ -1361,7 +1438,7 @@ def _render_ticker_rows(
         if (src := logo(t))
     ]
     if logo_rules:
-        st.html("<style>" + "".join(logo_rules) + "</style>")
+        inline_style("".join(logo_rules))
     for t, name, mark in rows:
         pre = f"{mark} " if mark else ""
         tail = f"  {name}" if name and name != t else ""
@@ -1393,10 +1470,10 @@ def _topbar_search_panel() -> None:
             # below is a child of this container — collapsing the host while
             # results are showing would squash them to 44px. The fragment
             # reruns as-you-type, so the rule lifts on the first keystroke.
-            st.html(
-                "<style>@media (max-width: 640px) {"
+            inline_style(
+                "@media (max-width: 640px) {"
                 ".st-key-topbar_search:not(:focus-within)"
-                " { width: 44px !important; } }</style>"
+                " { width: 44px !important; } }"
             )
         if q:
             # Typed query: live matches. Recents never show here — searching
@@ -1583,7 +1660,7 @@ def render_topbar(page_title: str, ticker: str | None = None) -> None:
     #     and can't reflow/clip; the sidebar-menu toggle, the search and the chat
     #     button then share one row (the Streamlit header row on phones, the
     #     breadcrumb bar on desktop). The bar reserves right padding for it.
-    st.html(
+    css_util.inject(
         """
         <style>
         /* Streamlit fixes the element container's width at 100%, so the
@@ -1651,13 +1728,19 @@ def render_topbar(page_title: str, ticker: str | None = None) -> None:
           box-shadow: var(--ag-shadow-overlay);
         }
         [class*="st-key-topbar_results"] [data-testid="stVerticalBlock"] { gap: 0.1rem; }
+        /* background-COLOR, never the `background` shorthand: the shorthand
+           resets background-image, and these rows carry their logo as one
+           (see _render_ticker_rows). The hover rule ties the per-row logo rule
+           on specificity, so a shorthand there wiped the hovered row's logo. */
         [class*="st-key-topbar_results"] button {
           justify-content: flex-start; text-align: left;
-          border: 0; background: transparent; color: var(--ag-text-primary);
+          border: 0; background-color: transparent; color: var(--ag-text-primary);
           padding: 0.3rem 0.5rem; font-size: var(--ag-fs-sm); min-height: 0;
         }
-        [class*="st-key-topbar_results"] button:hover {
-          background: var(--ag-surface-hover); color: var(--ag-text-primary);
+        [class*="st-key-topbar_results"] button:hover,
+        [class*="st-key-topbar_results"] button:focus,
+        [class*="st-key-topbar_results"] button:active {
+          background-color: var(--ag-surface-hover); color: var(--ag-text-primary);
         }
         /* The button's inner flex wrapper centers its label; pin it left so the
            text sits right after the logo/emoji instead of mid-row. */
@@ -1686,7 +1769,7 @@ def render_topbar(page_title: str, ticker: str | None = None) -> None:
         }
         /* Analyze-new fallback keeps the brand primary fill to read as an action. */
         [class*="st-key-topbar_results"] button[kind="primary"] {
-          background: var(--ag-purple-900); border-color: var(--ag-purple-800);
+          background-color: var(--ag-purple-900); border-color: var(--ag-purple-800);
           color: var(--ag-purple-300); box-shadow: none;
         }
 
@@ -1704,6 +1787,12 @@ def render_topbar(page_title: str, ticker: str | None = None) -> None:
             max-width: calc(100% + 2rem) !important;
           }
           .topstocks-topbar { padding-left: 1rem; padding-right: 1rem; }
+          /* Streamlit paints its own app logo (st.logo) inside the
+             collapsed-sidebar control, which on phones lands right next to
+             our mark and shows the bull twice. The DS header owns the mark
+             here, so drop Streamlit's; the sidebar's own logo
+             (stSidebarLogo) is a different testid and stays. */
+          [data-testid="stLogo"] { display: none; }
           /* DS mobile header: brand mark + screen title beside the menu
              toggle, in the native header strip. Informational only —
              pointer-events off so header taps pass through. */
@@ -2290,11 +2379,11 @@ def sec_title(ticker: str) -> str | None:
 
 @st.cache_data(ttl=86400, show_spinner=False)
 def sec_matches(query: str) -> list[tuple[str, str]]:
-    """SEC ticker-map search (symbol or company name) behind the picker.
+    """SEC ticker-map search (symbol or company name) behind the search box.
 
     Pure in-memory scan of the cached map, but memoised per query anyway so
     reruns while typing don't rescan 10k rows. Empty when the map has never
-    been cached and the network is down — search degrades, picker survives.
+    been cached and the network is down — search degrades, the app survives.
     """
     from stocks.data.edgar import search_companies
 
@@ -2306,7 +2395,7 @@ def sec_matches(query: str) -> list[tuple[str, str]]:
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def world_matches(query: str) -> list[tuple[str, str, str]]:
-    """Worldwide symbol search (Yahoo), the last tier of the picker.
+    """Worldwide symbol search (Yahoo), the last tier of the search box.
 
     The tiers above it are all local tables and all partial — the watchlist,
     the coin list, and the SEC map's US filers — so a foreign listing had no
@@ -2385,8 +2474,7 @@ def recent_closes(tickers: tuple[str, ...]) -> dict[str, list[float]]:
     One bulk download (data.fetch.fetch_many) for the whole watchlist, cached
     15 min so the ticker list renders without hammering the network on every
     rerun. The cache key is the ticker tuple, so every page that shows the
-    picker shares one download; change chips and portfolio weights both derive
-    from it.
+    page shares one download.
     """
     from stocks.data.fetch import fetch_many
 
@@ -2396,15 +2484,6 @@ def recent_closes(tickers: tuple[str, ...]) -> dict[str, list[float]]:
         if close is not None and len(close):
             out[t] = [float(v) for v in close.iloc[-2:]]
     return out
-
-
-def daily_changes(tickers: tuple[str, ...]) -> dict[str, float]:
-    """Latest daily % change (last close vs previous close) per ticker."""
-    return {
-        t: (c[-1] / c[-2] - 1) * 100
-        for t, c in recent_closes(tickers).items()
-        if len(c) >= 2 and c[-2]
-    }
 
 
 def _slug(s: str) -> str:
@@ -2423,7 +2502,7 @@ def db_mtime(db: str) -> float:
 
 @st.cache_data(show_spinner=False, max_entries=64)
 def held_tickers(db: str, mtime: float) -> list[str]:
-    """Tickers with an open position in the ledger — shown in the picker even
+    """Tickers with an open position in the ledger — reachable in search even
     when they're not on the watchlist, so imported activity is browsable.
     `db` is the session user's ledger path; it keys the cache so concurrent
     users never see each other's positions. `mtime` (db_mtime) invalidates
@@ -2433,430 +2512,32 @@ def held_tickers(db: str, mtime: float) -> list[str]:
         from stocks.portfolio.positions import build
 
         # Identity converter: quantities don't need FX, keeps this offline.
-        positions, _ = build(all_transactions(Path(db)), to_eur=lambda a, c, d: a)
+        positions, _ = build(all_transactions(Path(db)), to_base=lambda a, c, d: a)
         return [p.ticker for p in positions]
     except Exception:
-        return []  # empty/inconsistent ledger must never break the picker
+        return []  # empty/inconsistent ledger must never break search
 
 
-@st.cache_data(ttl=900, show_spinner=False)
-def portfolio_stats(
-    tickers: tuple[str, ...], db: str, mtime: float
-) -> tuple[dict[str, float], dict[str, float]]:
-    """(weight, unrealised P/L %) per held ticker, for the "Portfolio %" sort.
+def seed_selection() -> str | None:
+    """Seed the shared "picker_selected" session key, once per session.
 
-    Weights are EUR market-value shares (0–1) — note they need one FX spot
-    lookup per non-EUR currency (cached 15 min with the rest). P/L is each
-    open position's price return in its native currency — (qty·last / cost)
-    − 1 — FX moves excluded. `tickers` is the picker's full list: prices come
-    from the same cached bulk download the change chips use, so this adds no
-    extra market-data call.
+    Ticker navigation lives in the top-bar search and in ?ticker= deep links;
+    nothing renders a watchlist list any more. The Ticker page still wants a
+    sensible default on a cold session, so pick the first favorite, else the
+    first watchlist entry, else a held-but-unlisted symbol from the ledger.
+    Returns the selection (upper-cased) or None when there is nothing to show.
     """
-    try:
-        from pathlib import Path
-
-        from stocks.analysis.portfolio import market_value_weights_eur
-        from stocks.portfolio.ledger import all_transactions
-        from stocks.portfolio.positions import build
-
-        # Identity converter keeps this offline; quantity/cost_native don't need FX.
-        positions, _ = build(all_transactions(Path(db)), to_eur=lambda a, c, d: a)
-        if not positions:
-            return {}, {}
-        closes = recent_closes(tickers)
-        prices = {t: c[-1] for t, c in closes.items() if c}
-        weights = market_value_weights_eur(positions, prices, {})
-        pnl = {
-            p.ticker: (p.quantity * prices[p.ticker] / p.cost_native - 1) * 100
-            for p in positions
-            if prices.get(p.ticker) and p.cost_native
-        }
-        return weights, pnl
-    except Exception:
-        return {}, {}  # missing ledger/prices/FX must never break the picker
-
-
-def _change_md(chg: float | None) -> str:
-    """Colored daily-change chip: green up, red down, gray when unknown."""
-    if chg is None:
-        return ":gray[—]"
-    return f":{'green' if chg >= 0 else 'red'}[{chg:+.2f}%]"
-
-
-def ticker_picker(
-    *,
-    key: str = "ticker",
-    container=None,
-    title: str | None = None,
-    allow_custom: bool = True,
-    show_changes: bool = True,
-    list_height: int = 360,
-) -> str | None:
-    """Searchbar + scrollable watchlist button list; returns the picked ticker.
-
-    Args:
-        key: prefix isolating this picker's widget keys, so multiple pickers
-            (main page, valuation page) never collide. The selected ticker and
-            sort choice are deliberately shared across all pickers (session
-            keys "picker_selected"/"picker_sort_by"), so switching pages keeps
-            the same selection and ordering.
-        container: where to render; defaults to `st.sidebar`.
-        title: bold label above the searchbar (defaults to the localized
-            "Tickers" heading when None).
-        allow_custom: show an "Analyze <SYMBOL>" button when the query is a
-            symbol not on the watchlist, so any ticker can be analyzed.
-        show_changes: render the per-ticker daily-change chip (one bulk
-            download, cached and shared across pages).
-        list_height: pixel height of the scroll region holding the buttons.
-
-    Returns the selected ticker (upper-cased, stripped) or None when the
-    watchlist is empty and nothing has been typed.
-    """
-    if title is None:
-        title = tr("widgets.tickers_title")
-    mobile = is_mobile()
-    if container is not None:
-        box = container
-    elif mobile:
-        # Phones: no picker UI. The fixed top-bar search already covers ticker
-        # navigation on phones, so the popover picker is redundant clutter.
-        # Skip drawing it (early return below, after the selection is seeded).
-        box = None
-    else:
-        box = st.sidebar
-    if mobile:
-        # Shorter scroll region: a tall inner scroller inside the page scroll
-        # is a touch trap.
-        list_height = min(list_height, 260)
-
-    holdings = load_watchlist(auth.watchlist_path())
-    labels = {h.ticker: (h.name or h.ticker) for h in holdings}
-    fav_set = {h.ticker for h in holdings if h.favorite}
-    tag_map = {h.ticker: h.tags for h in holdings if h.tags}
-    # Held-but-unlisted tickers (from the imported ledger) join the list so
-    # every open position is reachable; a briefcase icon marks them in the row.
-    _db = str(auth.db_path())
-    held_set = set(held_tickers(_db, db_mtime(_db)))
-    for t in sorted(held_set - set(labels)):
-        labels[t] = sec_title(t) or t
-    # Favorites float to the top of the list; a star icon marks them in the row.
-    tickers = [t for t in labels if t in fav_set]
-    tickers += [t for t in labels if t not in fav_set]
-
-    # Shared across pickers (not keyed by `key`) so the picked ticker follows
-    # you between pages.
-    sel_key = "picker_selected"
-    if tickers:
-        st.session_state.setdefault(sel_key, tickers[0])
-
-    if mobile and container is None:
-        # Selection seeded above; return it without rendering any picker UI.
-        ticker = st.session_state.get(sel_key)
-        return ticker.strip().upper() if ticker else ticker
-
-    def _select(t: str) -> None:
-        st.session_state[sel_key] = t
-        # Flag for app.py: a pick anywhere navigates to the Ticker page (also
-        # when re-clicking the already-selected row). Consumed there via pop().
-        st.session_state["picker_clicked"] = True
-
-    def _btn_key(t: str) -> str:
-        """Widget key for a ticker's pick button (also its .st-key-* CSS class)."""
-        return f"{key}_pick_{_slug(t)}"
-
-    if not (mobile and container is None):
-        box.markdown(f"**{title}**")  # popover already carries the label
-    # Search box with a sort-menu icon button right beside it. The popover keeps
-    # the sort options out of the way until clicked. Change sorts are only
-    # offered when chips are on, since they need the daily-change numbers;
-    # "Portfolio %" only when the ledger has open positions to weigh.
-    weights, pnl = (
-        portfolio_stats(tuple(tickers), _db, db_mtime(_db)) if held_set else ({}, {})
-    )
-    # Sort options as stable ids paired with translated labels. The id (not the
-    # label) is what persists in session + user prefs, so the choice survives a
-    # browser reload and a language switch; the label is display-only via the
-    # selectbox format_func below.
-    sort_labels = {
-        "watchlist": tr("widgets.sort_watchlist"),
-        "az": tr("widgets.sort_az"),
-        "change_up": tr("widgets.sort_change_up"),
-        "change_down": tr("widgets.sort_change_down"),
-        "portfolio": tr("widgets.sort_portfolio"),
-    }
-    sort_ids = ["watchlist", "az"]
-    if show_changes:  # change sorts need the daily-change numbers
-        sort_ids += ["change_up", "change_down"]
-    if weights:  # portfolio % only when the ledger has open positions to weigh
-        sort_ids.append("portfolio")
-    query = box.text_input(
-        tr("widgets.search"),
-        key=f"{key}_search",
-        placeholder=tr("widgets.search_placeholder"),
-        label_visibility="collapsed",
-    ).strip()
-    # Sort choice. Session "picker_sort_by" shares it across pickers/pages; user
-    # prefs persist it across a browser reload (session state is wiped on reload,
-    # so a fresh load re-seeds from prefs — read once and cache into session so
-    # the common no-change reruns skip the disk read).
-    if "picker_sort_by" not in st.session_state:
-        st.session_state["picker_sort_by"] = (
-            auth.load_prefs().get("picker_sort_by") or sort_ids[0]
-        )
-    stored_sort = st.session_state["picker_sort_by"]
-    if stored_sort not in sort_ids:
-        stored_sort = sort_ids[0]
-
-    def _set_sort() -> None:
-        sid = st.session_state[f"{key}_sort"]
-        st.session_state["picker_sort_by"] = sid
-        prefs = auth.load_prefs()
-        if prefs.get("picker_sort_by") != sid:  # persist across reloads
-            prefs["picker_sort_by"] = sid
-            auth.save_prefs(prefs)
-
-    # Inline segmented control, not a dropdown/popover: the options render in
-    # place, so nothing portals to page root and gets dismissed the moment the
-    # cursor leaves the (collapsible, overlay) sidebar. required=True blocks the
-    # single-select "deselect on re-click", so a sort is always active.
-    sort_by = box.segmented_control(
-        tr("widgets.sort_by"),
-        sort_ids,
-        default=stored_sort,
-        required=True,
-        format_func=lambda sid: sort_labels[sid],
-        key=f"{key}_sort",
-        on_change=_set_sort,
-    )
-
-    q = query.upper()
-    # Query matches ticker, company name or any tag — typing a tag-group name
-    # (e.g. "semis") filters the list down to that group.
-    shown = (
-        [
-            t
-            for t in tickers
-            if q in t.upper()
-            or q in labels[t].upper()
-            or any(q in tag.upper() for tag in tag_map.get(t, ()))
-        ]
-        if q
-        else tickers
-    )
-    if q and not shown:
-        # Typo fallback ("oracel") — same fields, fuzzy, best score first.
-        shown = _fuzzy_order(q, tickers, labels, tag_map)
-
-    # Rows shimmer from here until the scroll region below is built: the change
-    # chips need a live quote per ticker, so on a cold cache the sidebar would
-    # otherwise show a search box above empty space.
-    rows_slot = skeletons.reserve("rows", container=box, rows=8)
-    # The picker renders before page.run(), outside the app-level guard — a
-    # throttled Yahoo or dead network must dim the change chips, not crash the
-    # app. The miss isn't cached (st.cache_data skips exceptions), so a rerun
-    # retries; the toast (deduped app-wide) explains the blank chips once.
-    try:
-        changes = daily_changes(tuple(tickers)) if show_changes else {}
-    except (YFRateLimitError, URLError) as exc:
-        notices.data_toast(exc)
-        changes = {}
-
-    # Apply the sort chosen in the popover. "Watchlist" keeps the favorites-first
-    # source order; the rest reorder `shown`. Missing changes sink to the bottom.
-    if sort_by == "az":
-        shown = sorted(shown)
-    elif sort_by in ("change_up", "change_down"):
-        desc = sort_by == "change_down"
-        # Unknown change → +inf so it sorts last in both directions.
-        shown = sorted(
-            shown,
-            key=lambda t: (
-                changes.get(t) if changes.get(t) is not None else float("inf")
-            ),
-            reverse=desc,
-        )
-        if desc:
-            # reverse=True pushes the +inf unknowns to the front; move them back.
-            known = [t for t in shown if changes.get(t) is not None]
-            unknown = [t for t in shown if changes.get(t) is None]
-            shown = known + unknown
-    elif sort_by == "portfolio":
-        # Biggest position first; unheld tickers weigh 0 and sink to the bottom
-        # keeping their watchlist order (sorted is stable).
-        shown = sorted(shown, key=lambda t: -weights.get(t, 0.0))
-
-    # Logo lives inside each button as a left-aligned background image (Streamlit
-    # won't render an image in a button label). Per-ticker CSS targets the
-    # .st-key-<key> class Streamlit stamps on each keyed widget's container.
-    # Covers watchlist rows (_pick_), SEC search rows (_sec_) and crypto
-    # search rows (_cx_).
-    prefixes = (f"{key}_pick_", f"{key}_sec_", f"{key}_cx_")
-
-    def _sel(suffix: str) -> str:
-        return ",".join(f'[class*="st-key-{p}"] {suffix}' for p in prefixes)
-
-    primary = 'button[kind="primary"]'
-    rules = [
-        f"{_sel('button')} {{justify-content:flex-start;"
-        " text-align:left; padding-left:34px; background-repeat:no-repeat;"
-        " background-position:9px center; background-size:18px 18px;}",
-        # Selected pick highlighted with the brand "active" chip — purple-900
-        # fill, purple-800 border, purple-300 text (overrides the Streamlit
-        # primary fill), like the design's active nav row. The `*` rule beats
-        # the inline color on the :green/:red change chip so the whole label
-        # reads in the brand tint.
-        f"{_sel(primary)},"
-        f"{_sel(primary + ':hover')},"
-        f"{_sel(primary + ':active')},"
-        f"{_sel(primary + ':focus')} "
-        f" {{background-color:{PURPLE_900} !important;"
-        f" border-color:{PURPLE_800} !important;"
-        f" color:{PURPLE_300} !important;"
-        " box-shadow:none !important;}"  # active chip, not a CTA — no glow
-        f"{_sel(primary + ' *')}"
-        f" {{color:{PURPLE_300} !important;}}",
-    ]
-    for t in shown:
-        src = logo(t)
-        if src:
-            bg = f'background-image:url("{src}");'
-            rules.append(f".st-key-{_btn_key(t)} button {{{bg}}}")
-    box.html("<style>" + "".join(rules) + "</style>")
-
-    # Beyond the watchlist: the query also searches the whole SEC ticker map
-    # (symbol or company name), so typing "airbnb" surfaces ABNB even when it
-    # isn't listed or held, and then Yahoo's worldwide lookup, which is what
-    # carries the non-US names the SEC map has never heard of ("mips" ->
-    # MIPS.ST). A raw "Analyze <SYMBOL>" fallback stays for exact symbols
-    # neither one knows.
-    matches: list[tuple[str, str]] = []
-    crypto_hits: list[tuple[str, str]] = []
-    fund_hits: list[tuple[str, str]] = []
-    world_hits: list[tuple[str, str, str]] = []
-    if allow_custom and q:
-        matches = [(t, n) for t, n in sec_matches(q) if t not in labels]
-        # Coin codes and names too, so "bitcoin" or "btc" offers BTC-USD.
-        from stocks.data.crypto import search_crypto
-        from stocks.data.funds import search_funds
-
-        crypto_hits = [(t, n) for t, n in search_crypto(q) if t not in labels]
-        # And the fund catalog, so "world" or "sp500" offers the UCITS line a
-        # European broker actually sells — locally, with no Yahoo round trip.
-        fund_hits = [(t, n) for t, n in search_funds(q) if t not in labels]
-        seen = (
-            set(labels)
-            | {t for t, _ in matches}
-            | {t for t, _ in crypto_hits}
-            | {t for t, _ in fund_hits}
-        )
-        world_hits = [(t, n, x) for t, n, x in world_matches(q) if t not in seen][:3]
-        known = seen | {t for t, _, _ in world_hits}
-        if q not in known and re.fullmatch(r"[A-Z0-9.\-]{1,12}", q):
-            box.button(
-                tr("widgets.analyze", q=q),
-                key=f"{key}_analyze_new",
-                on_click=_select,
-                args=(q,),
-                width="stretch",
-                type="primary",
-            )
-
-    selected = st.session_state.get(sel_key)
-    # Fixed-height scroll region so a long watchlist stays a tidy, scrollable list.
-    with rows_slot.container(height=list_height):
-        if not shown and not q:
-            st.caption(tr("widgets.no_tickers"))
-        for t in shown:
-            star = (
-                ":material/star: " if t in fav_set
-                else (":material/work: " if t in held_set else "")
-            )
-            chip = f"  {_change_md(changes.get(t))}" if show_changes else ""
-            if sort_by == "portfolio":
-                # Sorting by weight — show the weight plus the position's total
-                # P/L (green/red) instead of the day change.
-                w = weights.get(t)
-                parts = [f":gray[{w * 100:.1f}%]"] if w else []
-                if (p := pnl.get(t)) is not None:
-                    parts.append(_change_md(p))
-                chip = "  " + " ".join(parts) if parts else ""
-            st.button(
-                f"{star}**{t}** {labels[t]}{chip}",
-                key=_btn_key(t),
-                on_click=_select,
-                args=(t,),
-                width="stretch",
-                # Selected ticker highlighted via primary style (opposing fill/text).
-                type="primary" if t == selected else "secondary",
-            )
-        # Crypto hits above the SEC rows: coin code or name matched the query.
-        # Same no-logo rule as SEC rows; 🪙 marks them. Picking one selects the
-        # Yahoo pair symbol (BTC-USD), the only form the app stores.
-        if crypto_hits:
-            st.caption(tr("widgets.crypto"))
-            for t, name in crypto_hits:
-                st.button(
-                    f"🪙 **{t}** {name}",
-                    key=f"{key}_cx_{_slug(t)}",
-                    on_click=_select,
-                    args=(t,),
-                    width="stretch",
-                    type="primary" if t == selected else "secondary",
-                )
-        # Funds next, 🧺 for the basket: same no-logo rule, and the symbol
-        # picked is the Yahoo one the catalog stores (IWDA.AS, not IWDA).
-        if fund_hits:
-            st.caption(tr("widgets.funds"))
-            for t, name in fund_hits:
-                st.button(
-                    f"🧺 **{t}** {name}",
-                    key=f"{key}_fd_{_slug(t)}",
-                    on_click=_select,
-                    args=(t,),
-                    width="stretch",
-                    type="primary" if t == selected else "secondary",
-                )
-        # Then the two searched tiers, 🌐 worldwide and 🔎 SEC map, in whichever
-        # order matched the query better (see _world_first). Neither carries a
-        # logo background — resolving one hits the network per uncached ticker,
-        # too costly per keystroke; the marks say "searched, not listed".
-        # Picking one selects it like any row (and the favorite star can then
-        # pin it to the watchlist).
-        def _world_group() -> None:
-            if world_hits:
-                st.caption(tr("widgets.from_world_search"))
-                for t, name, exch in world_hits:
-                    st.button(
-                        _world_label(t, name, exch),
-                        key=f"{key}_w_{_slug(t)}",
-                        on_click=_select,
-                        args=(t,),
-                        width="stretch",
-                        type="primary" if t == selected else "secondary",
-                    )
-
-        def _sec_group() -> None:
-            if matches:
-                st.caption(tr("widgets.from_sec_search"))
-                for t, name in matches:
-                    st.button(
-                        f"🔎 **{t}** {name}",
-                        key=f"{key}_sec_{_slug(t)}",
-                        on_click=_select,
-                        args=(t,),
-                        width="stretch",
-                        type="primary" if t == selected else "secondary",
-                    )
-
-        groups = (_world_group, _sec_group)
-        if not _world_first(q, matches):
-            groups = groups[::-1]
-        for group in groups:
-            group()
-
-    ticker = st.session_state.get(sel_key)
-    ticker = ticker.strip().upper() if ticker else ticker
-    return ticker
+    sel = st.session_state.get("picker_selected")
+    if not sel:
+        holdings = load_watchlist(auth.watchlist_path())
+        order = [h.ticker for h in holdings if h.favorite]
+        order += [h.ticker for h in holdings if not h.favorite]
+        if not order:
+            db = str(auth.db_path())
+            order = sorted(held_tickers(db, db_mtime(db)))
+        if order:
+            st.session_state["picker_selected"] = sel = order[0]
+    return sel.strip().upper() if sel else None
 
 
 def ticker_actions(ticker: str, *, container=None, key: str = "ticker") -> None:
@@ -2866,7 +2547,7 @@ def ticker_actions(ticker: str, *, container=None, key: str = "ticker") -> None:
     auth.set_tags), creating the entry when the symbol isn't listed yet — so
     favoriting or tagging a custom-analyzed or held-only ticker also adds it
     to the watchlist. Tags are free-form groups ("semis", "EM dividend"…);
-    the picker search matches them, so typing a tag filters to its group.
+    the top-bar search matches them, so typing a tag filters to its group.
 
     Rendered in the ticker page header; pass `container` to place it
     elsewhere. Writes, so login-gated: anonymous visitors (on the shared

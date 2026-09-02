@@ -81,16 +81,17 @@ def _styles() -> str:
 
 
 @lru_cache(maxsize=8)
-def document(lang: str, base_url: str) -> str:
+def document(lang: str, base_url: str, jurisdiction: str | None = None) -> str:
     """The full page for `lang`, with absolute URLs under `base_url`.
 
-    Cached: the markup is a pure function of the language and the host, both of
-    which are fixed for the life of a deployment, and the alternative is
-    rebuilding ~90KB of string per request. `maxsize` leaves room for the
-    languages times the handful of hostnames one service answers on.
+    Cached: the markup is a pure function of the language, the host and the tax
+    jurisdiction it argues from, all fixed for the life of a deployment, and
+    the alternative is rebuilding ~90KB of string per request. `maxsize` leaves
+    room for the languages times the handful of hostnames one service answers
+    on. `jurisdiction` defaults to the language's own (landing.render_language).
     """
     code = lang if lang in LANGUAGES else DEFAULT_LANG
-    with landing.render_language(code):
+    with landing.render_language(code, jurisdiction):
         body = landing.page_body()
         script = landing.bar_script()
         head = seo.head(code, base_url, extra_styles=_styles())
