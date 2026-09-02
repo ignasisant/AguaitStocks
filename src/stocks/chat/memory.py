@@ -42,6 +42,7 @@ is never offered, and the chat behaves exactly as it did before.
 from __future__ import annotations
 
 import hashlib
+import os
 import re
 import sqlite3
 from dataclasses import dataclass
@@ -52,7 +53,15 @@ from pathlib import Path
 from stocks import obs
 
 FILE = "chat_memory.db"
-MODEL = "minishlab/potion-base-32M"
+
+# The hub id, unless a deploy points at a directory holding the same weights.
+# The image bakes them with `save_pretrained` and sets STOCKS_EMBED_MODEL to
+# where they landed: what the hub serves for this repo is the safetensors file
+# *and* an ONNX copy of it, and `from_pretrained` fetches both while reading
+# only the first — 123MB of image for a file nothing opens. Deleting it from
+# the HF cache afterwards is not an option: the next offline load fails the
+# snapshot completeness check. A plain directory sidesteps the cache entirely.
+MODEL = os.environ.get("STOCKS_EMBED_MODEL") or "minishlab/potion-base-32M"
 DIM = 512
 
 # Turns shorter than this are not memories — "ok", "gracias", "y eso?" carry no
@@ -111,7 +120,7 @@ def _model():
     """The static embedding model, or None when it cannot be loaded.
 
     Cached for the process: loading reads (and on a cold machine downloads)
-    ~30MB. A miss is not an error anywhere — it just means no memory."""
+    ~124MB. A miss is not an error anywhere — it just means no memory."""
     try:
         from model2vec import StaticModel
 

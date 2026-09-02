@@ -32,17 +32,28 @@ RUN uv sync --frozen --no-dev --no-install-project
 ENV TIKTOKEN_CACHE_DIR=/home/appuser/.cache/tiktoken
 RUN /app/.venv/bin/python -c "import tiktoken; tiktoken.get_encoding('o200k_base')"
 
-# Same for the chat's embedding model (chat/memory.py). It is ~250MB of image,
-# which buys long-term memory that works on a cold start with no egress; the
-# alternative is a first-recall download that fails closed on a locked-down
-# revision. HF_HUB_OFFLINE keeps it from reaching out at all at runtime — the
-# weights are already here, and a hub call would only add latency and a
-# failure mode.
-ENV HF_HOME=/home/appuser/.cache/huggingface \
+# Same for the chat's embedding model (chat/memory.py): baked in, so long-term
+# memory works on a cold start with no egress, against a first-recall download
+# that fails closed on a locked-down revision.
+#
+# Saved as a plain directory rather than left in the HF cache. What the hub
+# serves for this repo is model.safetensors *and* an ONNX copy of the same
+# weights, and from_pretrained fetches both while reading only the first — 123MB
+# of image for a file nothing opens. It cannot simply be deleted afterwards: the
+# next offline load fails huggingface_hub's snapshot completeness check.
+# save_pretrained writes what the model actually needs and nothing else, and the
+# hub cache goes with the layer that created it.
+#
+# HF_HUB_OFFLINE stays on so a missing directory fails loudly at load instead of
+# quietly reaching for the network on a revision that has no egress.
+ENV STOCKS_EMBED_MODEL=/home/appuser/models/potion-base-32M \
     HF_HUB_DISABLE_TELEMETRY=1 \
     HF_HUB_OFFLINE=1
-RUN HF_HUB_OFFLINE=0 /app/.venv/bin/python -c \
-    "from model2vec import StaticModel; StaticModel.from_pretrained('minishlab/potion-base-32M')"
+RUN HF_HUB_OFFLINE=0 HF_HOME=/tmp/hf /app/.venv/bin/python -c \
+    "from model2vec import StaticModel; \
+     StaticModel.from_pretrained('minishlab/potion-base-32M') \
+         .save_pretrained('/home/appuser/models/potion-base-32M')" \
+    && rm -rf /tmp/hf
 
 COPY --chown=appuser:appuser . .
 # Editable install of the project itself (default): stocks.config.PROJECT_ROOT
