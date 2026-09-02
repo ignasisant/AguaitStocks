@@ -25,13 +25,21 @@ import streamlit as st
 from cryptography.fernet import Fernet
 
 from stocks import obs
-from stocks.chat import engine, market, tools
+from stocks.chat import agent, engine, market, tokens, toolbox, tools
 from stocks.config import load_watchlist
-from stocks.portfolio import autodetect, last_import, llm_map
+from stocks.portfolio import autodetect, last_import, llm_map, platforms
 from stocks.portfolio.ledger import add_many, all_transactions
 from stocks.portfolio.validate import known_tickers, validate
 from stocks.secrets_env import secret
-from stocks.web import auth, chat_skills, chat_web, llm, ratelimit, skeletons
+from stocks.web import (
+    auth,
+    chat_skills,
+    chat_web,
+    css,
+    llm,
+    ratelimit,
+    skeletons,
+)
 from stocks.web.i18n import t as tr
 from stocks.web.portfolio_data import enriched_positions
 from stocks.web.widgets import asset_logo, brand_logo, data_table, db_mtime
@@ -136,10 +144,24 @@ def _forget_key(pid: str) -> None:
         auth.save_prefs(prefs)
 
 
+def _offered_providers() -> list[llm.Provider]:
+    """Providers this account may actually pick.
+
+    The keyless chain is the operator's money, so an account the free policy
+    does not cover (engine.free_eligible) is not shown it — offering a
+    provider whose every turn will be refused is worse than not offering it.
+    BYOK providers are always listed: those spend the user's own key.
+    """
+    provs = llm.available_providers()
+    if engine.free_eligible(auth.load_prefs()):
+        return provs
+    return [p for p in provs if p.id != "free"] or provs
+
+
 def active_provider() -> llm.Provider | None:
     """The provider the user last chose (session > prefs > default), or None
     when no provider SDK is installed."""
-    provs = llm.available_providers()
+    provs = _offered_providers()
     if not provs:
         return None
     pid = (
@@ -148,7 +170,7 @@ def active_provider() -> llm.Provider | None:
         or llm.default_provider_id()
     )
     p = llm.PROVIDERS.get(pid)
-    return p if (p and p.available()) else provs[0]
+    return p if (p and p in provs) else provs[0]
 
 
 def active_key(provider: llm.Provider) -> str:
@@ -193,7 +215,7 @@ def _provider_option_md(pid: str) -> str:
 
 def _pick_provider(key: str) -> llm.Provider:
     """Provider selector; remembers the choice in session + prefs."""
-    provs = llm.available_providers()
+    provs = _offered_providers()
     ids = [p.id for p in provs]
     prefs = auth.load_prefs()
     default = (
@@ -357,6 +379,26 @@ def _gather_web(provider: llm.Provider, api_key: str, history: list[dict],
     links included. Like the skill router, this runs off the script thread,
     so `prefs` and the view context arrive as arguments."""
     return engine.ground_web(prefs, provider, api_key, history, context)
+
+
+def _gather(provider: llm.Provider, api_key: str, msgs: list[dict], prefs: dict,
+            watchlist: Path, db: Path, memory_db: Path, thread: str,
+            focus: str) -> agent.Evidence:
+    """The model-directed lookup for this turn (chat/agent.py).
+
+    Gated by the same "chat_web" toggle as the fixed pre-flight: the tools can
+    reach the internet, so a user who turned the web off must not get it back
+    through the side door. Off means Evidence(ok=False), which puts the turn on
+    the fixed path — where the toggle is honoured too.
+
+    Runs off the script thread, so the account's paths and the current view
+    arrive as arguments rather than being read from session state.
+    """
+    if not engine.web_enabled(prefs):
+        return agent.Evidence(ok=False)
+    return agent.gather(provider, api_key, msgs, toolbox.Context(
+        watchlist=watchlist, db=db, memory_db=memory_db, thread=thread,
+        focus=focus))
 
 
 def _live_quotes(message: str, watchlist: Path, focus: str) -> list[market.Quote]:
@@ -532,8 +574,13 @@ def _portfolio_context() -> str:
     account's own data is read (auth.db_path / auth.watchlist_path).
     """
     db = auth.db_path()
-    tbl = enriched_positions(str(db), db_mtime(str(db))) if db.exists() else None
-    return engine.book_snapshot(tbl, auth.watchlist_path())
+    ccy = auth.reporting_currency()
+    tbl = (
+        enriched_positions(str(db), db_mtime(str(db)), ccy)
+        if db.exists()
+        else None
+    )
+    return engine.book_snapshot(tbl, auth.watchlist_path(), ccy)
 
 
 def _system_prompt(skill_ids: list[str] | None = None) -> str:
@@ -660,6 +707,21 @@ def _pending_key(ns: str) -> str:
     return f"{ns}_pending_import"
 
 
+def _failure(history: list[dict]) -> tuple[str, str] | None:
+    """The error pinned to a trailing unanswered question, if any.
+
+    A failed answer is recorded on the user turn itself ("error": [key,
+    provider]) rather than in session state: it then belongs to its own
+    thread, survives a reload, and blocks the generate branch below without a
+    second source of truth. engine.recent rebuilds bare role/content dicts,
+    so the key never reaches a provider.
+    """
+    if not history or history[-1]["role"] != "user":
+        return None
+    err = history[-1].get("error")
+    return (err[0], err[1]) if err else None
+
+
 def _submitted(value) -> tuple[str, list]:
     """(text, files) out of st.chat_input, which returns a bare string only
     when uploads are switched off."""
@@ -701,6 +763,13 @@ def _prepare_import(name: str, data: bytes, provider: llm.Provider,
     costs a network round-trip per unknown symbol against an API that already
     rate-limits us, and it can only ever downgrade a warning — never keep a
     bad row out. Unknown symbols are simply shown as warnings.
+
+    The batch staged here is `fresh`, not `importable`: rows the ledger
+    already holds are held back rather than imported with a warning the way
+    the Import page does. The page shows its warning tier as a full table
+    next to a wipe checkbox; a chat bubble shows it folded into an expander,
+    which is not a place to put "this doubles your position" and expect it to
+    be read. The held-back rows travel along and the preview can opt them in.
     """
     paths = auth.user_paths()
     found = autodetect.detect(name, data, provider, api_key)
@@ -709,15 +778,23 @@ def _prepare_import(name: str, data: bytes, provider: llm.Provider,
         all_transactions(paths.db),
         known=known_tickers(paths.watchlist, paths.db),
     )
+    dupes = [c.tx for c in checked.duplicates]
     return {
         "filename": name,
         "label": found.label or tr("chat.import_source_llm"),
         "platform": found.platform,
         "kind": found.kind,
         "unavailable": found.unavailable,
-        "transactions": checked.importable,
-        "rows": _tx_rows(checked.importable),
-        "flagged": _issue_rows(checked.flagged),
+        # The origin the parser already stamped, "" when the file was mapped
+        # and nothing in it names a broker — then the user is asked below.
+        "broker": platforms.detected_broker(checked.importable),
+        "transactions": checked.fresh,
+        "rows": _tx_rows(checked.fresh),
+        # Warnings worth reading are the ones about rows being committed;
+        # the duplicates carry their own tier and their own explanation.
+        "flagged": _issue_rows([c for c in checked.flagged if not c.duplicate]),
+        "duplicates": _issue_rows(checked.duplicates),
+        "duplicate_transactions": dupes,
         "rejected": _issue_rows(checked.rejected),
         "skipped": found.result.skipped,
     }
@@ -743,10 +820,19 @@ def _ingest_uploads(ns: str, uploads: list[tuple[str, bytes]],
         shimmer.clear()
 
     n = len(pending["transactions"])
-    if n:
+    dupes = len(pending["duplicates"])
+    if n or dupes:
         st.session_state[_pending_key(ns)] = pending
-        note = tr("chat.import_found", filename=name, n=n,
-                  label=pending["label"])
+        if n and dupes:
+            key = "chat.import_found_deduped"
+        elif n:
+            key = "chat.import_found"
+        else:
+            # Nothing new at all: the same export a second time. The preview
+            # still opens — it is where the repeated rows are listed and
+            # where they can be imported anyway.
+            key = "chat.import_all_duplicates"
+        note = tr(key, filename=name, n=n, dupes=dupes, label=pending["label"])
     elif pending["unavailable"]:
         # The model never answered, so the file was never judged. Telling the
         # user to fix their export here would send them off to do the wrong
@@ -768,10 +854,22 @@ def _ingest_uploads(ns: str, uploads: list[tuple[str, bytes]],
     auth.save_chat(history)
 
 
-def _commit_import(ns: str, pending: dict, history: list[dict]) -> None:
-    """Write the previewed batch to the ledger and record it as undoable."""
+def _commit_import(ns: str, pending: dict, history: list[dict],
+                   broker: str = "", duplicates: bool = False) -> None:
+    """Write the previewed batch to the ledger and record it as undoable.
+
+    `broker` is the origin the user named for a file no parser owned; it is
+    stamped in front of every note so the Fees and Custody views can place
+    these rows (platforms.stamp_broker). `duplicates` adds back the rows the
+    ledger already holds — only ever from the preview's own checkbox.
+    """
     paths = auth.user_paths()
-    ids = add_many(pending["transactions"], paths.db)
+    txs = list(pending["transactions"])
+    if duplicates:
+        txs += pending.get("duplicate_transactions") or []
+    if broker:
+        txs = platforms.stamp_broker(txs, broker)
+    ids = add_many(txs, paths.db)
     last_import.save(
         last_import.ImportRecord(
             filename=pending["filename"],
@@ -793,6 +891,39 @@ def _commit_import(ns: str, pending: dict, history: list[dict]) -> None:
     st.session_state.pop(_pending_key(ns), None)
 
 
+def _broker_option(key: str) -> str:
+    return (tr("chat.import_broker_other") if key == platforms.OTHER
+            else platforms.broker_label(key))
+
+
+def _broker_choice(ns: str, pending: dict) -> str:
+    """The origin to stamp on this batch.
+
+    A recognised statement names its own broker, so it is only shown. Anything
+    the parsers didn't own has to be told: "" until the user answers, which
+    holds the import button — a batch with no origin lands in the ledger
+    attributed to whatever its notes happened to start with.
+    """
+    detected = pending.get("broker")
+    if detected:
+        st.caption(tr("chat.import_broker_known",
+                      broker=platforms.broker_label(detected)))
+        return detected
+    # accept_new_options: the roster only holds brokers with a parser, and
+    # naming the real one beats filing the batch under "other".
+    picked = st.selectbox(
+        tr("chat.import_broker"),
+        platforms.broker_options(),
+        index=None,
+        format_func=_broker_option,
+        placeholder=tr("chat.import_broker_pick"),
+        accept_new_options=True,
+        help=tr("chat.import_broker_help"),
+        key=f"{ns}_import_broker",
+    )
+    return picked or ""
+
+
 def _render_pending_import(ns: str, history: list[dict], box) -> bool:
     """The preview card and its two buttons. True while one is waiting."""
     pending = st.session_state.get(_pending_key(ns))
@@ -805,9 +936,11 @@ def _render_pending_import(ns: str, history: list[dict], box) -> bool:
         # Seven columns in a chat bubble already crowd a desktop; on a phone
         # they pan, so every preview grid stacks into per-row cards there
         # (the symbol heads the card, the rest read as label/value lines).
-        data_table(pd.DataFrame(pending["rows"]), title="ticker",
-                   fmt=_PREVIEW_FMT, hide_index=True,
-                   height=200, width="stretch")
+        if pending["rows"]:
+            data_table(pd.DataFrame(pending["rows"]), title="ticker",
+                       fmt=_PREVIEW_FMT, hide_index=True,
+                       height=200, width="stretch")
+        dupes = pending.get("duplicates") or []
         for key, rows in (("chat.import_warnings", pending["flagged"]),
                           ("chat.import_rejected", pending["rejected"])):
             if rows:
@@ -820,10 +953,27 @@ def _render_pending_import(ns: str, history: list[dict], box) -> bool:
                                 n=len(pending["skipped"]))):
                 data_table(pd.DataFrame(pending["skipped"]),
                            hide_index=True, width="stretch")
+        # The duplicates are the one tier that is *not* about to be written,
+        # so it opens by itself: the count in the message above only makes
+        # sense next to the rows it is talking about. The checkbox is the
+        # escape hatch for the honest repeat — two identical fills, a broker
+        # that really did pay the same dividend twice.
+        include = False
+        if dupes:
+            with st.expander(tr("chat.import_duplicates", n=len(dupes)),
+                             expanded=not pending["rows"]):
+                data_table(pd.DataFrame(dupes), title="ticker",
+                           fmt=_PREVIEW_FMT, hide_index=True,
+                           width="stretch")
+                include = st.checkbox(tr("chat.import_duplicates_anyway"),
+                                      key=f"{ns}_import_dupes")
+        n = len(pending["rows"]) + (len(dupes) if include else 0)
+        origin = _broker_choice(ns, pending)
         with st.container(horizontal=True):
-            if st.button(tr("chat.import_button", n=len(pending["rows"])),
-                         type="primary", key=f"{ns}_do_import"):
-                _commit_import(ns, pending, history)
+            if st.button(tr("chat.import_button", n=n),
+                         type="primary", key=f"{ns}_do_import",
+                         disabled=not origin or not n):
+                _commit_import(ns, pending, history, origin, include)
                 st.rerun()
             if st.button(tr("chat.import_cancel"), key=f"{ns}_drop_import"):
                 st.session_state.pop(_pending_key(ns), None)
@@ -890,6 +1040,11 @@ def render_conversation(ns: str, provider: llm.Provider, model: str,
                 icon=":material/hourglass_top:",
             )
             st.stop()
+        # A new question supersedes a failed one: the turn that never got an
+        # answer goes with its error, since two user turns in a row would
+        # reach the provider as one malformed exchange.
+        if _failure(history):
+            history.pop()
         turn: dict = {"role": "user", "content": text or tr("chat.import_ask")}
         if files:
             # Only the names go on the thread; the bytes ride in session state
@@ -913,7 +1068,7 @@ def render_conversation(ns: str, provider: llm.Provider, model: str,
 
     # Generate whenever the last turn is a user turn still awaiting a reply
     # (covers both a fresh message and a Regenerate through one code path).
-    if history and history[-1]["role"] == "user":
+    if history and history[-1]["role"] == "user" and not _failure(history):
         # The reply's bubble opens before any of the work behind it, holding a
         # shimmer of answer-shaped lines: the action probe, the routing calls,
         # the searches and the wait on the provider all pass with the bubble
@@ -952,32 +1107,56 @@ def render_conversation(ns: str, provider: llm.Provider, model: str,
                     prefs = auth.load_prefs()
                     view = _view_context().strip()
                     watchlist = auth.watchlist_path()
+                    db = auth.db_path()
+                    memory_db = auth.memory_path()
                     focus = st.session_state.get("picker_selected") or ""
-                    skills, hits, live = engine.in_parallel(
+                    msgs = _recent(history)
+                    # Two shapes of the same step. When the provider has tool
+                    # use, the model picks what to fetch (chat/agent.py) while
+                    # routing runs beside it; otherwise the fixed pre-flight
+                    # fetches its usual guess. A gather that never ran (no
+                    # tools, dead key, timeout) falls through to the fixed one;
+                    # a gather that ran and chose nothing is obeyed.
+                    skills, evidence = engine.in_parallel(
                         lambda: _resolve_skills(provider, api_key, history,
                                                 prefs, view),
-                        lambda: _gather_web(provider, api_key, history,
-                                            prefs, view),
-                        lambda: _live_quotes(history[-1]["content"],
-                                             watchlist, focus),
+                        lambda: _gather(provider, api_key, msgs, prefs,
+                                        watchlist, db, memory_db, conv["id"],
+                                        focus),
                     )
-                    skills, hits, live = skills or [], hits or [], live or []
+                    skills = skills or []
+                    evidence = evidence or agent.Evidence(ok=False)
+                    hits, live = [], []
+                    if not evidence.ok:
+                        hits, live = engine.in_parallel(
+                            lambda: _gather_web(provider, api_key, history,
+                                                prefs, view),
+                            lambda: _live_quotes(history[-1]["content"],
+                                                 watchlist, focus),
+                        )
+                        hits, live = hits or [], live or []
                     if skills:
                         st.caption(_lens_label(skills))
-                    # Hits and quotes ride on the outgoing copy of the user
+                    # Everything fetched rides on the outgoing copy of the user
                     # turn, not the system prompt — the stored history keeps
                     # the user's own text, and prompt caches stay warm.
-                    msgs = _recent(history)
+                    if evidence:
+                        msgs[-1]["content"] = evidence.augment(
+                            msgs[-1]["content"])
                     if hits:
                         msgs[-1]["content"] = chat_web.augment(
                             msgs[-1]["content"], hits)
                     if live:
                         msgs[-1]["content"] = market.augment(
                             msgs[-1]["content"], live)
+                    system = _system_prompt(skills)
+                    # Last, after augmentation: the page extracts and quotes
+                    # just appended to the newest turn are the biggest thing
+                    # in the request (chat/tokens.py).
+                    msgs = tokens.fit(msgs, system=system)
                     answer = _stream_with_fallback(
-                        pending, provider, api_key, model,
-                        _system_prompt(skills), msgs, prefs)
-                    web_sources = chat_web.sources(hits)
+                        pending, provider, api_key, model, system, msgs, prefs)
+                    web_sources = chat_web.sources(hits) or evidence.sources()
                     if web_sources:
                         st.caption(_sources_label(web_sources))
                 except Exception as exc:  # classified per provider; unknown -> re-raise
@@ -988,10 +1167,12 @@ def render_conversation(ns: str, provider: llm.Provider, model: str,
                     err = failed.error_key(exc)
                     if err is None:
                         raise
-                    history.pop()  # drop the unanswered user turn
+                    # The question stays on the thread with its failure
+                    # pinned beside it (rendered below) instead of vanishing
+                    # along with it: that turn is what Retry replays.
+                    history[-1]["error"] = [err, failed.label]
                     auth.save_chat(history)
-                    st.error(tr(err, provider=failed.label))
-                    st.stop()
+                    st.rerun()
             turn: dict = {"role": "assistant", "content": answer}
             if skills:
                 turn["skills"] = skills
@@ -1004,6 +1185,27 @@ def render_conversation(ns: str, provider: llm.Provider, model: str,
 
     if _render_pending_import(ns, history, box):
         return  # a batch is waiting on the user — regenerating makes no sense
+
+    failure = _failure(history)
+    if failure:
+        # A dead provider must not cost the reader their question: the error
+        # sits under it, and Retry only clears the mark — the same trailing
+        # user turn then generates again through the one path above.
+        err, label = failure
+        with box:
+            st.error(tr(err, provider=label))
+            with st.container(horizontal=True):
+                if st.button(tr("chat.retry"), icon=":material/refresh:",
+                             type="primary", key=f"{ns}_retry"):
+                    history[-1].pop("error", None)
+                    auth.save_chat(history)
+                    st.rerun()
+                if st.button(tr("chat.error_drop"), icon=":material/close:",
+                             key=f"{ns}_drop_failed"):
+                    history.pop()
+                    auth.save_chat(history)
+                    st.rerun()
+        return
 
     if history and history[-1]["role"] == "assistant":
         with box, st.container(horizontal=True):
@@ -1297,7 +1499,7 @@ def render_side_panel(view_label: str) -> None:
     matter, and rendering first keeps it alive when a page raises or calls
     st.stop(). Every page, signed-in users only."""
     st.session_state["_chat_view"] = view_label  # read by _view_context()
-    st.html(_PANEL_CSS)
+    css.inject(_PANEL_CSS)
 
     if not st.session_state.get("chat_panel_open", False):
         with st.container(key="chatfab"):

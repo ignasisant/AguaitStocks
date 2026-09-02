@@ -6,16 +6,36 @@ GET with a UA header; this is the single copy of that boilerplate.
 
 from __future__ import annotations
 
+import functools
 import json
+import ssl
 import urllib.error
 import urllib.request
 
 DEFAULT_UA = "stocks-toolkit"
 
 
+@functools.lru_cache(maxsize=1)
+def _context() -> ssl.SSLContext | None:
+    """TLS context trusting certifi's roots, or None to keep urllib's default.
+
+    urllib verifies against whatever root store OpenSSL was built to look at,
+    which on macOS (and on slim container images) can lag the web: BaFin's
+    portal chains to GlobalSign Root R46 and fails there while every browser
+    and `curl` on the same machine accepts it. certifi ships with the app
+    already — requests pulls it in — so this only widens the trusted set.
+    """
+    try:
+        import certifi
+
+        return ssl.create_default_context(cafile=certifi.where())
+    except Exception:
+        return None
+
+
 def get_bytes(url: str, *, user_agent: str = DEFAULT_UA, timeout: float = 30) -> bytes:
     req = urllib.request.Request(url, headers={"User-Agent": user_agent})
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
+    with urllib.request.urlopen(req, timeout=timeout, context=_context()) as resp:
         return resp.read()
 
 
@@ -29,7 +49,7 @@ def get_bytes_and_type(
     """GET returning (body, content type) — for callers that store the body
     under a type-derived file extension (e.g. the logo mirror)."""
     req = urllib.request.Request(url, headers={"User-Agent": user_agent})
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
+    with urllib.request.urlopen(req, timeout=timeout, context=_context()) as resp:
         return resp.read(), resp.headers.get("Content-Type", "")
 
 
@@ -45,7 +65,7 @@ def probe_image(url: str, *, user_agent: str = DEFAULT_UA, timeout: float = 6) -
     """
     try:
         req = urllib.request.Request(url, headers={"User-Agent": user_agent})
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        with urllib.request.urlopen(req, timeout=timeout, context=_context()) as resp:
             ctype = resp.headers.get("Content-Type", "")
             return "ok" if ctype.startswith("image") else "dead"
     except urllib.error.HTTPError as e:

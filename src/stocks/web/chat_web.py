@@ -11,7 +11,10 @@ cite URLs.
 
 The top hits are then *opened*: their article text (not DDG's two-sentence
 snippet) is what reaches the model, which is the difference between citing a
-headline and citing what the page actually says. Links the user pastes skip
+headline and citing what the page actually says. Boilerplate removal is
+trafilatura's (optional dep, lxml fallback below) — with only _PAGE_CHARS of
+each page reaching the prompt, nav and cookie walls are budget stolen from
+the numbers. Links the user pastes skip
 the planner entirely and are always read.
 
 Everything degrades to "no web": a missing ddgs install, a search error or an
@@ -26,11 +29,14 @@ Streamlit-free so it stays trivially testable, like chat_skills/chat_actions.
 from __future__ import annotations
 
 import importlib.util
-import json
 import re
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
+
+from pydantic import field_validator
+
+from stocks.chat import structured
 
 if TYPE_CHECKING:
     from stocks.web.llm import Provider
@@ -47,6 +53,7 @@ _SNIPPET_CHARS = 320  # per-hit body text kept in the prompt
 # citing the article.
 READ_PAGES = 3  # result pages actually opened per message
 _PAGE_CHARS = 1800  # article text kept per page
+_MIN_ARTICLE_CHARS = 200  # shorter than this and an extraction counts as a miss
 _PAGE_TIMEOUT = 6.0  # seconds per page; the batch runs concurrently
 _MAX_PAGE_BYTES = 2_000_000  # stop reading a stream that big — it is not an article
 _BROWSER_UA = (  # news sites 403 the toolkit's own UA
@@ -92,28 +99,44 @@ _PLANNER_SYSTEM = (
 )
 
 
+class QueryPlan(structured.Contract):
+    """The planner's contract: at most MAX_QUERIES cleaned search queries.
+
+    The list is cleaned rather than rejected — a stray non-string or a
+    duplicate is the model being sloppy inside a shape it got right, and a
+    second call would buy nothing. A missing or non-list "queries" *is* a
+    rejection: that is the model answering a different question. Capping is
+    the caller's, so a caller asking for a different limit still gets one.
+    """
+
+    queries: list[str]
+
+    @field_validator("queries", mode="before")
+    @classmethod
+    def _clean(cls, v):
+        if not isinstance(v, list):
+            return v  # not a list -> let the type error reject it
+        out: list[str] = []
+        for q in v:
+            if not isinstance(q, str):
+                continue
+            q = " ".join(q.split())[:200]
+            if q and q not in out:
+                out.append(q)
+        return out
+
+
 def parse_queries(raw: str, limit: int = MAX_QUERIES) -> list[str]:
     """Search queries out of a planner reply, defensively.
 
-    First {...} blob parsed as JSON; non-strings dropped, whitespace collapsed,
-    overlong queries truncated, dupes removed, list capped. Anything unparsable
-    means no search — never an error."""
-    m = re.search(r"\{.*\}", raw, re.S)
-    if not m:
-        return []
+    The tolerant reading, kept for callers that hold a reply and no provider:
+    anything unparsable means no search, never an error. `plan` uses the
+    contract directly so it can tell "no search needed" from "unreadable".
+    """
     try:
-        data = json.loads(m.group())
-    except json.JSONDecodeError:
+        return structured.decode(raw, QueryPlan).queries[:limit]
+    except structured.OffContract:
         return []
-    got = data.get("queries", []) if isinstance(data, dict) else []
-    out: list[str] = []
-    for q in got if isinstance(got, list) else []:
-        if not isinstance(q, str):
-            continue
-        q = " ".join(q.split())[:200]
-        if q and q not in out:
-            out.append(q)
-    return out[:limit]
 
 
 # Fallback when the planner cannot answer. The planner is one model call, and
@@ -169,25 +192,17 @@ def plan(
 ) -> list[str]:
     """Search queries for a message, via the provider's cheapest model.
 
-    [] when the planner decides no search is needed. When the planner *call*
-    fails, or answers off-contract, the keyword heuristic decides instead —
+    [] when the planner decides no search is needed — an explicit empty plan is
+    obeyed, never second-guessed. When the planner *call* fails, or is still
+    off-contract after the repair turn, the keyword heuristic decides instead:
     a dead classifier model must not silently take the web away."""
     user = (context + "\n\n" if context else "") + f"User message: {question}"
     try:
-        raw = provider.complete(
-            api_key,
-            provider.classifier_model,
-            _PLANNER_SYSTEM,
-            [{"role": "user", "content": user}],
-        )
-    except Exception:
+        chosen = structured.ask(provider, api_key, _PLANNER_SYSTEM, user,
+                                QueryPlan)
+        return chosen.queries[:MAX_QUERIES]
+    except Exception:  # off-contract, network, quota — all cost relevance only
         return heuristic_queries(question, context)
-    queries = parse_queries(raw)
-    if queries:
-        return queries
-    if not re.search(r"\{.*\}", raw or "", re.S):  # not even a JSON object back
-        return heuristic_queries(question, context)
-    return []
 
 
 # ------------------------------------------------------------- search
@@ -230,15 +245,52 @@ def search(queries: list[str], read_limit: int = READ_PAGES) -> list[Result]:
 # --------------------------------------------------------- reading pages
 
 
-def _extract(raw: bytes) -> str:
-    """Readable text out of an HTML page, paragraphs first.
+def _normalize(text: str) -> str:
+    """Whitespace collapsed per line, blank lines dropped.
+
+    Paragraph breaks survive as single newlines — they cost one character each
+    and tell the model where one claim ends and the next begins."""
+    lines = (" ".join(line.split()) for line in text.splitlines())
+    return "\n".join(line for line in lines if line)
+
+
+def _extract_trafilatura(raw: bytes) -> str:
+    """The article per trafilatura, or '' when it finds none / is not installed.
+
+    This is the boilerplate remover: nav, cookie walls, related-article rails,
+    newsletter forms and comment threads never reach the prompt. That matters
+    because the whole page budget is _PAGE_CHARS — furniture crowds out the
+    numbers the answer needs. `favor_precision` is the right side to err on
+    here (and the only mode that keeps paragraphs separated rather than glued):
+    a paragraph wrongly dropped costs less than a sidebar wrongly kept.
+
+    Imported lazily and failure-swallowing like every other optional dep in
+    this codebase — no trafilatura just means the lxml fallback does the job.
+    """
+    try:
+        import trafilatura
+    except ImportError:
+        return ""
+    try:
+        text = trafilatura.extract(raw, include_comments=False,
+                                   include_tables=False, favor_precision=True)
+    except Exception:
+        return ""
+    return _normalize(text or "")
+
+
+def _extract_lxml(raw: bytes) -> str:
+    """Fallback extraction: paragraphs first, whole document if there are none.
 
     Paragraph text is what an article is; the whole document's text_content()
     is mostly nav and cookie banners, so it is only the fallback for pages
     that mark nothing up as <p>."""
     from lxml import html as lxml_html
 
-    doc = lxml_html.fromstring(raw)
+    try:
+        doc = lxml_html.fromstring(raw)
+    except Exception:
+        return ""
     for bad in doc.xpath(
         "//script|//style|//nav|//header|//footer|//aside|//noscript|//form"
     ):
@@ -247,9 +299,23 @@ def _extract(raw: bytes) -> str:
             parent.remove(bad)
     paras = [" ".join(p.text_content().split()) for p in doc.xpath("//p")]
     text = " ".join(p for p in paras if len(p) > 40)
-    if len(text) < 200:
+    if len(text) < _MIN_ARTICLE_CHARS:
         text = " ".join(doc.text_content().split())
+    return text
+
+
+def _extract(raw: bytes) -> str:
+    """Readable text out of an HTML page, trimmed to the prompt budget.
+
+    Two layers: trafilatura, then the hand-rolled lxml pass for what it
+    returns nothing useful on (markup it finds no article in, a missing
+    install). A short trafilatura result is treated as a miss, not as the
+    answer — but it is still kept if the fallback does no better."""
+    text = _extract_trafilatura(raw)
+    if len(text) < _MIN_ARTICLE_CHARS:
+        text = _extract_lxml(raw) or text
     return text[:_PAGE_CHARS]
+
 
 
 def read_page(url: str, timeout: float = _PAGE_TIMEOUT) -> str:

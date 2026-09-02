@@ -14,7 +14,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, date, datetime
 from pathlib import Path
 
-from stocks.config import load_watchlist
+from stocks.config import CURRENCY_SYMBOL, load_watchlist
 from stocks.data.earnings import EarningsEvent, upcoming
 from stocks.portfolio.ledger import all_transactions
 from stocks.portfolio.positions import build
@@ -35,41 +35,45 @@ MOVERS_SHOWN = 3
 @dataclass
 class DigestData:
     date: date
-    total_eur: float | None = None
-    day: tuple[float, float] | None = None  # (eur_change, pct) over 1 day
+    total: float | None = None
+    day: tuple[float, float] | None = None  # (change, pct) over 1 day
     week: tuple[float, float] | None = None  # over ~7 days
     movers: list[tuple[str, float]] = field(default_factory=list)  # (ticker, pct) desc
     earnings: list[EarningsEvent] = field(default_factory=list)
     highlight: str | None = None  # optional LLM line, filled by the caller
     watchlist_only: bool = False  # no ledger -> movers/earnings-only digest
+    # The account's reporting currency; every figure above is in it.
+    currency: str = "EUR"
 
 
-def compute_digest_data(watchlist: Path, db: Path) -> DigestData:
-    """Gather one account's digest inputs. Sections fail independently."""
+def compute_digest_data(
+    watchlist: Path, db: Path, base: str = "EUR"
+) -> DigestData:
+    """Gather one account's digest inputs, in `base`. Sections fail alone."""
     from stocks.analysis.portfolio import (
         basket_change,
         position_values_history,
         session_moves,
     )
 
-    data = DigestData(date=date.today())
+    data = DigestData(date=date.today(), currency=base)
     holdings = load_watchlist(watchlist)
 
     positions = []
     try:
         txs = all_transactions(db)
         if txs:
-            positions, _ = build(txs)
+            positions, _ = build(txs, base=base)
     except Exception:
         positions = []
     data.watchlist_only = not positions
 
     if positions:
         try:
-            values = position_values_history(positions, period="1mo")
+            values = position_values_history(positions, period="1mo", base=base)
             if not values.empty:
                 last = values.iloc[-1].dropna()
-                data.total_eur = float(last.sum()) if not last.empty else None
+                data.total = float(last.sum()) if not last.empty else None
                 data.day = basket_change(values, 1)
                 data.week = basket_change(values, 7)
         except Exception:
@@ -97,13 +101,13 @@ def compute_digest_data(watchlist: Path, db: Path) -> DigestData:
 # ---------------------------------------------------------------- rendering
 
 
-def _eur(amount: float) -> str:
+def _money(amount: float, currency: str = "EUR") -> str:
     """€48,230 — always thousands-separated, no decimals for totals."""
-    return f"€{amount:,.0f}"
+    return f"{CURRENCY_SYMBOL.get(currency, '')}{amount:,.0f}"
 
 
-def _delta(eur_change: float, pct: float) -> str:
-    return f"{eur_change:+,.0f} € ({pct * 100:+.2f}%)"
+def _delta(change: float, pct: float, currency: str = "EUR") -> str:
+    return f"{change:+,.0f} {CURRENCY_SYMBOL.get(currency, '')} ({pct * 100:+.2f}%)"
 
 
 def _date_line(d: date, lang: str) -> str:
@@ -123,13 +127,18 @@ def render_digest(data: DigestData, lang: str) -> str:
         f"<b>📊 {html.escape(tr('digest_title'))}</b> · {_date_line(data.date, lang)}"
     ]
 
-    if data.total_eur is not None:
-        line = f"<b>{html.escape(tr('portfolio'))}</b> {_eur(data.total_eur)}"
+    if data.total is not None:
+        line = (
+            f"<b>{html.escape(tr('portfolio'))}</b> "
+            f"{_money(data.total, data.currency)}"
+        )
         deltas = []
         if data.day:
-            deltas.append(f"{html.escape(tr('day'))} {_delta(*data.day)}")
+            deltas.append(f"{html.escape(tr('day'))} {_delta(*data.day, data.currency)}")
         if data.week:
-            deltas.append(f"{html.escape(tr('week'))} {_delta(*data.week)}")
+            deltas.append(
+                f"{html.escape(tr('week'))} {_delta(*data.week, data.currency)}"
+            )
         parts.append(line + ("\n" + " · ".join(deltas) if deltas else ""))
 
     if data.movers:
@@ -179,8 +188,9 @@ def run_digest_fanout(dry_run: bool = False) -> dict[str, str]:
             if is_blocked(state):
                 status[user.label] = "skipped: blocked"
                 continue
-            data = compute_digest_data(user.watchlist, user.db)
-            if data.total_eur is None and not data.movers and not data.earnings:
+            base = str(user.prefs.get("currency") or "EUR").upper()
+            data = compute_digest_data(user.watchlist, user.db, base)
+            if data.total is None and not data.movers and not data.earnings:
                 status[user.label] = "skipped: no data"
                 continue
             data.highlight = narrative.highlight(data, user.prefs, user.lang)

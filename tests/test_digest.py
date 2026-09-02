@@ -16,7 +16,7 @@ D = date(2026, 8, 14)  # a Friday
 def full_data() -> dg.DigestData:
     return dg.DigestData(
         date=D,
-        total_eur=48230.0,
+        total=48230.0,
         day=(412.0, 0.0086),
         week=(-1105.0, -0.0224),
         movers=[("NVDA", 0.032), ("SHOP", 0.021), ("MELI", 0.014),
@@ -65,7 +65,7 @@ def test_render_escapes_html_in_dynamic_text():
 
 
 def test_render_partial_sections_still_render():
-    data = dg.DigestData(date=D, total_eur=1000.0)  # no day/week/movers/earnings
+    data = dg.DigestData(date=D, total=1000.0)  # no day/week/movers/earnings
     text = dg.render_digest(data, "en")
     assert "€1,000" in text
     assert "Top movers" not in text and "Earnings" not in text
@@ -97,7 +97,7 @@ def test_compute_digest_data_watchlist_only(tmp_path, monkeypatch):
 
     data = dg.compute_digest_data(watchlist, db)
     assert data.watchlist_only is True
-    assert data.total_eur is None
+    assert data.total is None
     assert data.movers == [("AAPL", 0.012)]
     assert data.earnings[0].ticker == "AAPL"
 
@@ -111,19 +111,25 @@ def test_compute_digest_data_with_ledger(tmp_path, monkeypatch):
         ticker = "NVDA"
 
     monkeypatch.setattr(dg, "all_transactions", lambda path: ["tx"])
-    monkeypatch.setattr(dg, "build", lambda txs: ([FakePosition()], []))
+    monkeypatch.setattr(
+        dg, "build", lambda txs, base="EUR": ([FakePosition()], [])
+    )
 
     import stocks.analysis.portfolio as ap
 
     idx = pd.to_datetime(["2026-08-06", "2026-08-13", "2026-08-14"])
     values = pd.DataFrame({"NVDA": [900.0, 950.0, 1000.0]}, index=idx)
-    monkeypatch.setattr(ap, "position_values_history", lambda pos, period="1mo": values)
+    monkeypatch.setattr(
+        ap,
+        "position_values_history",
+        lambda pos, period="1mo", base="EUR": values,
+    )
     monkeypatch.setattr(ap, "session_moves", lambda ts, max_workers=8: {"NVDA": 0.05})
     monkeypatch.setattr(dg, "upcoming", lambda holdings, within_days=7: [])
 
     data = dg.compute_digest_data(watchlist, db)
     assert data.watchlist_only is False
-    assert data.total_eur == 1000.0
+    assert data.total == 1000.0
     assert data.day == pytest.approx((50.0, 50.0 / 950.0))
     assert data.week == pytest.approx((100.0, 100.0 / 900.0))
     assert data.movers == [("NVDA", 0.05)]

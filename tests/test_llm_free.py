@@ -1,8 +1,13 @@
 """Free-chain fallback semantics (web/llm.py) — pure, no network, no secrets."""
 
+import json
+import time
+from pathlib import Path
+
 import pytest
 
 import stocks.web.llm as llm
+from stocks.chat import engine
 from stocks.web.llm import FreeTierExhausted, _FreeBackend
 
 
@@ -207,3 +212,79 @@ def test_free_provider_registration(monkeypatch):
     monkeypatch.setattr(llm, "_free_backends", lambda: [_ok("groq", ["x"])])
     assert p.available()
     assert llm.default_provider_id() == "free"
+
+
+# --------------------------------------------- global cap across restarts
+
+
+@pytest.fixture
+def global_counter(tmp_path, monkeypatch):
+    """A fresh persisted counter, isolated from the real data dir."""
+    monkeypatch.setattr(engine, "GLOBAL_FREE_FILE", tmp_path / "free_llm_global.json")
+    monkeypatch.setattr(engine, "_global_free", {"day": "", "used": 0})
+    monkeypatch.setattr(engine, "_global_free_loaded", False)
+    monkeypatch.setattr(engine.storage, "enabled", lambda: False)
+    return engine.GLOBAL_FREE_FILE
+
+
+def _restart(monkeypatch):
+    """What a Cloud Run recycle does: same file, empty process memory."""
+    monkeypatch.setattr(engine, "_global_free", {"day": "", "used": 0})
+    monkeypatch.setattr(engine, "_global_free_loaded", False)
+
+
+def test_the_global_spend_is_written_down(global_counter, monkeypatch):
+    monkeypatch.setattr(engine, "free_global_daily_cap", lambda: 5)
+    assert engine._spend_global_free()
+    saved = json.loads(global_counter.read_text())
+    assert saved["used"] == 1 and saved["day"] == time.strftime("%Y-%m-%d")
+
+
+def test_a_restart_does_not_hand_out_the_days_budget_again(global_counter,
+                                                           monkeypatch):
+    # The lever an abuser leans on: a recycle is free to provoke, and an
+    # in-memory counter reissues the whole cap on every one of them.
+    monkeypatch.setattr(engine, "free_global_daily_cap", lambda: 3)
+    for _ in range(3):
+        assert engine._spend_global_free()
+    assert not engine._spend_global_free()
+
+    _restart(monkeypatch)
+    assert not engine._spend_global_free()
+
+
+def test_yesterdays_count_does_not_carry_over(global_counter, monkeypatch):
+    monkeypatch.setattr(engine, "free_global_daily_cap", lambda: 2)
+    global_counter.write_text(json.dumps({"day": "2000-01-01", "used": 999}))
+    assert engine._spend_global_free()
+
+
+def test_an_unreadable_counter_errs_generous(global_counter, monkeypatch):
+    # A cost guard, not a ledger: a read hiccup must not deny the free tier to
+    # everyone for the rest of the day.
+    monkeypatch.setattr(engine, "free_global_daily_cap", lambda: 2)
+    global_counter.write_text("{not json")
+    assert engine._spend_global_free()
+
+
+def test_an_unwritable_counter_still_counts_in_memory(global_counter, monkeypatch):
+    # A counter that cannot be saved is a counter that forgets across
+    # restarts, not one that stops counting inside this process.
+    monkeypatch.setattr(engine, "free_global_daily_cap", lambda: 2)
+    blocked = global_counter.parent / "a-file"
+    blocked.write_text("not a directory")
+    monkeypatch.setattr(engine, "GLOBAL_FREE_FILE", blocked / "counter.json")
+    assert engine._spend_global_free()
+    assert engine._spend_global_free()
+    assert not engine._spend_global_free()  # the cap still holds
+
+
+def test_the_file_is_read_once_per_process(global_counter, monkeypatch):
+    monkeypatch.setattr(engine, "free_global_daily_cap", lambda: 10)
+    reads = []
+    real = Path.read_text
+    monkeypatch.setattr(Path, "read_text",
+                        lambda self, *a, **kw: reads.append(self) or real(self, *a, **kw))
+    for _ in range(3):
+        engine._spend_global_free()
+    assert sum(1 for r in reads if r == global_counter) <= 1

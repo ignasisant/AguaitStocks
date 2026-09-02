@@ -126,15 +126,37 @@ def test_parse_drops_cross_kind_fields():
 class _StubProvider:
     classifier_model = "stub-mini"
 
-    def __init__(self, reply=None, boom=False):
+    def __init__(self, reply=None, boom=False, replies=None):
         self.reply, self.boom = reply, boom
+        self.replies = list(replies) if replies else None
         self.calls = []
 
     def complete(self, api_key, model, system, messages):
         self.calls.append((api_key, model, system, messages))
         if self.boom:
             raise RuntimeError("network down")
-        return self.reply
+        return self.replies.pop(0) if self.replies else self.reply
+
+
+def test_detect_repairs_an_off_contract_reply():
+    p = _StubProvider(replies=["I'll favorite NVDA for you",
+                               '{"action": "favorite", "ticker": "NVDA"}'])
+    assert detect(p, "key", "fav this") == Action("favorite", "NVDA")
+    assert len(p.calls) == 2
+
+
+def test_detect_does_not_spend_a_repair_call_on_a_declined_action():
+    # "no action" is the common case (a question, not a command) and it is a
+    # valid answer to the contract — repairing it would double every turn.
+    p = _StubProvider('{"action": null, "ticker": ""}')
+    assert detect(p, "key", "is NVDA expensive?") is None
+    assert len(p.calls) == 1
+
+
+def test_detect_gives_up_after_two_unreadable_replies():
+    p = _StubProvider("I cannot help with that")
+    assert detect(p, "key", "fav this") is None
+    assert len(p.calls) == 2
 
 
 def test_detect_passes_context_and_parses():

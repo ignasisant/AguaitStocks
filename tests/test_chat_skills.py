@@ -8,7 +8,8 @@ from stocks.web import chat_skills
 EXPECTED_IDS = {
     "tech", "energy", "value", "financials", "healthcare", "crypto",
     "emerging-markets", "dividend", "growth-momentum", "technical", "macro",
-    "earnings-review", "portfolio-risk", "spain-tax", "bear-case", "etfs",
+    "earnings-review", "portfolio-risk", "spain-tax", "us-tax", "bear-case",
+    "etfs",
 }
 
 
@@ -66,15 +67,16 @@ def test_parse_skill_ids_caps_at_limit():
 class _FakeProvider:
     classifier_model = "cheap-model"
 
-    def __init__(self, reply=None, exc=None):
+    def __init__(self, reply=None, exc=None, replies=None):
         self.reply, self.exc = reply, exc
+        self.replies = list(replies) if replies else None
         self.calls = []
 
     def complete(self, api_key, model, system, messages):
         self.calls.append((api_key, model, system, messages))
         if self.exc:
             raise self.exc
-        return self.reply
+        return self.replies.pop(0) if self.replies else self.reply
 
 
 def test_classify_returns_parsed_ids():
@@ -93,6 +95,30 @@ def test_classify_none_on_provider_error():
     assert chat_skills.classify(p, "k", "anything") is None
 
 
-def test_classify_empty_on_garbage_reply():
+def test_classify_repairs_an_off_contract_reply():
+    p = _FakeProvider(replies=["I think tech fits!", '{"skills": ["tech"]}'])
+    assert chat_skills.classify(p, "k", "chips?") == ["tech"]
+    assert len(p.calls) == 2
+    repair = p.calls[1][3]
+    assert repair[0]["role"] == "user"  # the original question rides along
+    assert repair[1]["content"] == "I think tech fits!"
+    assert "ONLY the JSON object" in repair[2]["content"]
+
+
+def test_classify_does_not_spend_a_repair_call_on_a_good_reply():
+    p = _FakeProvider(reply='{"skills": []}')
+    assert chat_skills.classify(p, "k", "hola") == []  # an explicit "none" is obeyed
+    assert len(p.calls) == 1
+
+
+def test_classify_reads_prose_when_the_repair_fails_too():
+    p = _FakeProvider(reply="the tech lens is the one I would use here")
+    assert chat_skills.classify(p, "k", "chips?") == ["tech"]
+
+
+def test_classify_none_when_both_tries_are_unreadable():
+    # Two junk replies mean the router is broken, not that no skill applies:
+    # None lets the caller keep the previous turn's lens (and its warm cache).
     p = _FakeProvider(reply="no json here")
-    assert chat_skills.classify(p, "k", "hello") == []
+    assert chat_skills.classify(p, "k", "hello") is None
+    assert len(p.calls) == 2

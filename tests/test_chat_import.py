@@ -180,14 +180,70 @@ def test_commit_writes_the_batch_and_records_it_as_undoable(account):
     assert chat_core._pending_key("panel") not in chat_core.st.session_state
 
 
-def test_commit_appends_to_an_existing_ledger(account):
-    for csv in (T212_CSV, T212_CSV):
-        pending = chat_core._prepare_import("t212.csv", csv.encode(),
+def test_re_uploading_the_same_export_adds_nothing(account):
+    """The accident this holds back: the same statement sent twice, which
+    used to land as a warning tier the chat bubble folded out of sight."""
+    for _ in range(2):
+        pending = chat_core._prepare_import("t212.csv", T212_CSV.encode(),
                                             _StubProvider(), "")
         chat_core._commit_import("panel", pending, [])
-    # The second pass sees the first as duplicates — flagged, not rejected —
-    # so both land: re-importing an overlapping export is the user's call.
+
+    assert len(all_transactions(account.db)) == 2
+    # The second pass staged nothing and named both rows as already held.
+    assert pending["transactions"] == []
+    assert len(pending["duplicates"]) == 2
+    assert not pending["flagged"]  # the duplicate tier is not a warning tier
+
+
+def test_a_partly_overlapping_export_imports_only_its_new_rows(account):
+    first = chat_core._prepare_import("t212.csv", T212_CSV.encode(),
+                                      _StubProvider(), "")
+    chat_core._commit_import("panel", first, [])
+
+    extra = T212_CSV + (
+        "Market buy,2024-01-05 14:30:15,US0231351067,AMZN,Amazon,"
+        "1.0000000,155.00,USD,1.0854,155.00,EUR,,,,EOF3\n"
+    )
+    second = chat_core._prepare_import("t212.csv", extra.encode(),
+                                       _StubProvider(), "")
+    chat_core._commit_import("panel", second, [])
+
+    assert [t.ticker for t in all_transactions(account.db)] == [
+        "AAPL", "MSFT", "AMZN"]
+
+
+def test_a_re_read_at_a_different_price_is_held_back_too(account):
+    """What an LLM-mapped PDF does on the second pass: the same trades come
+    back, priced off a different column. An exact-match check misses those."""
+    chat_core._commit_import(
+        "panel",
+        chat_core._prepare_import("t212.csv", T212_CSV.encode(),
+                                  _StubProvider(), ""),
+        [],
+    )
+    reread = T212_CSV.replace("125.00", "125.01").replace("370.00,USD", "371.00,USD")
+    pending = chat_core._prepare_import("t212.csv", reread.encode(),
+                                        _StubProvider(), "")
+
+    assert pending["transactions"] == []
+    assert len(pending["duplicates"]) == 2
+    assert "read twice" in pending["duplicates"][0]["why"]
+
+
+def test_the_held_back_rows_can_still_be_imported_on_request(account):
+    """Two identical fills do happen — the preview's checkbox routes here."""
+    chat_core._commit_import(
+        "panel",
+        chat_core._prepare_import("t212.csv", T212_CSV.encode(),
+                                  _StubProvider(), ""),
+        [],
+    )
+    pending = chat_core._prepare_import("t212.csv", T212_CSV.encode(),
+                                        _StubProvider(), "")
+    chat_core._commit_import("panel", pending, [], duplicates=True)
+
     assert len(all_transactions(account.db)) == 4
+    assert len(last_import.load(account.last_import).tx_ids) == 2
 
 
 def test_commit_of_an_empty_batch_is_harmless(account):
@@ -197,3 +253,37 @@ def test_commit_of_an_empty_batch_is_harmless(account):
     chat_core._commit_import("panel", pending, [])
     assert all_transactions(account.db) == []
     assert last_import.load(account.last_import).tx_ids == []
+
+
+# ------------------------------------------------------------------- origin
+
+
+def test_prepare_carries_the_origin_a_known_parser_stamped(account):
+    pending = chat_core._prepare_import("t212.csv", T212_CSV.encode(),
+                                        _StubProvider(), "")
+    assert pending["broker"] == "trading212"
+
+
+def test_prepare_leaves_the_origin_open_on_a_mapped_export(account):
+    """The file the user actually hit this with: mapped columns, so nothing in
+    it says which broker it came from — the panel has to ask."""
+    pending = chat_core._prepare_import("extracto.csv", UNKNOWN_CSV.encode(),
+                                        _StubProvider(), "key")
+    assert pending["broker"] == ""
+
+
+def test_commit_stamps_the_named_origin_on_every_row(account):
+    pending = chat_core._prepare_import("extracto.csv", UNKNOWN_CSV.encode(),
+                                        _StubProvider(), "key")
+    chat_core._commit_import("panel", pending, [], "Renta 4")
+
+    notes = [t.note for t in all_transactions(account.db)]
+    assert notes and all(n.split()[0] == "renta_4" for n in notes)
+
+
+def test_commit_without_an_origin_writes_the_notes_as_parsed(account):
+    """A recognised statement already names its broker; nothing is rewritten."""
+    pending = chat_core._prepare_import("t212.csv", T212_CSV.encode(),
+                                        _StubProvider(), "")
+    chat_core._commit_import("panel", pending, [])
+    assert {t.note for t in all_transactions(account.db)} == {"trading212"}

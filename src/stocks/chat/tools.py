@@ -27,12 +27,15 @@ surfaces that dispatch here (web/chat_core.py and chat/engine.py).
 
 from __future__ import annotations
 
-import json
 import re
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
+
+from pydantic import ConfigDict
+
+from stocks.chat import structured
 
 if TYPE_CHECKING:
     from stocks.web.llm import Provider
@@ -297,21 +300,29 @@ Rules:
 """
 
 
-def parse_action(raw: str) -> Action | None:
-    """An Action out of a classifier reply, defensively.
+class ActionCall(structured.Contract):
+    """The router's contract: which tool, on which symbol.
 
-    First {...} blob parsed as JSON; anything missing, unknown or malformed
-    (bad action, invalid ticker, missing required fields) yields None so the
-    caller falls through to a normal answer."""
-    m = re.search(r"\{.*\}", raw, re.S)
-    if not m:
-        return None
-    try:
-        data = json.loads(m.group())
-    except json.JSONDecodeError:
-        return None
-    if not isinstance(data, dict):
-        return None
+    ``extra="allow"`` because the tool-specific fields ("alerts", "tags",
+    "shares"…) are the registry's business, not this model's — TOOLS grows
+    without a field being added here, exactly like Action.args. Both keys are
+    optional at this level so a shapeless answer still decodes and gets
+    rejected by _action_from with a reason, instead of burning a repair call
+    on a model that correctly answered "no action" ({"action": null}).
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    action: str | None = None
+    ticker: str | None = None
+
+
+def _action_from(data: dict) -> Action | None:
+    """An Action out of the router's decoded object, or None to reject it.
+
+    None covers the whole "not an app operation" family — action null, an
+    unknown tool, an unusable ticker, missing required fields — and sends the
+    message down the normal answer path."""
     tool = TOOLS.get(data.get("action"))
     if tool is None:
         return None
@@ -326,24 +337,35 @@ def parse_action(raw: str) -> Action | None:
     return Action(tool.name, ticker, args)
 
 
+def parse_action(raw: str) -> Action | None:
+    """An Action out of a classifier reply, defensively.
+
+    The tolerant reading, for callers holding a reply and no provider:
+    anything missing, unknown or malformed yields None."""
+    try:
+        call = structured.decode(raw, ActionCall)
+    except structured.OffContract:
+        return None
+    return _action_from(call.model_dump())
+
+
 def detect(
     provider: Provider, api_key: str, message: str, context: str = ""
 ) -> Action | None:
     """Parse a message into an Action via the provider's cheapest model.
 
     None on any failure — network, bad JSON, no action — and the caller
-    proceeds with the normal answer. Same BYOK key as the conversation."""
+    proceeds with the normal answer. Same BYOK key as the conversation.
+
+    A reply that is not the requested object at all gets one repair turn
+    (chat/structured.py); a reply that *is* the object and says "no action"
+    does not, so the common case (a question, not a command) stays one call."""
     user = (context + "\n\n" if context else "") + f"User message: {message}"
     try:
-        raw = provider.complete(
-            api_key,
-            provider.classifier_model,
-            _SYSTEM,
-            [{"role": "user", "content": user}],
-        )
+        call = structured.ask(provider, api_key, _SYSTEM, user, ActionCall)
     except Exception:
         return None
-    return parse_action(raw)
+    return _action_from(call.model_dump())
 
 
 def execute(action: Action, path: Path | None = None) -> None:

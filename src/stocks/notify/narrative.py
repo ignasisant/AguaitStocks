@@ -37,7 +37,7 @@ def _prompt(data, lang: str) -> tuple[str, list[dict]]:
     )
     facts = {
         "date": data.date.isoformat(),
-        "total_eur": data.total_eur,
+        "total": data.total,
         "day_change": data.day and {"eur": round(data.day[0], 2),
                                     "pct": round(data.day[1] * 100, 2)},
         "week_change": data.week and {"eur": round(data.week[0], 2),

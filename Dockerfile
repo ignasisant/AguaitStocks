@@ -26,6 +26,24 @@ WORKDIR /app
 COPY --chown=appuser:appuser pyproject.toml uv.lock ./
 RUN uv sync --frozen --no-dev --no-install-project
 
+# Bake the tiktoken BPE table into the image. Without it the first chat turn
+# after every cold start downloads it (~2s, and a hard failure with no egress);
+# TIKTOKEN_CACHE_DIR has to be set at runtime too, so it goes in the env.
+ENV TIKTOKEN_CACHE_DIR=/home/appuser/.cache/tiktoken
+RUN /app/.venv/bin/python -c "import tiktoken; tiktoken.get_encoding('o200k_base')"
+
+# Same for the chat's embedding model (chat/memory.py). It is ~250MB of image,
+# which buys long-term memory that works on a cold start with no egress; the
+# alternative is a first-recall download that fails closed on a locked-down
+# revision. HF_HUB_OFFLINE keeps it from reaching out at all at runtime — the
+# weights are already here, and a hub call would only add latency and a
+# failure mode.
+ENV HF_HOME=/home/appuser/.cache/huggingface \
+    HF_HUB_DISABLE_TELEMETRY=1 \
+    HF_HUB_OFFLINE=1
+RUN HF_HUB_OFFLINE=0 /app/.venv/bin/python -c \
+    "from model2vec import StaticModel; StaticModel.from_pretrained('minishlab/potion-base-32M')"
+
 COPY --chown=appuser:appuser . .
 # Editable install of the project itself (default): stocks.config.PROJECT_ROOT
 # resolves to /app, so data/ and watchlist.yaml live next to the source.

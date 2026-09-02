@@ -16,16 +16,18 @@ last-write-wins — accepted, the overlap window is a single turn.
 
 from __future__ import annotations
 
+import json
 import time
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
-from datetime import date
+from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from stocks import obs
-from stocks.chat import market
+from stocks import obs, storage
+from stocks.chat import agent, market, tokens, toolbox
+from stocks.config import DATA_DIR, currency_symbol
 from stocks.secrets_env import secret
 from stocks.web import chat_skills, chat_web
 
@@ -57,6 +59,10 @@ FREE_DAILY_CAP = 30
 # thread stays on disk; only this tail is re-sent, so cost stops growing
 # quadratically with conversation length. ~10 exchanges of memory.
 MAX_CONTEXT_MSGS = 20
+
+# ...and the same tail measured in tokens, applied after the web extracts and
+# quotes are appended. The message count is a cheap first cut; chat/tokens.py
+# is the one that knows how big the request actually got.
 
 # Prepended to the system prompt for Telegram turns: Telegram renders no
 # markdown tables/headers, so steer the model at the source.
@@ -150,12 +156,88 @@ def maintain_byok(prefs: dict, pid: str | None = None) -> bool:
     return prune_byok(prefs) or touched
 
 
+# Who may spend the operator's keyless chain. The per-account and global caps
+# bound what one account and one day cost; neither bounds how many accounts
+# there are, and a Google sign-in is free to obtain in bulk. Fourteen throwaway
+# accounts exhaust FREE_GLOBAL_DAILY_CAP, which is not only a bill — it is the
+# real users seeing "free tier exhausted" for the rest of the day.
+#
+#   open        anyone signed in (what this was before the gate existed)
+#   established the default: the account has been around a day, so farming it
+#               costs an attacker a day of waiting per account
+#   allowlist   only the addresses in [free_llm] allowed_emails
+#
+# BYOK is untouched under every policy: a user with their own key pays their
+# own bill and needs no permission from anyone.
+FREE_ELIGIBILITY = "established"
+FREE_MIN_ACCOUNT_HOURS = 24
+
+
+def free_policy() -> str:
+    got = secret("FREE_LLM_ELIGIBILITY", "free_llm", "eligibility").lower()
+    return got if got in ("open", "established", "allowlist") else FREE_ELIGIBILITY
+
+
+def free_allowlist() -> set[str]:
+    raw = secret("FREE_LLM_ALLOWED_EMAILS", "free_llm", "allowed_emails")
+    return {e.strip().lower() for e in raw.replace(";", ",").split(",") if e.strip()}
+
+
+def _min_account_hours() -> float:
+    try:
+        return float(secret("FREE_LLM_MIN_ACCOUNT_HOURS", "free_llm",
+                            "min_account_hours") or FREE_MIN_ACCOUNT_HOURS)
+    except (TypeError, ValueError):
+        return FREE_MIN_ACCOUNT_HOURS
+
+
+def account_age_hours(prefs: dict) -> float | None:
+    """Hours since this account first signed in, or None when it is unknown.
+
+    Unknown covers accounts that predate the bookkeeping (first_seen backfilled
+    with first_seen_estimated) — those are old by definition, so callers read
+    None as "established", never as "brand new"."""
+    if prefs.get("first_seen_estimated"):
+        return None
+    stamp = prefs.get("first_seen")
+    if not stamp:
+        return None
+    try:
+        first = datetime.fromisoformat(str(stamp))
+    except ValueError:
+        return None
+    if first.tzinfo is None:
+        first = first.replace(tzinfo=UTC)
+    return (datetime.now(UTC) - first).total_seconds() / 3600
+
+
+def free_eligible(prefs: dict) -> bool:
+    """Whether this account may use the operator-funded chain.
+
+    Reads the account's own prefs, so it works identically in the panel and in
+    the headless Telegram job — no session, no request, no email lookup.
+    """
+    policy = free_policy()
+    if policy == "open":
+        return True
+    if policy == "allowlist":
+        allowed = free_allowlist()
+        # An allowlist nobody is on would lock out the operator too, which is
+        # a misconfiguration, not a policy — treat an empty list as "not set".
+        if not allowed:
+            return True
+        return str(prefs.get("email") or "").strip().lower() in allowed
+    age = account_age_hours(prefs)
+    return age is None or age >= _min_account_hours()
+
+
 def attempts(prefs: dict) -> list[tuple[Provider, str, str]]:
     """(provider, api_key, model) candidates in resolution order.
 
     First the user's preferred provider, then the BYOK order — each only with
-    a decryptable key — then the operator's keyless free chain. The model is
-    the user's saved pref or '' (callers substitute the provider default).
+    a decryptable key — then the operator's keyless free chain, for the
+    accounts free_eligible() lets near it. The model is the user's saved pref
+    or '' (callers substitute the provider default).
     """
     from stocks.web import llm
 
@@ -169,7 +251,7 @@ def attempts(prefs: dict) -> list[tuple[Provider, str, str]]:
             provider = llm.PROVIDERS[pid]
             seen.append((provider, key, prefs.get(f"{pid}_model") or ""))
     free = llm.PROVIDERS["free"]
-    if free.available():
+    if free.available() and free_eligible(prefs):
         seen.append((free, "", ""))
     return seen
 
@@ -187,11 +269,17 @@ def free_daily_cap() -> int:
 
 # Cost backstop across ALL accounts: the per-account cap bounds one user, this
 # bounds the process — N signed-up accounts times the account cap is otherwise
-# the real daily ceiling on shared free-tier keys. In-memory on purpose: the
-# web app is one container (the bot process gets its own, much smaller, run),
-# and a restart forgetting the counter only ever errs generous.
+# the real daily ceiling on shared free-tier keys.
 FREE_GLOBAL_DAILY_CAP = 400
 _global_free: dict = {"day": "", "used": 0}
+_global_free_loaded = False
+
+# Where the counter survives a restart. Cloud Run recycles the container on
+# every deploy and on idle scale-to-zero, and an in-memory counter hands out a
+# fresh 400 each time — which is exactly the lever an abuser leans on, since
+# the restart is free to provoke. Persisted through the same bucket as
+# everything else, so the web app and the Telegram job share one budget.
+GLOBAL_FREE_FILE = DATA_DIR / "free_llm_global.json"
 
 
 def free_global_daily_cap() -> int:
@@ -202,7 +290,42 @@ def free_global_daily_cap() -> int:
         return FREE_GLOBAL_DAILY_CAP
 
 
+def _load_global_free() -> None:
+    """Read today's spend off disk once per process, bucket first.
+
+    Best-effort in both directions: a missing file, a corrupt one or a bucket
+    that will not answer all mean "nothing spent yet", which errs generous.
+    Erring the other way would deny the free tier to everyone after any read
+    hiccup, and the counter is a cost guard, not a ledger.
+    """
+    global _global_free_loaded
+    if _global_free_loaded:
+        return
+    _global_free_loaded = True
+    try:
+        if storage.enabled():
+            storage.restore(GLOBAL_FREE_FILE)
+        saved = json.loads(GLOBAL_FREE_FILE.read_text())
+        if saved.get("day") == time.strftime("%Y-%m-%d"):
+            _global_free["day"] = saved["day"]
+            _global_free["used"] = int(saved.get("used", 0))
+    except Exception:
+        pass
+
+
+def _save_global_free() -> None:
+    try:
+        GLOBAL_FREE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        GLOBAL_FREE_FILE.write_text(json.dumps(_global_free))
+        if storage.enabled():
+            storage.persist(GLOBAL_FREE_FILE)
+    except Exception as exc:  # a counter that cannot be saved still counts
+        obs.warn("llm.free.global_save_failed", error_type=type(exc).__name__,
+                 error=str(exc)[:200])
+
+
 def _spend_global_free() -> bool:
+    _load_global_free()
     day = time.strftime("%Y-%m-%d")
     if _global_free["day"] != day:
         _global_free["day"], _global_free["used"] = day, 0
@@ -210,6 +333,7 @@ def _spend_global_free() -> bool:
         obs.event("llm.free.global_cap")
         return False
     _global_free["used"] += 1
+    _save_global_free()
     return True
 
 
@@ -220,7 +344,14 @@ def spend_free_quota(prefs: dict) -> bool:
     Telegram bot share one counter ("free_msgs::<date>"). Keys from previous
     days are dropped on spend so prefs.json never accumulates. The account
     counter is checked first so a capped-out user can't drain the global pot.
+
+    Eligibility is re-checked here rather than trusted from the caller: this
+    is the one function every free turn passes through in both surfaces, and
+    a gate that only lives in the provider list is a gate a saved preference
+    walks around.
     """
+    if not free_eligible(prefs):
+        return False
     day = time.strftime("%Y-%m-%d")
     key = f"free_msgs::{day}"
     used = int(prefs.get(key, 0))
@@ -259,6 +390,10 @@ _FOCUS_EN = {
 }
 _CONSTRAINT_EN = {
     "spain_tax": "factor in Spanish tax residency (IRPF; no US wash-sale rule)",
+    "us_tax": (
+        "factor in US tax residency (IRS; wash-sale rule, short versus "
+        "long-term rates)"
+    ),
     "eur": "reason and report in EUR",
     "no_leverage": "avoid recommending leverage, margin or derivatives",
     "esg": "apply ESG screening",
@@ -300,11 +435,15 @@ def persona(prof: dict) -> str:
 # ------------------------------------------------------------ book snapshot
 
 
-def _fmt_eur(x) -> str:
-    return f"€{x:,.0f}" if x is not None and x == x else "n/a"  # x==x screens NaN
+def _fmt_money(x, currency: str = "EUR") -> str:
+    sym = currency_symbol(currency)
+    # x == x screens NaN
+    return f"{sym}{x:,.0f}" if x is not None and x == x else "n/a"
 
 
-def book_snapshot(tbl: pd.DataFrame | None, watchlist: Path) -> str:
+def book_snapshot(
+    tbl: pd.DataFrame | None, watchlist: Path, currency: str = "EUR"
+) -> str:
     """The system prompt's snapshot of the user's real book.
 
     `tbl` is the live-priced positions frame (web: cached enriched_positions;
@@ -320,18 +459,20 @@ def book_snapshot(tbl: pd.DataFrame | None, watchlist: Path) -> str:
         for tk, r in tbl.iterrows():
             pnl_pct, day_pct, wt = r.get("pnl_pct"), r.get("day_pct"), r.get("weight")
             lines.append(
-                f"- {tk}: {r['shares']:g} sh | value {_fmt_eur(r['value_eur'])}"
-                f" | cost {_fmt_eur(r['cost_eur'])}"
-                + (f" | P/L {pnl_pct:+.1%} ({_fmt_eur(r['pnl_eur'])})"
+                f"- {tk}: {r['shares']:g} sh"
+                f" | value {_fmt_money(r['value'], currency)}"
+                f" | cost {_fmt_money(r['cost'], currency)}"
+                + (f" | P/L {pnl_pct:+.1%} ({_fmt_money(r['pnl'], currency)})"
                    if pnl_pct == pnl_pct else "")
                 + (f" | weight {wt:.0%}" if wt == wt else "")
                 + (f" | today {day_pct:+.1%}" if day_pct == day_pct else "")
             )
-        total = tbl["value_eur"].dropna().sum()
-        total_pnl = tbl["pnl_eur"].dropna().sum()
+        total = tbl["value"].dropna().sum()
+        total_pnl = tbl["pnl"].dropna().sum()
         book = (
-            f"Holdings (live market data, EUR). Total book {_fmt_eur(total)}, "
-            f"unrealised P/L {_fmt_eur(total_pnl)}:\n" + "\n".join(lines)
+            f"Holdings (live market data, {currency}). Total book "
+            f"{_fmt_money(total, currency)}, unrealised P/L "
+            f"{_fmt_money(total_pnl, currency)}:\n" + "\n".join(lines)
         )
         held = set(tbl.index)
     else:
@@ -356,15 +497,15 @@ def book_snapshot(tbl: pd.DataFrame | None, watchlist: Path) -> str:
     return book
 
 
-def enriched_frame(db: Path) -> pd.DataFrame | None:
+def enriched_frame(db: Path, base: str = "EUR") -> pd.DataFrame | None:
     """Uncached headless analog of web/portfolio_data.enriched_positions:
-    ledger → FIFO positions → live-priced EUR frame + weight + day change
+    ledger → FIFO positions → live-priced frame in `base` + weight + day change
     from the basket history's last two closes. None when there is no ledger
     or no open positions. Skips the web-only market-closed day override (a
     display nicety the prompt doesn't need)."""
     from stocks.analysis.portfolio import (
         position_values_history,
-        positions_frame_eur,
+        positions_frame,
     )
     from stocks.portfolio.ledger import all_transactions
     from stocks.portfolio.positions import build
@@ -372,13 +513,13 @@ def enriched_frame(db: Path) -> pd.DataFrame | None:
     txs = all_transactions(db)
     if not txs:
         return None
-    positions, _ = build(txs)
-    tbl = positions_frame_eur(positions)
+    positions, _ = build(txs, base=base)
+    tbl = positions_frame(positions, base=base)
     if tbl.empty:
         return None
-    value = tbl["value_eur"].dropna().sum()
-    tbl["weight"] = tbl["value_eur"] / value if value else float("nan")
-    vals = position_values_history(positions, period="1mo")
+    value = tbl["value"].dropna().sum()
+    tbl["weight"] = tbl["value"] / value if value else float("nan")
+    vals = position_values_history(positions, period="1mo", base=base)
     if len(vals) >= 2:
         last, prev = vals.iloc[-1], vals.iloc[-2]
         tbl["day_pct"] = (last / prev - 1).reindex(tbl.index)
@@ -387,10 +528,10 @@ def enriched_frame(db: Path) -> pd.DataFrame | None:
     return tbl.sort_values("weight", ascending=False, na_position="last")
 
 
-def portfolio_context(watchlist: Path, db: Path) -> str:
+def portfolio_context(watchlist: Path, db: Path, currency: str = "EUR") -> str:
     """Headless twin of chat_core._portfolio_context, from explicit paths."""
-    tbl = enriched_frame(db) if db.exists() else None
-    return book_snapshot(tbl, watchlist)
+    tbl = enriched_frame(db, currency) if db.exists() else None
+    return book_snapshot(tbl, watchlist, currency)
 
 
 # ------------------------------------------------------------ system prompt
@@ -494,6 +635,30 @@ def ground_web(prefs: dict, provider: Provider, api_key: str,
         return []
     return chat_web.collect(plan_web(prefs, provider, api_key, history, context),
                             history[-1]["content"])
+
+
+def gather_evidence(prefs: dict, provider: Provider, api_key: str,
+                    msgs: list[dict], watchlist: Path, db: Path,
+                    chat_path: Path | None = None,
+                    timeout: float | None = None) -> agent.Evidence:
+    """The model-directed lookup for a Telegram turn (chat/agent.py).
+
+    Gated by the same "chat_web" pref as the fixed pre-flight — the tools can
+    reach the internet, and a user who turned the web off must not get it back
+    through the side door. Off, unsupported or failed all mean Evidence with
+    ok=False, which puts the turn back on the fixed path."""
+    if not web_enabled(prefs):
+        return agent.Evidence(ok=False)
+    from stocks.web import auth
+
+    memory_db, thread = None, ""
+    if chat_path is not None:
+        memory_db = auth.memory_path(chat_path)
+        thread = auth.active_conversation(chat_path)["id"]
+    ctx = toolbox.Context(watchlist=watchlist, db=db, memory_db=memory_db,
+                          thread=thread)
+    return agent.gather(provider, api_key, msgs, ctx,
+                        timeout=timeout or agent.TIMEOUT)
 
 
 def in_parallel(*calls: Callable[[], object],
@@ -689,30 +854,46 @@ def answer(*, prefs: dict, prefs_path: Path, chat_path: Path,
             _keep_byok(prefs, prefs_path, provider.id)
             return Reply(text=note, provider_id=provider.id)
 
-    # Skill routing, the web lookup and the quotes are independent, so they
-    # run at the same time rather than stacking their latencies.
-    skills, hits, live = in_parallel(
+    # Skill routing and the lookup are independent, so they run at the same
+    # time rather than stacking their latencies. The lookup is the model's own
+    # when the provider has tool use (chat/agent.py) and the fixed
+    # search+quotes guess otherwise — or when the gather never got to run.
+    msgs = recent(history)
+    skills, evidence = in_parallel(
         lambda: resolve_skills(prefs, provider, key, history,
                                context=TELEGRAM_CONTEXT),
-        lambda: ground_web(prefs, provider, key, history),
-        lambda: market.lookup_for(message, watchlist),
+        lambda: gather_evidence(prefs, provider, key, msgs, watchlist, db,
+                                chat_path, timeout=timeout_s),
         timeout=timeout_s,
     )
-    skills, hits, live = skills or [], hits or [], live or []
+    skills = skills or []
+    evidence = evidence or agent.Evidence(ok=False)
+    hits, live = [], []
+    if not evidence.ok:
+        hits, live = in_parallel(
+            lambda: ground_web(prefs, provider, key, history),
+            lambda: market.lookup_for(message, watchlist),
+            timeout=timeout_s,
+        )
+        hits, live = hits or [], live or []
     system = system_prompt(
         auth.load_profile(prefs),
         TELEGRAM_CONTEXT + portfolio_context(watchlist, db),
         skills,
     )
-    # Web hits and live quotes ride on the outgoing copy of the user turn,
-    # not the system prompt — the stored history keeps the user's own text
-    # (same as the panel).
-    msgs = recent(history)
+    # Everything fetched rides on the outgoing copy of the user turn, not the
+    # system prompt — the stored history keeps the user's own text (same as
+    # the panel).
+    if evidence:
+        msgs[-1]["content"] = evidence.augment(msgs[-1]["content"])
     if hits:
         msgs[-1]["content"] = chat_web.augment(msgs[-1]["content"], hits)
     if live:
         msgs[-1]["content"] = market.augment(msgs[-1]["content"], live)
-    web_sources = chat_web.sources(hits)
+    # Last, after augmentation: the page extracts and quotes just stapled onto
+    # the newest turn are the biggest thing in the request (chat/tokens.py).
+    msgs = tokens.fit(msgs, system=system)
+    web_sources = chat_web.sources(hits) or evidence.sources()
 
     capped = False
     for provider, key, model in atts:

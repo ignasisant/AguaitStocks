@@ -31,7 +31,7 @@ class FakeProvider:
 
 
 def data() -> DigestData:
-    return DigestData(date=date(2026, 8, 14), total_eur=1000.0,
+    return DigestData(date=date(2026, 8, 14), total=1000.0,
                       day=(10.0, 0.01), movers=[("NVDA", 0.03)])
 
 

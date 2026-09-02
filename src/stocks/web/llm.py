@@ -26,6 +26,39 @@ from stocks import obs
 
 MAX_TOKENS = 4096
 
+# Rounds of "model asks for tools, we run them" before the loop is cut off. The
+# gather step is a means to an answer, not the answer: three rounds is enough
+# for search -> read -> check a quote, and a cap is what stops a model that
+# keeps asking for one more page from owning the whole turn.
+MAX_TOOL_ROUNDS = 3
+
+
+@dataclass(frozen=True)
+class ToolSpec:
+    """One tool offered to the model: what it is called, what it does, and the
+    JSON Schema of its arguments. Provider-neutral — each backend's own wire
+    shape is built from this."""
+
+    name: str
+    description: str
+    schema: dict
+
+
+@dataclass(frozen=True)
+class ToolCall:
+    name: str
+    args: dict
+    result: str
+
+
+@dataclass(frozen=True)
+class ToolRun:
+    """What one tool-using exchange produced: the model's closing text and
+    every tool call it made along the way, in order."""
+
+    text: str
+    calls: list[ToolCall]
+
 
 @dataclass(frozen=True)
 class Provider:
@@ -47,6 +80,10 @@ class Provider:
     # logos). None = no external brand; the keyless TopStocks provider ships its
     # own bundled icon instead.
     domain: str | None = None
+    # Native tool use, when this backend has it wired up. None means the caller
+    # keeps the fixed pre-flight (chat/engine.py) — a provider without tools
+    # loses the model-directed lookup, not the answer.
+    _tools: Callable[..., ToolRun] | None = None
 
     @property
     def default_model(self) -> str:
@@ -76,6 +113,33 @@ class Provider:
     def error_key(self, exc: Exception) -> str | None:
         """Locale key for a known SDK error, or None to let the caller re-raise."""
         return self._error_key(exc)
+
+    def supports_tools(self) -> bool:
+        """Whether this provider can run the model-directed lookup."""
+        return self._tools is not None and self.available()
+
+    def run_tools(
+        self,
+        api_key: str,
+        model: str,
+        system: str,
+        messages: list[dict],
+        tools: list[ToolSpec],
+        execute: Callable[[str, dict], str],
+        max_rounds: int = MAX_TOOL_ROUNDS,
+    ) -> ToolRun:
+        """Let the model call `tools` until it stops asking, then hand back what
+        it said and what it ran.
+
+        `execute(name, args) -> str` is the caller's dispatcher; the loop itself
+        (and every backend's message shape) stays in here. Raises the SDK's own
+        exceptions — the caller decides whether a failed lookup is fatal (it is
+        not: chat/agent.py falls back to the fixed pre-flight).
+        """
+        if self._tools is None:
+            raise NotImplementedError(f"{self.id} has no tool support")
+        return self._tools(api_key, model or self.default_model, system,
+                           messages, tools, execute, max_rounds)
 
 
 # ------------------------------------------------------------- Claude (Anthropic)
@@ -119,6 +183,45 @@ def _anthropic_stream(api_key, model, system, messages):
         yield from stream.text_stream
 
 
+def _anthropic_tools(api_key, model, system, messages, tools, execute, rounds):
+    """Anthropic's tool loop: create, run every tool_use block, feed the results
+    back, repeat until the model stops asking.
+
+    Parallel tool calls arrive as several tool_use blocks in one assistant
+    message and their results must go back in ONE user message — splitting them
+    teaches the model to stop asking for them in parallel. The assistant turn is
+    appended as `resp.content` rather than re-serialized text so nothing (the
+    tool_use blocks least of all) is lost on the way back.
+    """
+    import anthropic
+
+    client = anthropic.Anthropic(api_key=api_key)
+    schema = [{"name": t.name, "description": t.description,
+               "input_schema": t.schema} for t in tools]
+    convo = list(messages)
+    calls: list[ToolCall] = []
+    text = ""
+    for _ in range(max(1, rounds)):
+        resp = client.messages.create(
+            model=model, max_tokens=MAX_TOKENS, system=system,
+            messages=convo, tools=schema,
+        )
+        text = "".join(b.text for b in resp.content if b.type == "text")
+        uses = [b for b in resp.content if b.type == "tool_use"]
+        if not uses:
+            break
+        convo.append({"role": "assistant", "content": resp.content})
+        results = []
+        for block in uses:
+            args = dict(block.input or {})
+            out = execute(block.name, args)
+            calls.append(ToolCall(block.name, args, out))
+            results.append({"type": "tool_result", "tool_use_id": block.id,
+                            "content": out or "(no result)"})
+        convo.append({"role": "user", "content": results})
+    return ToolRun(text, calls)
+
+
 def _anthropic_error(exc):
     import anthropic
 
@@ -157,6 +260,56 @@ def _openai_compat_stream(base_url: str | None = None):
 
 
 _openai_stream = _openai_compat_stream()
+
+
+def _openai_compat_tools(base_url: str | None = None):
+    """The same loop over any OpenAI-compatible host: OpenAI itself, and every
+    backend in the free chain (groq, cerebras, openrouter all speak it).
+
+    Tool results go back as one "tool" message per call, each keyed by the
+    tool_call_id from the assistant turn — the wire equivalent of Anthropic's
+    single user message of tool_result blocks.
+    """
+
+    def run(api_key, model, system, messages, tools, execute, rounds):
+        import json
+
+        from openai import OpenAI
+
+        client = OpenAI(api_key=api_key, base_url=base_url)
+        schema = [{"type": "function",
+                   "function": {"name": t.name, "description": t.description,
+                                "parameters": t.schema}} for t in tools]
+        convo = [{"role": "system", "content": system}] + list(messages)
+        calls: list[ToolCall] = []
+        text = ""
+        for _ in range(max(1, rounds)):
+            resp = client.chat.completions.create(
+                model=model, max_tokens=MAX_TOKENS, messages=convo, tools=schema,
+            )
+            msg = resp.choices[0].message
+            text = msg.content or ""
+            if not msg.tool_calls:
+                break
+            convo.append(msg.model_dump(exclude_none=True))
+            for tc in msg.tool_calls:
+                # Never string-match the serialized arguments: models escape
+                # them differently. Bad JSON is the model's error to see.
+                try:
+                    args = json.loads(tc.function.arguments or "{}")
+                except ValueError:
+                    args = {}
+                out = execute(tc.function.name, args if isinstance(args, dict) else {})
+                calls.append(ToolCall(tc.function.name,
+                                      args if isinstance(args, dict) else {}, out))
+                convo.append({"role": "tool", "tool_call_id": tc.id,
+                              "content": out or "(no result)"})
+        return ToolRun(text, calls)
+
+    return run
+
+
+_openai_tools = _openai_compat_tools()
 
 
 def _openai_error(exc):
@@ -401,6 +554,31 @@ def _free_stream(api_key, model, system, messages):
     raise FreeTierExhausted("all free backends failed")
 
 
+def _free_tools(api_key, model, system, messages, tools, execute, rounds):
+    """The chain again, for the tool loop: first backend that gets through wins.
+
+    Simpler than _free_stream on purpose — nothing has been shown to the user
+    yet, so any failure (rate limit, a backend whose model has no tool support,
+    a retired slug) is just the next backend's turn. When they all refuse, the
+    caller falls back to the fixed pre-flight, so this raising is not the end of
+    the answer.
+    """
+    del api_key, model  # the chain supplies its own key and model per backend
+    backends = _free_backends()
+    if not backends:
+        raise FreeTierExhausted("no free backend configured")
+    for attempt, b in enumerate(backends):
+        try:
+            return _openai_compat_tools(b.base_url or None)(
+                b.api_key, b.model, system, messages, tools, execute, rounds)
+        except Exception as exc:
+            obs.warn("llm.free.tools_failed", backend=b.id, model=b.model,
+                     attempt=attempt, error_type=type(exc).__name__,
+                     error=str(exc)[:300],
+                     status=getattr(exc, "status_code", None))
+    raise FreeTierExhausted("no free backend ran the tool loop")
+
+
 def _free_error(exc):
     if isinstance(exc, FreeTierExhausted):
         return "chat.free_exhausted"
@@ -420,12 +598,14 @@ PROVIDERS: dict[str, Provider] = {
             "openai", _free_stream, _free_error,
             needs_key=False,
             _available=lambda: bool(_free_backends()),
+            _tools=_free_tools,
         ),
         Provider(
             "anthropic", "Claude",
             ("claude-opus-4-8", "claude-sonnet-5", "claude-haiku-4-5"),
             "sk-ant-...", "https://console.anthropic.com/settings/keys",
             "anthropic", _anthropic_stream, _anthropic_error,
+            _tools=_anthropic_tools,
             classifier_model="claude-haiku-4-5",
             domain="claude.ai",
         ),
@@ -434,6 +614,7 @@ PROVIDERS: dict[str, Provider] = {
             ("gpt-5", "gpt-4o", "gpt-4o-mini"),
             "sk-...", "https://platform.openai.com/api-keys",
             "openai", _openai_stream, _openai_error,
+            _tools=_openai_tools,
             classifier_model="gpt-4o-mini",
             domain="chatgpt.com",
         ),
@@ -443,6 +624,9 @@ PROVIDERS: dict[str, Provider] = {
             # retires a pinned version (2.5-flash/2.5-pro dropped for new keys).
             ("gemini-flash-latest", "gemini-3.6-flash", "gemini-flash-lite-latest"),
             "AQ... or AIza...", "https://aistudio.google.com/apikey",
+            # No _tools: google-genai's function calling has its own message
+            # shape, and Gemini keeps the fixed pre-flight until it is written
+            # and tested against a live key. Everything else on this page works.
             "google.genai", _gemini_stream, _gemini_error,
             classifier_model="gemini-flash-lite-latest",
             domain="gemini.google.com",

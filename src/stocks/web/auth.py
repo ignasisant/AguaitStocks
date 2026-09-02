@@ -34,31 +34,47 @@ import streamlit as st
 import yaml
 
 from stocks import storage
-from stocks.config import DATA_DIR, PROJECT_ROOT, WATCHLIST_FILE
+from stocks.chat import memory
+from stocks.config import (
+    CURRENCIES,
+    CURRENCY_SYMBOL,
+    DATA_DIR,
+    PROJECT_ROOT,
+    WATCHLIST_FILE,
+)
+from stocks.web import css
 from stocks.web.i18n import t as tr
 
 USERS_DIR = DATA_DIR / "users"
 GUEST_DIR = USERS_DIR / "_guest"
 
-CURRENCIES = ("EUR", "USD", "GBP", "CHF")
-CURRENCY_SYMBOL = {"EUR": "€", "USD": "$", "GBP": "£", "CHF": "CHF "}
 RECENT_SEARCHES_MAX = 5
-DEFAULT_PREFS = {  # language None = auto (browser); picker_sort_by None = default order
+DEFAULT_PREFS = {  # language None = auto (browser)
     "currency": "EUR",
     "language": None,
-    "picker_sort_by": None,
     "recent_searches": [],  # tickers clicked from the top-bar search, newest first
     # Registration accounting, stamped by mark_login(). first_seen is the
     # signup moment (ISO, UTC); last_seen is a date, rewritten once a day.
     "first_seen": None,
     "last_seen": None,
     "first_seen_estimated": False,
+    # The signed-in address, for the jobs that have a prefs.json and no
+    # session (and for the free-chain allowlist). None until the next login.
+    "email": None,
     # Telegram notifications: chat_id is set by the Profile linking flow; the
     # toggles only take effect once it is. The cron (notify/fanout.py) reads
     # these headless straight from prefs.json.
     "telegram_chat_id": None,
     "notify_digest": True,
     "notify_alerts": True,
+    # Tax residence drives which jurisdiction's rules the Realized & tax tab
+    # applies and which currency the ledger is replayed in (see
+    # stocks.portfolio.tax). None = auto, resolved from the browser region.
+    # The rest are bracket inputs only some jurisdictions read.
+    "tax_residence": None,
+    "tax_filing_status": "single",
+    "tax_other_income": 0.0,
+    "tax_niit": False,
 }
 
 STARTER_WATCHLIST = """\
@@ -86,6 +102,7 @@ class UserPaths:
     last_import: Path
     prefs: Path
     chat: Path
+    bank: Path
 
 
 def slug(email: str) -> str:
@@ -124,6 +141,7 @@ def paths_for(
             last_import=DATA_DIR / "last_import.json",
             prefs=DATA_DIR / "prefs.json",
             chat=DATA_DIR / "chat.json",
+            bank=DATA_DIR / "bank.json",
         )
     d = users_dir / slug(email)
     return UserPaths(
@@ -133,6 +151,7 @@ def paths_for(
         last_import=d / "last_import.json",
         prefs=d / "prefs.json",
         chat=d / "chat.json",
+        bank=d / "bank.json",
     )
 
 
@@ -150,11 +169,13 @@ def guest_paths() -> UserPaths:
         last_import=GUEST_DIR / "last_import.json",
         prefs=GUEST_DIR / "prefs.json",
         chat=GUEST_DIR / "chat.json",
+        bank=GUEST_DIR / "bank.json",
     )
 
 
 _USER_FILES = (
     "watchlist.yaml", "portfolio.db", "last_import.json", "prefs.json", "chat.json",
+    "bank.json", memory.FILE,
 )
 
 
@@ -222,6 +243,8 @@ def ensure_user_data(paths: UserPaths, legacy_root: Path | None = None) -> bool:
                 paths.last_import,
                 paths.prefs,
                 paths.chat,
+                paths.bank,
+                memory.path_for(paths.root),
             ),
         )
     except Exception:
@@ -296,7 +319,7 @@ def current_email() -> str:
 # also visible in place on the log timeline.
 
 
-def mark_login(paths: UserPaths, *, seeded: bool = False) -> str:
+def mark_login(paths: UserPaths, *, seeded: bool = False, email: str = "") -> str:
     """Stamp this account's first/last login; return "signup" or "login".
 
     `seeded` is ensure_user_data()'s verdict: True only when this run created
@@ -313,6 +336,12 @@ def mark_login(paths: UserPaths, *, seeded: bool = False) -> str:
     today = datetime.now(UTC).date().isoformat()
     kind = "login"
     changed = False
+    # The address, written into the account's own file so headless jobs can
+    # identify it — the Telegram bot has a prefs.json and no session. The
+    # free-chain allowlist (engine.free_eligible) is the caller that needs it.
+    if email and prefs.get("email") != email:
+        prefs["email"] = email
+        changed = True
     if not prefs.get("first_seen"):
         prefs["first_seen"] = datetime.now(UTC).isoformat(timespec="seconds")
         prefs["first_seen_estimated"] = not seeded
@@ -353,7 +382,8 @@ def resolve_user() -> UserPaths:
         st.session_state["_login_kind"] = ""
     elif st.session_state.get("_login_marked") != email:
         st.session_state["_login_marked"] = email
-        st.session_state["_login_kind"] = mark_login(paths, seeded=seeded)
+        st.session_state["_login_kind"] = mark_login(paths, seeded=seeded,
+                                                     email=email)
     st.session_state["user_paths"] = paths
     return paths
 
@@ -453,7 +483,7 @@ _LOGIN_CSS = f"""\
 
 
 def _login_screen() -> None:
-    st.html(_LOGIN_CSS)
+    css.inject(_LOGIN_CSS)
     st.space("xlarge")
     with st.container(horizontal_alignment="center"):
         with st.container(border=True, width=420, horizontal_alignment="center"):
@@ -562,7 +592,7 @@ def push_recent_search(ticker: str) -> None:
 PROFILE_RISK = ("aggressive", "very_aggressive", "balanced", "conservative")
 PROFILE_HORIZON = ("5y_plus", "3_5y", "1_3y", "under_1y")
 PROFILE_FOCUS = ("tech", "em", "crypto", "dividends_value")
-PROFILE_CONSTRAINTS = ("spain_tax", "eur", "no_leverage", "esg")
+PROFILE_CONSTRAINTS = ("spain_tax", "us_tax", "eur", "no_leverage", "esg")
 
 _PROFILE_DEFAULTS = {
     "risk": "aggressive",
@@ -798,13 +828,27 @@ def load_chat(path: Path | None = None) -> list[dict]:
     return _active(load_book(path))["messages"]
 
 
+def memory_path(path: Path | None = None) -> Path:
+    """The account's long-term chat index, beside its chat history."""
+    return (path or user_paths().chat).parent / memory.FILE
+
+
 def save_chat(history: list[dict], path: Path | None = None) -> None:
-    """Replace the active conversation's turns and stamp it as just used."""
+    """Replace the active conversation's turns and stamp it as just used.
+
+    Indexing rides along here rather than at the two call sites: every turn
+    that reaches disk is a turn the assistant may need to recall later, and
+    both surfaces (the panel and the Telegram bot) already come through this
+    one function. It is idempotent and best-effort — a failed index costs a
+    worse search, never a lost message."""
     book = load_book(path)
     conv = _active(book)
     conv["messages"] = list(history)
     conv["updated"] = _now()
     save_book(book, path)
+    index = memory_path(path)
+    if memory.remember(index, history, conv["id"]):
+        _persist(index)  # only when it actually grew — most saves add nothing
 
 
 def list_conversations(path: Path | None = None) -> list[dict]:
@@ -885,11 +929,28 @@ def delete_conversation(cid: str, path: Path | None = None) -> None:
         book["active"] = max(kept, key=lambda c: c["updated"])["id"]
     book["conversations"] = kept
     save_book(book, path)
+    # A deleted conversation must not keep answering questions through the
+    # memory index.
+    index = memory_path(path)
+    if memory.forget(index, cid):
+        _persist(index)
 
 
-def display_currency() -> str:
+def reporting_currency() -> str:
+    """The currency the app reckons in for this account.
+
+    Not a display setting any more: the ledger is replayed *in* this currency
+    (every leg at its own trade-date rate), so the figures are computed in it
+    rather than converted afterwards. The tax tab is the one exception — it
+    follows the tax residence, which is a legal fact rather than a preference.
+    """
     ccy = str(load_prefs().get("currency", "EUR")).upper()
     return ccy if ccy in CURRENCIES else "EUR"
+
+
+def currency_symbol() -> str:
+    """The reporting currency's symbol, for figures rendered as strings."""
+    return CURRENCY_SYMBOL.get(reporting_currency(), "")
 
 
 # ---------------------------------------------------------------- watchlist

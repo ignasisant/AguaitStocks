@@ -21,6 +21,26 @@ DATA_DIR.mkdir(exist_ok=True)
 
 
 # Alert types that only need the latest price (evaluated by Alert.triggered).
+# Reporting currencies the app can reckon in, and how their amounts are
+# prefixed. Here rather than in web/auth.py because the headless senders (the
+# Telegram digest, the CLI) format money too and must not import Streamlit.
+# Frankfurter serves any ECB-quoted base, so adding one is a line here. The
+# Nordic currencies all write "kr", so they take the code-prefix form rather
+# than a symbol nobody could tell apart in a table.
+CURRENCIES = (
+    "EUR", "USD", "GBP", "CHF", "SEK", "NOK", "DKK", "PLN", "CZK", "CAD", "AUD",
+)
+CURRENCY_SYMBOL = {
+    "EUR": "€", "USD": "$", "GBP": "£", "CHF": "CHF ",
+    "SEK": "SEK ", "NOK": "NOK ", "DKK": "DKK ", "PLN": "zł",
+    "CZK": "Kč", "CAD": "CA$", "AUD": "A$",
+}
+
+
+def currency_symbol(ccy: str | None) -> str:
+    return CURRENCY_SYMBOL.get(str(ccy or "").upper(), "")
+
+
 PRICE_THRESHOLD_TYPES = frozenset({"above", "below"})
 # Alert types evaluated against price history in stocks.notify.alerts.
 HISTORY_ALERT_TYPES = frozenset(
