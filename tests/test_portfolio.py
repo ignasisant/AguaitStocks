@@ -151,7 +151,10 @@ def _eur(amount: float, currency: str, day: str) -> float:
     return amount * (0.5 if currency == "USD" else 1.0)
 
 
-def test_shares_frame_replays_buys_sells_splits():
+def test_shares_frame_replays_buys_sells_and_back_adjusts_splits():
+    """Splits are back-adjusted, matching the back-adjusted price history: the
+    pre-split buy already counts in post-split shares and the split date is not
+    a step (stepping there would price the pre-split stretch at 1/ratio)."""
     txs = [
         Transaction("2024-01-01", "A", "buy", quantity=10, price=1),
         Transaction("2024-01-03", "A", "buy", quantity=5, price=1),
@@ -164,8 +167,21 @@ def test_shares_frame_replays_buys_sells_splits():
     assert f.loc["2024-01-04", "A"] == 15
     assert f.loc["2024-01-06", "A"] == 7
     assert f.loc["2024-01-01", "B"] == 0  # before first buy
-    assert f.loc["2024-01-03", "B"] == 2
-    assert f.loc["2024-01-05", "B"] == 8  # 4:1 split
+    assert f.loc["2024-01-03", "B"] == 8  # pre-split buy, post-split shares
+    assert f.loc["2024-01-04", "B"] == 8  # split day: no step
+    assert f.loc["2024-01-05", "B"] == 8
+
+
+def test_shares_frame_split_does_not_scale_same_day_trades():
+    """A trade on the split date already executed at the post-split price."""
+    txs = [
+        Transaction("2024-01-01", "A", "buy", quantity=1, price=200),
+        Transaction("2024-01-03", "A", "split", quantity=20),
+        Transaction("2024-01-03", "A", "buy", quantity=5, price=10),
+    ]
+    f = shares_frame(txs, end="2024-01-04")
+    assert f.loc["2024-01-02", "A"] == 20  # the one pre-split share
+    assert f.loc["2024-01-03", "A"] == 25  # + 5 bought post-split
 
 
 def test_injected_series_buys_minus_net_sell_proceeds():
@@ -178,7 +194,7 @@ def test_injected_series_buys_minus_net_sell_proceeds():
         ),
         Transaction("2024-01-04", "A", "dividend", price=50, currency="EUR"),
     ]
-    s = injected_series(txs, to_eur=_eur)
+    s = injected_series(txs, to_base=_eur)
     assert len(s) == 2  # dividend ignored
     assert abs(s.iloc[0] - 105.0) < 1e-9  # cost incl. fee
     assert abs(s.iloc[-1] - 60.0) < 1e-9  # minus net proceeds (48 - 3)
@@ -192,14 +208,14 @@ def test_injected_vs_value_marks_to_market_in_eur():
     idx = pd.date_range("2024-01-01", "2024-01-04", freq="D")
     closes = {"A": pd.Series([10.0, 12.0, 12.0, 14.0], index=idx)}  # B: no prices
     fx = {"USD": pd.Series(0.5, index=idx)}
-    df = injected_vs_value(txs, closes, fx, to_eur=_eur)
-    assert abs(df.loc["2024-01-01", "injected_eur"] - 50.0) < 1e-9
-    assert abs(df.loc["2024-01-01", "value_eur"] - 50.0) < 1e-9
+    df = injected_vs_value(txs, closes, fx, to_base=_eur)
+    assert abs(df.loc["2024-01-01", "injected"] - 50.0) < 1e-9
+    assert abs(df.loc["2024-01-01", "value"] - 50.0) < 1e-9
     assert abs(df.loc["2024-01-01", "pnl_pct"] - 0.0) < 1e-9
-    assert abs(df.loc["2024-01-02", "injected_eur"] - 149.0) < 1e-9
+    assert abs(df.loc["2024-01-02", "injected"] - 149.0) < 1e-9
     # B has no close series: carried at cost (99) while held.
-    assert abs(df.loc["2024-01-02", "value_eur"] - (60.0 + 99.0)) < 1e-9
-    assert abs(df.loc["2024-01-04", "value_eur"] - (70.0 + 99.0)) < 1e-9
+    assert abs(df.loc["2024-01-02", "value"] - (60.0 + 99.0)) < 1e-9
+    assert abs(df.loc["2024-01-04", "value"] - (70.0 + 99.0)) < 1e-9
     assert abs(df.loc["2024-01-04", "pnl_pct"] - (169.0 / 149.0 - 1)) < 1e-9
 
 
@@ -216,10 +232,10 @@ def test_injected_vs_value_stray_quote_outside_holding_carried_at_cost():
     ]
     # Only quote is after the sale — useless for the holding window.
     closes = {"A": pd.Series([1.0], index=pd.to_datetime(["2024-06-01"]))}
-    df = injected_vs_value(txs, closes, {}, to_eur=_eur)
-    assert abs(df.loc["2024-01-01", "value_eur"] - 100.0) < 1e-9  # at cost
-    assert abs(df.loc["2024-01-02", "value_eur"] - 100.0) < 1e-9
-    assert abs(df.loc["2024-01-03", "value_eur"] - 0.0) < 1e-9  # sold out
+    df = injected_vs_value(txs, closes, {}, to_base=_eur)
+    assert abs(df.loc["2024-01-01", "value"] - 100.0) < 1e-9  # at cost
+    assert abs(df.loc["2024-01-02", "value"] - 100.0) < 1e-9
+    assert abs(df.loc["2024-01-03", "value"] - 0.0) < 1e-9  # sold out
     assert df.attrs["carried_at_cost"] == ["A"]
 
 
@@ -257,7 +273,7 @@ def test_flow_series_signs_and_ticker_filter():
         Transaction("2024-01-04", "A", "dividend", price=50, currency="EUR", fee=5),
         Transaction("2024-01-02", "B", "buy", quantity=1, price=100, currency="EUR"),
     ]
-    f = flow_series(txs, to_eur=_eur, tickers={"A"})
+    f = flow_series(txs, to_base=_eur, tickers={"A"})
     assert abs(f[pd.Timestamp("2024-01-02")] - 51.0) < 1e-9  # (100 + 2) * 0.5, B skipped
     assert abs(f[pd.Timestamp("2024-01-03")] - (-29.0)) < 1e-9  # -(60 - 2) * 0.5
     assert abs(f[pd.Timestamp("2024-01-04")] - (-45.0)) < 1e-9  # net dividend out
@@ -286,6 +302,29 @@ def test_time_weighted_returns_credits_dividends():
     flows = pd.Series({pd.Timestamp("2024-01-02"): -50.0})  # dividend paid out
     r = time_weighted_returns(value, flows)
     assert abs(r[pd.Timestamp("2024-01-02")] - 0.05) < 1e-9
+
+
+def test_time_weighted_returns_drops_impossible_days():
+    """A flow the value path never received (an unrecorded split) prices below
+    -100%. Dropped, not kept: one such day sends the cumulative path negative
+    and NaNs the annualised return."""
+    idx = pd.date_range("2024-01-01", periods=3, freq="D")
+    value = pd.Series([1000.0, 1100.0, 1210.0], index=idx)
+    # Day 2 injects 3000 that never lands in the value: (1100 - 3000)/1000 - 1.
+    flows = pd.Series({pd.Timestamp("2024-01-02"): 3000.0})
+    r = time_weighted_returns(value, flows)
+    assert pd.Timestamp("2024-01-02") not in r.index
+    assert r.attrs["dropped_days"] == [pd.Timestamp("2024-01-02")]
+    assert abs(r[pd.Timestamp("2024-01-03")] - 0.10) < 1e-9
+    assert float((1 + r).prod()) > 0
+
+
+def test_time_weighted_returns_keeps_ordinary_days():
+    idx = pd.date_range("2024-01-01", periods=2, freq="D")
+    value = pd.Series([1000.0, 900.0], index=idx)
+    r = time_weighted_returns(value, pd.Series(dtype=float))
+    assert r.attrs["dropped_days"] == []
+    assert abs(r[pd.Timestamp("2024-01-02")] + 0.10) < 1e-9
 
 
 def test_time_weighted_returns_empty():

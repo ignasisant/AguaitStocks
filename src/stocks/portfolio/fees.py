@@ -10,7 +10,7 @@ The spread estimate compares each execution price against the trade day's
 session midpoint ((high+low)/2 of that day's bar). One trade against a daily
 bar is mostly intraday noise, but summed over a book the noise cancels and the
 systematic part that remains is the broker's spread/markup: buys print above
-mid, sells below. `outside_range_eur` is the portion that is definitely
+mid, sells below. `outside_range` is the portion that is definitely
 markup — executions beyond the day's exchange high/low (typical of
 market-maker markups on FX/crypto legs). Bars must be UNADJUSTED for
 dividends (auto_adjust=False); split adjustment is replayed here from the
@@ -24,8 +24,7 @@ from dataclasses import dataclass
 
 import pandas as pd
 
-from stocks.data.fx import ToEur, prefetch
-from stocks.data.fx import to_eur as _fx_to_eur
+from stocks.data.fx import ToBase, converter, prefetch
 from stocks.portfolio.ledger import Transaction
 
 
@@ -33,13 +32,13 @@ from stocks.portfolio.ledger import Transaction
 class BrokerFees:
     broker: str
     trades: int = 0
-    volume_eur: float = 0.0  # gross executed value, buys + sells
-    commission_eur: float = 0.0  # fee field on buy/sell rows
-    other_fees_eur: float = 0.0  # standalone action="fee" rows
+    volume: float = 0.0  # gross executed value, buys + sells
+    commission: float = 0.0  # fee field on buy/sell rows
+    other_fees: float = 0.0  # standalone action="fee" rows
 
     @property
-    def explicit_eur(self) -> float:
-        return self.commission_eur + self.other_fees_eur
+    def explicit(self) -> float:
+        return self.commission + self.other_fees
 
 
 @dataclass
@@ -47,16 +46,16 @@ class SpreadStats:
     broker: str
     measured: int = 0  # trades with a bar on the trade date
     skipped: int = 0  # trades with no usable bar (not in `bars`, NaN, holiday)
-    measured_volume_eur: float = 0.0
-    spread_eur: float = 0.0  # signed: + = paid above mid, - = beat the mid
-    outside_range_eur: float = 0.0  # executions beyond the day's high/low
+    measured_volume: float = 0.0
+    spread: float = 0.0  # signed: + = paid above mid, - = beat the mid
+    outside_range: float = 0.0  # executions beyond the day's high/low
 
     @property
     def spread_bps(self) -> float:
         """Average round-cost of measured executions, in basis points."""
-        if not self.measured_volume_eur:
+        if not self.measured_volume:
             return 0.0
-        return self.spread_eur / self.measured_volume_eur * 1e4
+        return self.spread / self.measured_volume * 1e4
 
 
 def broker_of(tx: Transaction) -> str:
@@ -67,23 +66,25 @@ def broker_of(tx: Transaction) -> str:
 
 
 def by_broker(
-    transactions: list[Transaction], to_eur: ToEur | None = None
+    transactions: list[Transaction],
+    to_base: ToBase | None = None,
+    base: str = "EUR",
 ) -> dict[str, BrokerFees]:
-    """Explicit ledger costs per broker, valued in EUR at each row's date."""
+    """Explicit ledger costs per broker, valued at each row's own date."""
     rows = [t for t in transactions if t.action in ("buy", "sell", "fee")]
-    if to_eur is None:
+    if to_base is None:
         prefetch((t.date, t.currency) for t in rows)
-        to_eur = _fx_to_eur
+        to_base = converter(base)
     out: dict[str, BrokerFees] = {}
     for tx in rows:
         bf = out.setdefault(broker_of(tx), BrokerFees(broker=broker_of(tx)))
         if tx.action == "fee":
             # Convention: amount in `fee`; tolerate rows that put it in `price`.
-            bf.other_fees_eur += to_eur(tx.fee or tx.price, tx.currency, tx.date)
+            bf.other_fees += to_base(tx.fee or tx.price, tx.currency, tx.date)
             continue
         bf.trades += 1
-        bf.volume_eur += to_eur(tx.quantity * tx.price, tx.currency, tx.date)
-        bf.commission_eur += to_eur(tx.fee, tx.currency, tx.date)
+        bf.volume += to_base(tx.quantity * tx.price, tx.currency, tx.date)
+        bf.commission += to_base(tx.fee, tx.currency, tx.date)
     return out
 
 
@@ -109,16 +110,17 @@ def _day_bars(df: pd.DataFrame) -> dict[str, tuple[float, float]]:
 def spread_by_broker(
     transactions: list[Transaction],
     bars: dict[str, pd.DataFrame],
-    to_eur: ToEur | None = None,
+    to_base: ToBase | None = None,
+    base: str = "EUR",
 ) -> dict[str, SpreadStats]:
     """Execution-vs-midpoint cost per broker from daily unadjusted OHLC bars."""
     trades = [
         t for t in transactions
         if t.action in ("buy", "sell") and t.quantity > 0 and t.price > 0
     ]
-    if to_eur is None:
-        prefetch((t.date, t.currency) for t in trades)
-        to_eur = _fx_to_eur
+    if to_base is None:
+        prefetch(((t.date, t.currency) for t in trades), quote=base)
+        to_base = converter(base)
     splits = _split_factors(transactions)
     day_bars = {tk: _day_bars(df) for tk, df in bars.items()}
     out: dict[str, SpreadStats] = {}
@@ -134,7 +136,7 @@ def spread_by_broker(
             st.skipped += 1
             continue
         # Yahoo bars are split-adjusted; scale pre-split executions to match.
-        # price/qty scale inversely, so EUR values are unchanged by `ratio`.
+        # price/qty scale inversely, so converted values are unchanged by `ratio`.
         ratio = 1.0
         for day, r in splits.get(tx.ticker, []):
             if day > tx.date:
@@ -143,7 +145,7 @@ def spread_by_broker(
         diff = price - mid if tx.action == "buy" else mid - price
         outside = max(0.0, price - high) if tx.action == "buy" else max(0.0, low - price)
         st.measured += 1
-        st.measured_volume_eur += to_eur(tx.quantity * tx.price, tx.currency, tx.date)
-        st.spread_eur += to_eur(diff * qty, tx.currency, tx.date)
-        st.outside_range_eur += to_eur(outside * qty, tx.currency, tx.date)
+        st.measured_volume += to_base(tx.quantity * tx.price, tx.currency, tx.date)
+        st.spread += to_base(diff * qty, tx.currency, tx.date)
+        st.outside_range += to_base(outside * qty, tx.currency, tx.date)
     return out

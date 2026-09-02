@@ -85,6 +85,39 @@ def test_duplicate_against_ledger_warns():
     v = validate(_result([_buy()]), prior, known=KNOWN, today=TODAY)
     assert len(v.flagged) == 1
     assert "already in ledger" in v.flagged[0].warnings[0].message
+    # Importable as ever — but named, so a caller can leave it out.
+    assert len(v.importable) == 1
+    assert v.fresh == []
+    assert len(v.duplicates) == 1
+
+
+def test_same_trade_at_a_different_price_is_a_near_duplicate():
+    """A re-read of one statement prices the same trade off whichever column
+    the mapping picked that time; the exact key misses it."""
+    v = validate(_result([_buy(price=100.5)]), [_buy(price=100.0)],
+                 known=KNOWN, today=TODAY)
+    assert len(v.duplicates) == 1
+    assert "read twice" in v.duplicates[0].warnings[0].message
+
+
+def test_a_batch_repeating_itself_flags_its_own_repeat():
+    v = validate(_result([_buy(), _buy()]), [], known=KNOWN, today=TODAY)
+    assert len(v.fresh) == 1
+    assert len(v.duplicates) == 1
+
+
+def test_two_same_day_dividends_are_not_duplicates():
+    """No share count to key on, and a broker paying twice in a day is
+    ordinary — only the exact check applies to these."""
+    div = [
+        Transaction(date="2025-03-01", ticker="AAPL", action="dividend",
+                    quantity=0.0, price=12.0),
+        Transaction(date="2025-03-01", ticker="AAPL", action="dividend",
+                    quantity=0.0, price=4.5),
+    ]
+    v = validate(_result(div), [], known=KNOWN, today=TODAY)
+    assert len(v.fresh) == 2
+    assert not v.duplicates
 
 
 def test_split_ratio_derived_from_held_quantity():

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from stocks.portfolio import generic, platforms
+from stocks.portfolio.ledger import Transaction
 
 LEDGER_CSV = (
     "date,ticker,action,quantity,price,currency,fee,note\n"
@@ -86,3 +87,56 @@ def test_registry_dispatch_revolut_csv_and_generic():
 
     result = platforms.by_key("generic").parse("book.csv", LEDGER_CSV.encode())
     assert len(result.transactions) == 3
+
+
+# ------------------------------------------------------------ import origin
+
+
+def _tx(note: str = "") -> Transaction:
+    return Transaction("2025-01-02", "AAPL", "buy", 1, 10.0, note=note)
+
+
+def test_broker_options_offers_known_brokers_and_other_last():
+    options = platforms.broker_options()
+    assert options[-1] == platforms.OTHER
+    assert set(options[:-1]) == set(platforms.BROKER_NAMES)
+
+
+def test_broker_key_slugs_a_typed_name_to_one_word():
+    # Only the note's first word is read back, so a typed name must not keep
+    # its spaces or punctuation.
+    assert platforms.broker_key("Renta 4") == "renta_4"
+    assert platforms.broker_key("My Bank, S.A.") == "my_bank_s_a"
+    assert platforms.broker_key("   ") == platforms.OTHER
+
+
+def test_detected_broker_reads_what_the_parser_stamped():
+    assert platforms.detected_broker([_tx("revolut"), _tx("revolut")]) == "revolut"
+    # revolut_crypto stamps "revolut crypto <coin>" — same broker.
+    assert platforms.detected_broker([_tx("revolut crypto BTC")]) == "revolut"
+    # Mapped/generic rows name no broker, and a mixed batch agrees on none:
+    # both are the case where the user has to be asked.
+    assert platforms.detected_broker([_tx("first lot")]) == ""
+    assert platforms.detected_broker([_tx("revolut"), _tx("ibkr")]) == ""
+    assert platforms.detected_broker([]) == ""
+
+
+def test_stamp_broker_prefixes_the_note_and_keeps_the_rest():
+    stamped = platforms.stamp_broker([_tx("Apple Inc"), _tx("")], "Renta 4")
+    assert [t.note for t in stamped] == ["renta_4 Apple Inc", "renta_4"]
+
+
+def test_stamp_broker_replaces_a_broker_word_instead_of_stacking_one():
+    once = platforms.stamp_broker([_tx("clicktrade Apple Inc")], "degiro")
+    assert once[0].note == "degiro Apple Inc"
+    # Idempotent: re-stamping the same origin doesn't grow the note.
+    assert platforms.stamp_broker(once, "degiro")[0].note == "degiro Apple Inc"
+    # A parser's own stamp survives being re-stamped with the same broker.
+    kept = platforms.stamp_broker([_tx("revolut crypto BTC")], "revolut")
+    assert kept[0].note == "revolut crypto BTC"
+
+
+def test_stamp_broker_leaves_the_input_rows_untouched():
+    rows = [_tx("Apple Inc")]
+    platforms.stamp_broker(rows, "ibkr")
+    assert rows[0].note == "Apple Inc"

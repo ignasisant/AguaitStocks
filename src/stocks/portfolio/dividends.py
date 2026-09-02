@@ -1,4 +1,4 @@
-"""Dividend income + foreign withholding, valued in EUR at the pay date.
+"""Dividend income + foreign withholding, valued at the pay-date rate.
 
 Ledger convention for a dividend row: action='dividend', price = GROSS dividend
 total in native ccy, fee = tax withheld at source in native ccy. Net = price-fee.
@@ -13,8 +13,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from stocks.data.fx import ToEur, prefetch
-from stocks.data.fx import to_eur as _fx_to_eur
+from stocks.data.fx import ToBase, converter, prefetch
 from stocks.portfolio.ledger import Transaction
 
 # Spain double-taxation treaty cap on dividend withholding (creditable ceiling).
@@ -24,38 +23,40 @@ TREATY_WHT_CAP = 0.15
 @dataclass
 class DividendYear:
     year: int
-    gross_eur: float = 0.0
-    withheld_eur: float = 0.0
+    gross: float = 0.0
+    withheld: float = 0.0
     records: list[Transaction] = field(default_factory=list)
 
     @property
-    def net_eur(self) -> float:
-        return self.gross_eur - self.withheld_eur
+    def net(self) -> float:
+        return self.gross - self.withheld
 
     @property
-    def creditable_eur(self) -> float:
+    def creditable(self) -> float:
         """Foreign tax creditable in Spain (capped at the treaty rate)."""
-        return min(self.withheld_eur, TREATY_WHT_CAP * self.gross_eur)
+        return min(self.withheld, TREATY_WHT_CAP * self.gross)
 
     @property
-    def reclaimable_eur(self) -> float:
+    def reclaimable(self) -> float:
         """Withholding above the treaty cap — reclaim from the source country."""
-        return max(0.0, self.withheld_eur - self.creditable_eur)
+        return max(0.0, self.withheld - self.creditable)
 
 
 def by_year(
-    transactions: list[Transaction], to_eur: ToEur | None = None
+    transactions: list[Transaction],
+    to_base: ToBase | None = None,
+    base: str = "EUR",
 ) -> dict[int, DividendYear]:
-    """Aggregate dividend transactions into per-calendar-year EUR summaries."""
+    """Aggregate dividends into per-calendar-year summaries in `base`."""
     dividends = [t for t in transactions if t.action == "dividend"]
-    if to_eur is None:
+    if to_base is None:
         prefetch((t.date, t.currency) for t in dividends)
-        to_eur = _fx_to_eur
+        to_base = converter(base)
     years: dict[int, DividendYear] = {}
     for tx in dividends:
         yr = int(tx.date[:4])
         dy = years.setdefault(yr, DividendYear(year=yr))
-        dy.gross_eur += to_eur(tx.price, tx.currency, tx.date)
-        dy.withheld_eur += to_eur(tx.fee, tx.currency, tx.date)
+        dy.gross += to_base(tx.price, tx.currency, tx.date)
+        dy.withheld += to_base(tx.fee, tx.currency, tx.date)
         dy.records.append(tx)
     return years

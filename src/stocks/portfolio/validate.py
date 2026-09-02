@@ -10,8 +10,12 @@ this module does everything that needs context beyond one row:
   local symbols (DHER, NA9…) that no US source knows
 * oversells — a sell larger than the position held at that date (replayed
   FIFO-style over prior ledger + the new batch, splits applied)
-* duplicates — rows identical to something already in the ledger, the
-  classic re-import-of-an-overlapping-export accident
+* duplicates — rows the ledger already holds, or that the batch repeats
+  within itself: the classic re-import-of-an-overlapping-export accident,
+  and the LLM-mapped statement that read the same page twice. Both an exact
+  match and a same-trade-different-price match are flagged, and `Validation`
+  offers the batch with them left out (`fresh`) next to the batch that keeps
+  them (`importable`) — the caller chooses
 * splits — Revolut reports shares *added* by a split, not the ratio
   positions.py needs; the ratio is derived from the quantity held the day
   of the split and snapped to a plausible ratio (6:1, 3:2, …)
@@ -50,6 +54,20 @@ _MIN_DATE = "1990-01-01"
 # Snap targets for derived split ratios: forward N:1 and the common 3:2.
 _SPLIT_RATIOS = [1.5] + [float(n) for n in range(2, 51)]
 
+# Warning fields meaning "this row is already imported". Two strengths: an
+# exact match, and a trade whose date/ticker/action/quantity match but whose
+# price doesn't — what a re-read of the same PDF produces when the mapping
+# lands on a different price column the second time around.
+DUPLICATE = "duplicate"
+NEAR_DUPLICATE = "near_duplicate"
+_DUPE_FIELDS = (DUPLICATE, NEAR_DUPLICATE)
+
+# Actions whose quantity is a share count, so (date, ticker, action, quantity)
+# already names one trade. Dividends, fees and splits carry no share count and
+# two of them on one day for one ticker are ordinary, so they get the exact
+# check only.
+_QUANTIFIED = ("buy", "sell")
+
 # lookup(ticker) -> True (exists), False (doesn't), None (couldn't check)
 Lookup = Callable[[str], bool | None]
 
@@ -76,6 +94,12 @@ class Checked:
     def warnings(self) -> list[Issue]:
         return [i for i in self.issues if i.severity == "warning"]
 
+    @property
+    def duplicate(self) -> bool:
+        """Whether this row repeats one already imported (exactly, or bar
+        its price)."""
+        return any(i.field in _DUPE_FIELDS for i in self.issues)
+
 
 @dataclass
 class Validation:
@@ -93,6 +117,17 @@ class Validation:
     @property
     def flagged(self) -> list[Checked]:
         return [c for c in self.checked if c.warnings and not c.errors]
+
+    @property
+    def duplicates(self) -> list[Checked]:
+        """Importable rows the ledger (or an earlier row of this batch) has."""
+        return [c for c in self.checked if not c.errors and c.duplicate]
+
+    @property
+    def fresh(self) -> list[Transaction]:
+        """`importable` minus the duplicates — what a second upload of an
+        overlapping export should actually add to the ledger."""
+        return [c.tx for c in self.checked if not c.errors and not c.duplicate]
 
     @property
     def summary(self) -> str:
@@ -145,6 +180,7 @@ def validate(
 
     txs = list(result.transactions) + resolve_splits(result, prior)
     seen = {_dupe_key(t) for t in prior}
+    similar = {_loose_key(t) for t in prior if _quantified(t)}
     checked = [Checked(tx=t) for t in txs]
 
     for c in checked:
@@ -159,15 +195,7 @@ def validate(
                     "the full loss of the position",
                 )
             )
-        if _dupe_key(c.tx) in seen:
-            c.issues.append(
-                Issue(
-                    "warning",
-                    "duplicate",
-                    "identical row already in ledger — re-importing an "
-                    "overlapping export doubles the position",
-                )
-            )
+        _check_duplicate(c, seen, similar)
     _check_oversells(checked, prior)
     return Validation(checked=checked)
 
@@ -279,6 +307,40 @@ def _check_ticker(c: Checked, known: set[str], lookup: Lookup | None) -> None:
     )
 
 
+def _check_duplicate(c: Checked, seen: set, similar: set) -> None:
+    """Flag a row the ledger — or an earlier row of the same batch — already has.
+
+    Both sets grow as the batch is walked, so a statement that lists the same
+    movement twice flags its own repeat and not only its overlap with the
+    ledger. That is the common shape of an LLM-mapped PDF: the page is read
+    again and the trade comes back a second time, sometimes at a slightly
+    different price, which is what the loose key is for.
+    """
+    key = _dupe_key(c.tx)
+    if key in seen:
+        c.issues.append(
+            Issue(
+                "warning",
+                DUPLICATE,
+                "identical row already in ledger — re-importing an "
+                "overlapping export doubles the position",
+            )
+        )
+    elif _quantified(c.tx) and _loose_key(c.tx) in similar:
+        c.issues.append(
+            Issue(
+                "warning",
+                NEAR_DUPLICATE,
+                f"a {c.tx.action} of {c.tx.quantity:g} {c.tx.ticker} on "
+                f"{c.tx.date} is already in the ledger at a different price "
+                "— the same trade read twice?",
+            )
+        )
+    seen.add(key)
+    if _quantified(c.tx):
+        similar.add(_loose_key(c.tx))
+
+
 # ------------------------------------------------------------------ cross-row checks
 def _check_oversells(checked: list[Checked], prior: list[Transaction]) -> None:
     """Replay quantities per ticker over prior + new rows in date order; a sell
@@ -315,6 +377,15 @@ def _check_oversells(checked: list[Checked], prior: list[Transaction]) -> None:
 
 def _dupe_key(t: Transaction) -> tuple:
     return (t.date, t.ticker, t.action, round(t.quantity, 6), round(t.price, 4))
+
+
+def _loose_key(t: Transaction) -> tuple:
+    """_dupe_key without the price — the same trade however it was priced."""
+    return (t.date, t.ticker, t.action, round(t.quantity, 6))
+
+
+def _quantified(t: Transaction) -> bool:
+    return t.action in _QUANTIFIED and t.quantity > 0
 
 
 def _iso_date(value: str) -> str:

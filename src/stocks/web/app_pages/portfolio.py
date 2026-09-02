@@ -34,7 +34,7 @@ from stocks.analysis.portfolio import (
     flow_series,
     holdings_from_positions,
     market_active,
-    market_value_weights_eur,
+    market_value_weights_base,
     max_drawdown,
     money_weighted_return,
     portfolio_returns,
@@ -42,12 +42,13 @@ from stocks.analysis.portfolio import (
     us_extended_session,
     us_market_open,
 )
-from stocks.portfolio import dividends, fees
-from stocks.portfolio.tax_es import fiscal_year, modelo_720_flag
-from stocks.web import auth, notices, skeletons
+from stocks.portfolio import custody, dividends, fees
+from stocks.portfolio.tax import month_range
+from stocks.web import auth, notices, skeletons, tax_ui
 from stocks.web.i18n import t as tr
 from stocks.web.portfolio_data import (
     basket_history,
+    custody_map,
     enriched_positions,
     eur_spot,
     ledger_history,
@@ -76,6 +77,7 @@ from stocks.web.widgets import (
     TEXT_SECONDARY,
     TRANSPARENT,
     WARN_ORANGE,
+    broker_name,
     chart_layout,
     data_table,
     db_mtime,
@@ -99,7 +101,14 @@ st.title(tr("nav.portfolio"))
 # book and entries stay hot until the next import.
 DB = str(auth.db_path())
 
-txs, positions, realized = ledger_state(DB, db_mtime(DB))
+# The currency this account reckons in (Profile). Money is computed *in* it —
+# every ledger leg at its own trade-date rate — so it keys the cached loaders
+# rather than converting their output afterwards. REPORT_SYM prefixes the
+# figures that are rendered as strings.
+REPORT_CCY = auth.reporting_currency()
+REPORT_SYM = auth.CURRENCY_SYMBOL[REPORT_CCY]
+
+txs, positions, realized = ledger_state(DB, db_mtime(DB), REPORT_CCY)
 if not txs:
     st.warning(tr("portfolio.no_transactions"))
     st.stop()
@@ -132,6 +141,22 @@ tab_pos, tab_risk, tab_tax, tab_div, tab_fees = st.tabs(
 )
 
 
+# --------------------------------------------------------------------- Custody
+# Which broker's account a holding sits in. A multi-broker book splits the same
+# ticker across custodians and the ledger note prefix is the only record of it
+# (see stocks.portfolio.custody), so the Positions table carries it per row and
+# the allocation card adds a broker donut.
+def _broker_cell(row: dict[str, custody.Custody]) -> str:
+    """One position's custody: "Revolut" — or "Revolut 60% · ClickTrade 40%"
+    when its shares sit at more than one broker."""
+    parts = custody.mix(row)
+    if not parts:
+        return tr("portfolio.na")
+    if len(parts) == 1:
+        return broker_name(parts[0][0])
+    return " · ".join(f"{broker_name(b)} {share:.0%}" for b, share in parts)
+
+
 # ------------------------------------------------------------------- Positions
 # Both sections are parallel fragments: a full rerun dispatches each to a
 # thread pool, so the live-price table and the ledger-history chart build
@@ -146,7 +171,7 @@ def _positions_section() -> None:
     # Shared loader (web/portfolio_data.py) — already weight/day-enriched and
     # weight-sorted; Home shows the same frame, so the price burst is shared.
     try:
-        tbl = enriched_positions(DB, db_mtime(DB))
+        tbl = enriched_positions(DB, db_mtime(DB), REPORT_CCY)
     except (YFRateLimitError, URLError) as exc:
         notices.data_toast(exc)
         card.clear()  # the toast is the whole message; no empty card behind it
@@ -155,7 +180,7 @@ def _positions_section() -> None:
         card.container(border=True).warning(tr("portfolio.data_unavailable"))
         return
     with card.container(border=True):
-        st.subheader(tr("portfolio.open_positions_pl"))
+        st.subheader(tr("portfolio.open_positions_pl", ccy=REPORT_CCY))
         if tbl.empty:
             st.caption(tr("portfolio.no_open_positions"))
             # Empty book = the next step is importing one; say so in place
@@ -166,42 +191,34 @@ def _positions_section() -> None:
                 icon=":material/upload_file:",
             )
         else:
-            cost = tbl["cost_eur"].sum()
-            value = tbl["value_eur"].dropna().sum()
-            # Headline figures honor the profile's display-currency preference
-            # (spot-converted); the table and tax tabs stay EUR.
-            ccy = auth.display_currency()
-            fx = 1.0 if ccy == "EUR" else eur_spot(ccy)
-            if fx is None:
-                ccy, fx = "EUR", 1.0
-            sym = auth.CURRENCY_SYMBOL[ccy]
-            realized_gain = sum(s.gain_eur for s in realized)
-            realized_cost = sum(s.cost_eur for s in realized)
+            cost = tbl["cost"].sum()
+            value = tbl["value"].dropna().sum()
+            sym = REPORT_SYM
+            realized_gain = sum(s.gain for s in realized)
+            realized_cost = sum(s.cost for s in realized)
             # Same TIKR-style tiles as the Ticker fundamentals card (and the
             # Home glance): value and its chip on one line, help as a "?" pill.
             st.html(kpi_grid_html([
-                (tr("portfolio.cost_basis"), f"{sym}{cost * fx:,.0f}", None, None),
-                (tr("portfolio.market_value"), f"{sym}{value * fx:,.0f}", None, None),
+                (tr("portfolio.cost_basis"), f"{sym}{cost:,.0f}", None, None),
+                (tr("portfolio.market_value"), f"{sym}{value:,.0f}", None, None),
                 (
                     tr("portfolio.unrealised_pl"),
-                    f"{sym}{(value - cost) * fx:+,.0f}",
+                    f"{sym}{value - cost:+,.0f}",
                     kpi_delta_chip(value / cost - 1 if cost else None),
                     None,
                 ),
                 (
                     tr("portfolio.realised_pl"),
-                    f"{sym}{realized_gain * fx:+,.0f}",
+                    f"{sym}{realized_gain:+,.0f}",
                     kpi_delta_chip(
                         realized_gain / realized_cost if realized_cost else None
                     ),
                     tr("portfolio.realised_pl_help"),
                 ),
             ]))
-            if ccy != "EUR":
-                st.caption(tr("portfolio.headline_converted", ccy=ccy))
 
             try:
-                vals = basket_history(DB, db_mtime(DB))
+                vals = basket_history(DB, db_mtime(DB), REPORT_CCY)
             except (YFRateLimitError, URLError) as exc:
                 notices.data_toast(exc)
                 vals = pd.DataFrame()  # 1w/1m read n/a; the table below stands
@@ -209,7 +226,7 @@ def _positions_section() -> None:
                 # Degrade: 1w/1m read n/a; the positions table below still renders.
                 st.warning(tr("portfolio.data_unavailable"))
                 vals = pd.DataFrame()
-            # Regular session closed → sum the per-row day_eur (already overridden
+            # Regular session closed → sum the per-row day (already overridden
             # to the live pre/after-hours quote, or the last completed session once
             # those windows shut) instead of the basket's close-to-close, which can
             # be a flat premarket 0%. Grey its delta ("off") only when nothing is
@@ -218,9 +235,9 @@ def _positions_section() -> None:
             extended = None if mkt_open else us_extended_session()
             today_closed = None
             if not mkt_open:
-                d_eur = tbl["day_eur"].dropna().sum()
-                base = value - d_eur
-                today_closed = (d_eur, d_eur / base if base else 0.0)
+                d_base = tbl["day"].dropna().sum()
+                base = value - d_base
+                today_closed = (d_base, d_base / base if base else 0.0)
             delta_tiles = []
             for label, days in (
                 (tr("portfolio.today"), 1),
@@ -234,7 +251,7 @@ def _positions_section() -> None:
                 else:
                     delta_tiles.append((
                         label,
-                        f"{sym}{chg[0] * fx:+,.0f}",
+                        f"{sym}{chg[0]:+,.0f}",
                         kpi_delta_chip(
                             chg[1],
                             fmt="{:+.2%}",
@@ -255,40 +272,44 @@ def _positions_section() -> None:
             # Shared Positions-style HTML table (logo+name cells, semantic P/L
             # colors — see widgets.ticker_table_html). Rows come pre-sorted by
             # weight; click-to-sort is the only capability given up.
+            # Custody per row, off the ledger — no extra fetch behind it.
+            cust = custody_map(DB, db_mtime(DB), REPORT_CCY)
+            tbl["broker"] = [_broker_cell(cust.get(t, {})) for t in tbl.index]
             tbl.insert(0, "ticker", tbl.index)
             tbl = tbl[
-                ["ticker", "shares", "ccy", "cost_eur", "value_eur", "weight",
-                 "day_eur", "day_pct", "pnl_eur", "pnl_pct"]
+                ["ticker", "shares", "ccy", "broker", "cost", "value",
+                 "weight", "day", "day_pct", "pnl", "pnl_pct"]
             ]
 
             fmt = {
                 "shares": "{:.4f}",
-                "cost_eur": "€{:,.0f}",
-                "value_eur": "€{:,.0f}",
+                "cost": f"{REPORT_SYM}{{:,.0f}}",
+                "value": f"{REPORT_SYM}{{:,.0f}}",
                 "weight": "{:.1%}",
-                "day_eur": "€{:+,.0f}",
+                "day": f"{REPORT_SYM}{{:+,.0f}}",
                 "day_pct": "{:+.1%}",
-                "pnl_eur": "€{:,.0f}",
+                "pnl": f"{REPORT_SYM}{{:,.0f}}",
                 "pnl_pct": "{:+.1%}",
             }
-            pnl_cols = ("day_eur", "day_pct", "pnl_eur", "pnl_pct")
+            pnl_cols = ("day", "day_pct", "pnl", "pnl_pct")
             # Rows with no live quote: dim only the day columns (a last-close move,
             # not live); total P/L stays full color. Crypto is 24/7, and a US name
             # in pre/after-hours is live, so neither dims.
             muted = {t for t in tbl["ticker"] if not market_active(t)}
-            day_cols = ("day_eur", "day_pct")
-            # € and % of the same move belong in one cell: "€-97  (-1.1%)",
+            day_cols = ("day", "day_pct")
+            # The amount and % of the same move belong in one cell,
             # the percentage as a tinted pill. Halves the desktop column count.
-            pairs = (("day_eur", "day_pct"), ("pnl_eur", "pnl_pct"))
+            pairs = (("day", "day_pct"), ("pnl", "pnl_pct"))
             labels = {
                 "ticker": tr("portfolio.col_position"),
                 "shares": tr("portfolio.col_shares"),
                 "ccy": tr("portfolio.col_currency"),
-                "cost_eur": tr("portfolio.cost_basis"),
-                "value_eur": tr("portfolio.market_value"),
+                "broker": tr("portfolio.col_broker"),
+                "cost": tr("portfolio.cost_basis"),
+                "value": tr("portfolio.market_value"),
                 "weight": tr("portfolio.col_weight"),
-                "day_eur": tr("portfolio.today"),
-                "pnl_eur": tr("portfolio.col_total_pl"),
+                "day": tr("portfolio.today"),
+                "pnl": tr("portfolio.col_total_pl"),
             }
 
             if _MOBILE:
@@ -296,20 +317,32 @@ def _positions_section() -> None:
                 # P/L as a pill beside the symbol (the dim line ellipsizes, so a
                 # number there got cut), weight below; nothing pans
                 # horizontally. Full sortable table one expander below.
+                #
+                # That dim line already carries the company name and the
+                # weight, so it names the custodians without their share
+                # split — the expander's table below keeps the percentages.
+                mob = tbl.copy()
+                mob["brokers"] = [
+                    " · ".join(
+                        broker_name(b) for b, _ in custody.mix(cust.get(t, {}))
+                    ) or tr("portfolio.na")
+                    for t in tbl["ticker"]
+                ]
                 st.html(ticker_table_html(
-                    tbl, fmt=fmt, signed=pnl_cols, muted=muted, muted_cols=day_cols,
+                    mob, fmt=fmt, signed=pnl_cols, muted=muted, muted_cols=day_cols,
                     labels=labels,
-                    mobile={"value": "value_eur", "delta": "day_pct",
-                            "badge": "pnl_pct", "sub": ("weight",)}))
+                    mobile={"value": "value", "delta": "day_pct",
+                            "badge": "pnl_pct", "sub": ("weight", "brokers")}))
                 with st.expander(tr("portfolio.all_columns")):
                     st.html(ticker_table_html(
                         tbl, fmt=fmt, signed=pnl_cols, muted=muted,
                         muted_cols=day_cols, pairs=pairs, labels=labels,
-                        sortable="positions"))
+                        left_cols=("broker",), sortable="positions"))
             else:
                 st.html(ticker_table_html(
                     tbl, fmt=fmt, signed=pnl_cols, muted=muted, muted_cols=day_cols,
-                    pairs=pairs, labels=labels, sortable="positions"))
+                    pairs=pairs, labels=labels, left_cols=("broker",),
+                    sortable="positions"))
             st.caption(tr("portfolio.positions_caption"))
 
 
@@ -428,6 +461,113 @@ def _geography_cell(alloc: pd.Series, title: str) -> None:
     )
 
 
+# Drag-zooming the history chart narrows x only (y stays pinned, so a drag
+# never squashes the money scale) and Plotly leaves the y range where the full
+# span put it: a 2022 window worth 4k draws as a flat line on the floor of a
+# 120k axis. Streamlit surfaces no relayout event (only box/lasso selections,
+# which would cost the drag-to-zoom gesture and a server round trip per drag),
+# so the refit runs in the browser: the plotted band extents ride along in a
+# hidden slot's data attributes — Plotly serializes numeric arrays as base64
+# ({"dtype", "bdata"}), so gd.data is not readable from JS — and the picked
+# window is read off the chart's own layout once the drag ends. Desktop only:
+# phones pin both axes, so there is no zoom to follow.
+_YFIT_JS = r"""
+<script>
+(function () {
+  if (window.__topstocksYFit) return;  /* wire once per session */
+  window.__topstocksYFit = true;
+  /* Axis endpoints come back as "2026-06-28 15:07:03.5225" (space, and a
+     sub-millisecond fraction outside the ISO grammar Safari holds to); the
+     shipped stamps are ISO dates. Normalise both before parsing. */
+  const ms = (v) => {
+    if (typeof v === "number") return v;
+    return Date.parse(String(v).replace(" ", "T").replace(/(\.\d{3})\d+/, "$1"));
+  };
+  /* The history chart is the one carrying a meta="history" trace; every other
+     chart on the page keeps its own axes to itself. */
+  const chart = () =>
+    Array.prototype.find.call(
+      document.querySelectorAll(".js-plotly-plot"),
+      (gd) => (gd.data || []).some((t) => t.meta === "history")
+    );
+  const fit = () => {
+    /* Both nodes are looked up per event, never captured: Streamlit replaces
+       them whenever the range buttons rerun the fragment. */
+    const gd = chart();
+    const b = document.querySelector(".ts-yfit");
+    if (!gd || !b || !window.Plotly) return;
+    const ax = (gd.layout || {}).xaxis || {};
+    const ya = (gd.layout || {}).yaxis || {};
+    if (ax.autorange || !ax.range) {  /* zoom reset: back to the whole span */
+      gd.__tsYFit = "";
+      if (!ya.autorange) window.Plotly.relayout(gd, {"yaxis.autorange": true});
+      return;
+    }
+    const xs = (b.dataset.x || "").split(",");
+    const los = (b.dataset.lo || "").split(",");
+    const his = (b.dataset.hi || "").split(",");
+    const x0 = Math.min(ms(ax.range[0]), ms(ax.range[1]));
+    const x1 = Math.max(ms(ax.range[0]), ms(ax.range[1]));
+    let i0 = -1, i1 = -1;
+    for (let i = 0; i < xs.length; i++) {
+      const t = ms(xs[i]);
+      if (t < x0 || t > x1) continue;
+      if (i0 < 0) i0 = i;
+      i1 = i;
+    }
+    if (i0 < 0) return;  /* the window fell between two daily points */
+    /* The line enters and leaves the window mid-segment: the points just
+       outside each edge are drawn too, so they count towards the extents. */
+    i0 = Math.max(0, i0 - 1);
+    i1 = Math.min(xs.length - 1, i1 + 1);
+    let lo = Infinity, hi = -Infinity;
+    for (let i = i0; i <= i1; i++) {
+      const a = parseFloat(los[i]), z = parseFloat(his[i]);
+      if (a < lo) lo = a;
+      if (z > hi) hi = z;
+    }
+    if (!isFinite(lo) || !isFinite(hi)) return;
+    const pad = (hi - lo) * 0.06 || Math.abs(hi) * 0.06 || 1;
+    /* A book is never worth less than nothing: pad down to zero, not past it. */
+    lo = lo >= 0 && lo - pad < 0 ? 0 : lo - pad;
+    hi = hi + pad;
+    const key = lo.toFixed(2) + ":" + hi.toFixed(2);
+    if (gd.__tsYFit === key) return;  /* same window as the last drag */
+    gd.__tsYFit = key;
+    window.Plotly.relayout(gd, {"yaxis.range": [lo, hi]});
+  };
+  /* Deliberately not gd.on("plotly_relayout"): Streamlit re-plots the same
+     div on a fragment rerun, and Plotly.newPlot purges the handlers off it
+     while the element (so any "already wired" mark on it) survives — the
+     refit would go dead for the rest of the session. Document-level listeners
+     outlive every remount. The drag ends on mouseup, the reset on dblclick,
+     and the modebar buttons on their own click; the timeout lets Plotly land
+     its own relayout before the layout is read.
+     The listeners take no target filter: Plotly covers the whole document
+     with a .dragcover while a drag is live, so the mouseup that ends a zoom
+     lands outside the chart. fit() is a no-op whenever the axis is not
+     zoomed, which is every other click on the page. */
+  const after = () => setTimeout(fit, 80);
+  document.addEventListener("mouseup", after, true);
+  document.addEventListener("dblclick", after, true);
+})();
+</script>
+"""
+
+
+def _yfit_slot(box, hist: pd.DataFrame) -> None:
+    """Hidden slot carrying the plotted band extents, read by `_YFIT_JS`."""
+    pair = hist[["value", "injected"]]
+    xs = ",".join(hist.index.strftime("%Y-%m-%d"))
+    los = ",".join(f"{v:.2f}" for v in pair.min(axis=1))
+    his = ",".join(f"{v:.2f}" for v in pair.max(axis=1))
+    box.html(
+        '<div class="ts-yfit" style="display:none"'
+        f' data-x="{xs}" data-lo="{los}" data-hi="{his}"></div>' + _YFIT_JS,
+        unsafe_allow_javascript=True,
+    )
+
+
 @st.fragment(parallel=True)
 def _history_section() -> None:
     # Full-span price history: the slowest fetch on the page on a cold cache.
@@ -438,7 +578,7 @@ def _history_section() -> None:
     )
     try:
         hist, _, missing = ledger_history(
-            (len(txs), txs[-1].date, date.today()), DB
+            (len(txs), txs[-1].date, date.today()), DB, REPORT_CCY
         )
     except (YFRateLimitError, URLError) as exc:
         notices.data_toast(exc)
@@ -475,27 +615,38 @@ def _history_section() -> None:
 
             GREEN, RED = PROFIT_COLOR, LOSS_COLOR
 
-            def _pct_span(p: float) -> str:
+            def _pl_span(pnl: float, p: float) -> str:
+                """Nominal P/L (bold) plus the % in one colored span: the
+                nominal is the headline, the % the reference."""
                 if pd.isna(p):
                     return "—"
                 color = GREEN if p >= 0 else RED
-                return f'<span style="color:{color}"><b>{p:+.1%}</b></span>'
+                sign = "+" if pnl >= 0 else "-"
+                return (
+                    f'<span style="color:{color}"><b>{sign}{REPORT_SYM}'
+                    f"{abs(pnl):,.0f}</b> ({p:+.1%})</span>"
+                )
 
             customdata = [
-                [inj, _pct_span(p)]
-                for inj, p in zip(hist["injected_eur"], hist["pnl_pct"], strict=True)
+                [inj, _pl_span(val - inj, p)]
+                for val, inj, p in zip(
+                    hist["value"],
+                    hist["injected"],
+                    hist["pnl_pct"],
+                    strict=True,
+                )
             ]
             # Split the value line by sign of P/L; masks overlap one point at
             # each crossing so the green and red segments stay connected.
-            gain = hist["value_eur"] >= hist["injected_eur"]
-            up = hist["value_eur"].where(gain | gain.shift(1, fill_value=False))
-            down = hist["value_eur"].where(~gain | (~gain).shift(1, fill_value=False))
+            gain = hist["value"] >= hist["injected"]
+            up = hist["value"].where(gain | gain.shift(1, fill_value=False))
+            down = hist["value"].where(~gain | (~gain).shift(1, fill_value=False))
             GREEN_FILL, RED_FILL = PROFIT_BAND, LOSS_BAND
 
             fig = go.Figure()
             fig.add_trace(
                 go.Scatter(
-                    x=hist.index, y=hist["injected_eur"],
+                    x=hist.index, y=hist["injected"],
                     name=tr("portfolio.series_injected"),
                     line=dict(color=TEXT_MUTED, width=2, shape="hv"),
                     hoverinfo="skip",
@@ -504,7 +655,7 @@ def _history_section() -> None:
             # Green band where value ≥ injected …
             fig.add_trace(
                 go.Scatter(
-                    x=hist.index, y=hist[["value_eur", "injected_eur"]].max(axis=1),
+                    x=hist.index, y=hist[["value", "injected"]].max(axis=1),
                     line=dict(width=0), fill="tonexty", fillcolor=GREEN_FILL,
                     hoverinfo="skip", showlegend=False,
                 )
@@ -512,13 +663,13 @@ def _history_section() -> None:
             # … re-anchor on injected, then red band where value < injected.
             fig.add_trace(
                 go.Scatter(
-                    x=hist.index, y=hist["injected_eur"],
+                    x=hist.index, y=hist["injected"],
                     line=dict(width=0), hoverinfo="skip", showlegend=False,
                 )
             )
             fig.add_trace(
                 go.Scatter(
-                    x=hist.index, y=hist[["value_eur", "injected_eur"]].min(axis=1),
+                    x=hist.index, y=hist[["value", "injected"]].min(axis=1),
                     line=dict(width=0), fill="tonexty", fillcolor=RED_FILL,
                     hoverinfo="skip", showlegend=False,
                 )
@@ -541,10 +692,15 @@ def _history_section() -> None:
             # regardless of which colored segment is under the cursor.
             fig.add_trace(
                 go.Scatter(
-                    x=hist.index, y=hist["value_eur"],
+                    x=hist.index, y=hist["value"],
                     line=dict(width=0), opacity=0, showlegend=False,
-                    customdata=customdata,
-                    hovertemplate=tr("portfolio.hist_hover_tmpl"),
+                    meta="history", customdata=customdata,
+                    # Plotly's own %{...} fields make str.format choke, so the
+                    # currency slot is substituted directly rather than through
+                    # tr()'s kwargs.
+                    hovertemplate=tr("portfolio.hist_hover_tmpl").replace(
+                        "{sym}", REPORT_SYM
+                    ),
                 )
             )
             fig.update_layout(
@@ -560,6 +716,8 @@ def _history_section() -> None:
                 # DS mobile chart spec: ~3 date labels on a phone.
                 fig.update_xaxes(nticks=3)
             show_chart(fig)
+            if not _MOBILE:
+                _yfit_slot(st, hist)
             notes = [tr("portfolio.hist_note_injected")]
             if missing:
                 notes.append(
@@ -618,7 +776,7 @@ if tab_risk.open:
                 twr = None
                 try:
                     hist, twr, _ = ledger_history(
-                        (len(txs), txs[-1].date, date.today()), DB
+                        (len(txs), txs[-1].date, date.today()), DB, REPORT_CCY
                     )
                 except (YFRateLimitError, URLError) as exc:
                     notices.data_toast(exc)
@@ -629,7 +787,7 @@ if tab_risk.open:
                     twr_win = twr[twr.index >= win_start]
                     mwr = (
                         money_weighted_return(
-                            hist["value_eur"], flow_series(txs), start=win_start
+                            hist["value"], flow_series(txs), start=win_start
                         )
                         if not hist.empty
                         else float("nan")
@@ -653,7 +811,16 @@ if tab_risk.open:
                              None,
                              tr("portfolio.twr_dd_help")),
                         ]))
-                        st.caption(tr("portfolio.real_perf_note"))
+                        # Flow days the value path can't price (an unrecorded
+                        # split, say) are excluded rather than left to wreck
+                        # every figure above — say which ones.
+                        perf_note = [tr("portfolio.real_perf_note")]
+                        if skipped := twr.attrs.get("dropped_days"):
+                            perf_note.append(
+                                tr("portfolio.twr_note_skipped",
+                                   days=", ".join(str(d.date()) for d in skipped))
+                            )
+                        st.caption(" ".join(perf_note))
 
             # ---- Current basket risk: today's holdings backtested at fixed
             # EUR weights over the window — a risk profile of what you hold
@@ -667,7 +834,7 @@ if tab_risk.open:
                 # report to another whose ticker tuple matches.
                 @st.cache_data(ttl=3600, show_spinner=False)
                 def _report(period: str, tickers: tuple[str, ...], db: str, mtime: float):
-                    pos = ledger_state(db, mtime)[1]
+                    pos = ledger_state(db, mtime, REPORT_CCY)[1]
                     held = [p for p in pos if p.ticker in tickers]
                     holds = holdings_from_positions(held)
                     return analyze(period=period, holdings=holds)
@@ -698,10 +865,10 @@ if tab_risk.open:
                         rep.returns = _since(rep.returns)
                         rep.bench_returns = {
                             b: _since(r) for b, r in rep.bench_returns.items()}
-                    # Put weights on an EUR footing, then rebuild the portfolio
-                    # return series.
-                    rep.weights = market_value_weights_eur(
-                        positions, rep.prices, rep.meta)
+                    # Put weights on one currency's footing, then rebuild the
+                    # portfolio return series.
+                    rep.weights = market_value_weights_base(
+                        positions, rep.prices, rep.meta, REPORT_CCY)
                     rep.port_returns = portfolio_returns(rep.returns, rep.weights)
 
                     with risk_kpis.container():
@@ -733,14 +900,27 @@ if tab_risk.open:
             if rep is not None:
                 with st.container(border=True):
                     st.subheader(tr("portfolio.allocation"))
-                    cols = st.columns(3)
-                    for col, key, title in zip(
-                        cols, ("sector", "country", "currency"),
-                        (tr("portfolio.alloc_sector"), tr("portfolio.alloc_geography"),
-                         tr("portfolio.alloc_currency")),
-                        strict=True,
-                    ):
-                        alloc = rep.allocation(key)
+                    cells = [
+                        ("sector", tr("portfolio.alloc_sector")),
+                        ("country", tr("portfolio.alloc_geography")),
+                        ("currency", tr("portfolio.alloc_currency")),
+                    ]
+                    # Custody joins the metadata donuts only when the book
+                    # actually spans brokers: a single-broker 100% donut says
+                    # nothing and would take a quarter of the row for it. The
+                    # split reuses rep.weights (EUR market value), so it needs
+                    # no fetch of its own — see custody.broker_weights.
+                    by_broker = custody.broker_weights(
+                        custody_map(DB, db_mtime(DB), REPORT_CCY), rep.weights)
+                    if len(by_broker) > 1:
+                        cells.append(("broker", tr("portfolio.alloc_broker")))
+                    cols = st.columns(len(cells))
+                    for col, (key, title) in zip(cols, cells, strict=True):
+                        alloc = (
+                            pd.Series({broker_name(b): w
+                                       for b, w in by_broker.items()})
+                            if key == "broker" else rep.allocation(key)
+                        )
                         if alloc.empty:
                             col.caption(tr("portfolio.no_alloc_data", kind=title.lower()))
                             continue
@@ -749,6 +929,8 @@ if tab_risk.open:
                                 _geography_cell(alloc, title)
                             continue
                         show_chart(_alloc_pie(alloc, title), container=col)
+                    if len(by_broker) > 1:
+                        st.caption(tr("portfolio.alloc_broker_caption"))
 
                 # Same full-span history the Positions tab builds, and cold
                 # whenever the reader opens this tab first — so the card holds
@@ -759,7 +941,7 @@ if tab_risk.open:
                 )
                 try:
                     _, twr, twr_missing = ledger_history(
-                        (len(txs), txs[-1].date, date.today()), DB
+                        (len(txs), txs[-1].date, date.today()), DB, REPORT_CCY
                     )
                 except (YFRateLimitError, URLError) as exc:
                     notices.data_toast(exc)
@@ -819,6 +1001,11 @@ if tab_risk.open:
                                 tr("portfolio.twr_note_missing",
                                    tickers=", ".join(twr_missing))
                             )
+                        if skipped := twr.attrs.get("dropped_days"):
+                            notes.append(
+                                tr("portfolio.twr_note_skipped",
+                                   days=", ".join(str(d.date()) for d in skipped))
+                            )
                         st.caption(" ".join(notes))
 
                 with st.container(border=True):
@@ -843,7 +1030,28 @@ if tab_risk.open:
 # --------------------------------------------------------------- Realized & tax
 if tab_tax.open:
     with tab_tax:
-        sell_years = sorted({int(s.sell_date[:4]) for s in realized}, reverse=True)
+        # Everything in this tab follows the Profile's tax residence: the
+        # rules, the reporting currency and the wording all come from
+        # stocks.web.tax_ui / stocks.portfolio.tax, so adding a country never
+        # edits this page. The ledger is replayed *at* the jurisdiction's
+        # currency rather than converted afterwards — a US filer's basis is
+        # USD at each trade date, which is two rates, not one.
+        _jur = tax_ui.jurisdiction()
+        _code, _ccy = _jur.code, _jur.currency
+        # Germany exempts 30% of a fund's result, so the settings carry which
+        # holdings are funds (from the learned quoteType cache, no fetch).
+        _tset = tax_ui.with_funds(
+            tax_ui.settings(), {t.ticker for t in txs}
+        )
+        _sym = tax_ui.symbol(_ccy)
+        # The jurisdiction picks the matching rule as well as the currency:
+        # a UK replay pools shares, so its parcels are not the FIFO ones the
+        # rest of the page shows.
+        _, _, tax_realized = ledger_state(
+            DB, db_mtime(DB), _ccy, _jur.matching)
+        # Tax years, not calendar years — the UK's open on 6 April.
+        sell_years = sorted(
+            {_jur.tax_year_of(s.sell_date) for s in tax_realized}, reverse=True)
         if not sell_years:
             st.caption(tr("portfolio.no_realized_sales"))
         else:
@@ -852,115 +1060,181 @@ if tab_tax.open:
                 if t.action == "buy":
                     buy_dates[t.ticker].append(t.date)
             year_ty = {
-                y: fiscal_year(realized, y, buy_dates)
+                y: _jur.fiscal_year(tax_realized, y, buy_dates, _tset)
                 for y in sorted(sell_years)
             }
 
-            # Year-by-year picture first: what each ejercicio adds to the
-            # savings base. Gains stack up, deductible losses (and losses
-            # recovered from earlier 2-month deferrals) stack down, and the
-            # diamond marks the resulting net base — the figure the brackets
-            # below tax.
-            if len(year_ty) > 1:
+            # Period picture first: what each ejercicio adds to the savings
+            # base. Gains stack up, deductible losses (and losses recovered
+            # from earlier 2-month deferrals) stack down, and the diamond
+            # marks the resulting net base — the figure the brackets below
+            # tax. The monthly view is the same maths over ISO month
+            # prefixes: a breakdown of when the result was booked, not a
+            # taxable base of its own (IRPF nets over the ejercicio).
+            sell_months = sorted({s.sell_date[:7] for s in tax_realized})
+            if len(year_ty) > 1 or len(sell_months) > 1:
                 with st.container(border=True):
-                    st.subheader(tr("portfolio.realized_by_year"))
-                    yrs = list(year_ty)
+                    YEAR, MONTH = "year", "month"
+                    # Columns let the control sit top-right while the title —
+                    # which depends on it — is written afterwards.
+                    head, ctl = st.columns(
+                        [3, 2], vertical_alignment="bottom")
+                    with ctl:
+                        gran = st.segmented_control(
+                            tr("portfolio.realized_granularity"),
+                            options=(YEAR, MONTH),
+                            default=YEAR if len(year_ty) > 1 else MONTH,
+                            format_func=lambda v: (
+                                tr("portfolio.granularity_year") if v == YEAR
+                                else tr("portfolio.granularity_month")
+                            ),
+                            key="tax_granularity",
+                            label_visibility="collapsed",
+                            required=True,
+                        )
+                    with head:
+                        st.subheader(tr(
+                            "portfolio.realized_by_year" if gran == YEAR
+                            else "portfolio.realized_by_month"))
+                    if gran == YEAR:
+                        period_ty = year_ty
+                    else:
+                        # Every month between the first and last sale, quiet
+                        # ones included (see month_range).
+                        period_ty = {
+                            m: _jur.fiscal_period(
+                                tax_realized, m, buy_dates, _tset)
+                            for m in month_range(
+                                sell_months[0], sell_months[-1])
+                        }
+                    keys = list(period_ty)
                     fig = go.Figure()
                     def _hover(name: str) -> str:
                         # Unified hover drops the trace name unless it is baked
                         # into the template (same trick as the TWR chart).
-                        return f"{name}  <b>€%{{y:,.0f}}</b><extra></extra>"
+                        return f"{name}  <b>{_sym}%{{y:,.0f}}</b><extra></extra>"
 
-                    gains_lbl = tr("portfolio.chart_gains")
-                    losses_lbl = tr("portfolio.chart_losses")
-                    recovered_lbl = tr("portfolio.chart_recovered")
-                    net_lbl = tr("portfolio.chart_net")
+                    gains_lbl = tax_ui.t(_code, "chart_gains")
+                    losses_lbl = tax_ui.t(_code, "chart_losses")
+                    recovered_lbl = tax_ui.t(_code, "chart_recovered")
+                    net_lbl = tax_ui.t(_code, "chart_net")
                     fig.add_bar(
-                        name=gains_lbl, x=yrs,
-                        y=[year_ty[y].realized_gain_eur for y in yrs],
+                        name=gains_lbl, x=keys,
+                        y=[period_ty[k].realized_gain for k in keys],
                         marker_color=CANDLE_UP,
                         hovertemplate=_hover(gains_lbl),
                     )
                     fig.add_bar(
-                        name=losses_lbl, x=yrs,
-                        y=[-year_ty[y].deductible_loss_eur for y in yrs],
+                        name=losses_lbl, x=keys,
+                        y=[-period_ty[k].deductible_loss for k in keys],
                         marker_color=CANDLE_DOWN,
                         hovertemplate=_hover(losses_lbl),
                     )
-                    if any(t.recovered_loss_eur for t in year_ty.values()):
+                    if any(t.recovered_loss for t in period_ty.values()):
                         fig.add_bar(
-                            name=recovered_lbl, x=yrs,
-                            y=[-year_ty[y].recovered_loss_eur for y in yrs],
+                            name=recovered_lbl, x=keys,
+                            y=[-period_ty[k].recovered_loss for k in keys],
                             marker_color=WARN_ORANGE,
                             hovertemplate=_hover(recovered_lbl),
                         )
                     fig.add_scatter(
-                        name=net_lbl, x=yrs,
-                        y=[year_ty[y].net_taxable_eur for y in yrs],
+                        name=net_lbl, x=keys,
+                        y=[period_ty[k].net_taxable for k in keys],
                         mode="markers",
                         marker=dict(symbol="diamond", size=10, color=INFO_COLOR),
                         hovertemplate=_hover(net_lbl),
                     )
-                    # One hover box per ejercicio: the year as header and every
-                    # component named inside, so a lone "€7,699" can't float
-                    # ambiguously between bars.
+                    # One hover box per period: the year (or month) as header
+                    # and every component named inside, so a lone "7,699"
+                    # can't float ambiguously between bars.
                     fig.update_layout(
                         **chart_layout(top_legend=True),
                         barmode="relative",
                         hovermode="x unified",
                     )
-                    fig.update_xaxes(type="category")
-                    show_chart(fig)
-                    st.caption(tr("portfolio.realized_by_year_caption"))
+                    # Category axis: the periods are labels, not a numeric
+                    # scale. A long monthly run gets slanted labels and every
+                    # other tick so "2025-01" stops colliding with its
+                    # neighbour on a narrow screen.
+                    fig.update_xaxes(
+                        type="category",
+                        tickangle=-45 if gran == MONTH else 0,
+                        dtick=2 if gran == MONTH and len(keys) > 14 else None,
+                    )
+                    show_chart(fig, key="realized_by_period")
+                    st.caption(tax_ui.t(_code, "realized_by_year_caption"))
+                    if gran == MONTH:
+                        st.caption(tax_ui.t(_code, "realized_by_month_caption"))
 
             with st.container(border=True):
                 # Few ejercicios read faster as buttons than as a dropdown.
                 if len(sell_years) <= 3:
                     year = st.segmented_control(
-                        tr("portfolio.fiscal_year"), sorted(sell_years),
+                        tax_ui.t(_code, "fiscal_year"), sorted(sell_years),
                         default=max(sell_years), key="tax_year",
+                        format_func=_jur.year_label,
                     ) or max(sell_years)
                 else:
                     year = st.selectbox(
-                        tr("portfolio.fiscal_year"), sell_years, key="tax_year")
+                        tax_ui.t(_code, "fiscal_year"), sell_years,
+                        key="tax_year", format_func=_jur.year_label)
                 ty = year_ty[year]
 
-                st.subheader(tr("portfolio.irpf_savings_base", year=year))
-                st.caption(tr("portfolio.irpf_caption"))
+                st.subheader(
+                    tax_ui.t(_code, "tax_header", year=_jur.year_label(year))
+                )
+                st.caption(tax_ui.t(_code, "tax_caption"))
+                # The tiles are whatever the jurisdiction thinks matter: Spain
+                # has one base, the US adds its short- and long-term nets.
                 st.html(kpi_grid_html([
-                    (tr("portfolio.net_taxable"), f"€{ty.net_taxable_eur:,.0f}",
-                     None, tr("portfolio.net_taxable_help")),
-                    (tr("portfolio.estimated_tax"), f"€{ty.estimated_tax_eur:,.0f}",
-                     None, tr("portfolio.estimated_tax_help")),
-                    (tr("portfolio.carryforward_loss"),
-                     f"€{ty.carryforward_loss_eur:,.0f}",
-                     None, tr("portfolio.carryforward_loss_help")),
+                    (
+                        tax_ui.t(_code, k.key),
+                        tax_ui.money(k.value, _ccy),
+                        None,
+                        tax_ui.t(_code, k.help_key),
+                    )
+                    for k in ty.kpis()
                 ]))
                 summary = tr(
                     "portfolio.realized_summary",
-                    gain=f"{ty.realized_gain_eur:,.0f}",
-                    loss=f"{ty.deductible_loss_eur:,.0f}",
+                    gain=tax_ui.money(ty.realized_gain, _ccy),
+                    loss=tax_ui.money(ty.deductible_loss, _ccy),
                 )
-                if ty.deferred_loss_eur:
-                    summary += tr(
-                        "portfolio.deferred_note", deferred=f"{ty.deferred_loss_eur:,.0f}"
-                    )
-                if ty.recovered_loss_eur:
-                    summary += tr(
-                        "portfolio.recovered_note",
-                        recovered=f"{ty.recovered_loss_eur:,.0f}",
-                    )
+                for _note in ty.notes():
+                    summary += tax_ui.t(_code, _note.key, **_note.kwargs)
                 st.caption(summary)
 
                 rows = [
                     {
                         "ticker": s.ticker, "buy": s.buy_date, "sell": s.sell_date,
-                        "qty": s.quantity, "cost_eur": s.cost_eur,
-                        "proceeds_eur": s.proceeds_eur, "gain_eur": s.gain_eur,
+                        # Holding period only where the rate turns on it (US
+                        # short vs long term); Spain taxes both the same.
+                        **(
+                            {
+                                "term": tax_ui.t(
+                                    _code,
+                                    "term_long"
+                                    if _jur.is_long_term(
+                                        s.buy_date, s.sell_date)
+                                    else "term_short",
+                                )
+                            }
+                            if _jur.splits_holding_period
+                            else {}
+                        ),
+                        # Under pooling a "cost" can be an average, so the rule
+                        # that produced it belongs next to it.
+                        **(
+                            {"matched": tax_ui.t(_code, f"match_{s.matched}")}
+                            if _jur.pools_shares
+                            else {}
+                        ),
+                        "qty": s.quantity, "cost": s.cost,
+                        "proceeds": s.proceeds, "gain": s.gain,
                         # Return on the cost of the shares this sale consumed —
                         # the pill beside the symbol on phones, merged into the
                         # gain cell on desktop.
-                        "gain_pct": (s.gain_eur / s.cost_eur) if s.cost_eur else None,
+                        "gain_pct": (s.gain / s.cost) if s.cost else None,
                     }
                     for s in ty.sales
                 ]
@@ -968,20 +1242,22 @@ if tab_tax.open:
                     sales_df = pd.DataFrame(rows)
                     sales_fmt = {
                         "qty": "{:,.4f}",
-                        "cost_eur": "€{:,.2f}",
-                        "proceeds_eur": "€{:,.2f}",
-                        "gain_eur": "€{:+,.2f}",
+                        "cost": f"{_sym}{{:,.2f}}",
+                        "proceeds": f"{_sym}{{:,.2f}}",
+                        "gain": f"{_sym}{{:+,.2f}}",
                         "gain_pct": "{:+.1%}",
                     }
-                    sales_signed = ("gain_eur", "gain_pct")
+                    sales_signed = ("gain", "gain_pct")
                     sales_labels = {
                         "ticker": tr("portfolio.col_position"),
                         "buy": tr("portfolio.col_bought"),
                         "sell": tr("portfolio.col_sold"),
+                        "term": tax_ui.t(_code, "col_term"),
+                        "matched": tax_ui.t(_code, "col_matched"),
                         "qty": tr("portfolio.col_shares"),
-                        "cost_eur": tr("portfolio.cost_basis"),
-                        "proceeds_eur": tr("portfolio.col_proceeds"),
-                        "gain_eur": tr("portfolio.col_gain"),
+                        "cost": tr("portfolio.cost_basis"),
+                        "proceeds": tr("portfolio.col_proceeds"),
+                        "gain": tr("portfolio.col_gain"),
                     }
                     # Seven columns pan off a 390px screen, so narrow
                     # viewports get the same dense rows as the Positions tab:
@@ -991,13 +1267,18 @@ if tab_tax.open:
                     # three items long). Both renderings ship; a 640px media
                     # query picks by live width, so a resized desktop window
                     # and desktop-UA tablets adapt too — not only "Mobi" UAs.
+                    _left_cols = (
+                        ("buy", "sell")
+                        + (("term",) if _jur.splits_holding_period else ())
+                        + (("matched",) if _jur.pools_shares else ())
+                    )
                     st.html(responsive_ticker_table_html(
                         sales_df, fmt=sales_fmt, signed=sales_signed,
                         labels=sales_labels,
-                        left_cols=("buy", "sell"), sortable="realized",
-                        pairs=(("gain_eur", "gain_pct"),),
+                        left_cols=_left_cols, sortable="realized",
+                        pairs=(("gain", "gain_pct"),),
                         mobile={
-                            "value": "proceeds_eur", "delta": "gain_eur",
+                            "value": "proceeds", "delta": "gain",
                             "badge": "gain_pct", "wrap": True,
                             "sub": ("buy", "sell", "qty"),
                             "sub_labels": {
@@ -1012,36 +1293,38 @@ if tab_tax.open:
                         with st.expander(tr("portfolio.all_columns_realized")):
                             st.html(ticker_table_html(
                                 sales_df, fmt=sales_fmt, signed=sales_signed,
-                                left_cols=("buy", "sell"),
+                                left_cols=_left_cols,
                                 sortable="realized_all",
-                                pairs=(("gain_eur", "gain_pct"),),
+                                pairs=(("gain", "gain_pct"),),
                                 labels=sales_labels))
 
                 # Mark to market from the cached positions table — shares the
                 # Positions tab's price burst; unpriced names fall back to cost.
                 try:
-                    ptbl = positions_table(DB, db_mtime(DB))
+                    ptbl = positions_table(DB, db_mtime(DB), REPORT_CCY)
                 except (YFRateLimitError, URLError) as exc:
                     notices.data_toast(exc)  # else-block skipped: no breakdown
                 except Exception:
                     st.warning(tr("portfolio.data_unavailable"))
                 else:
                     foreign = (
-                        float(ptbl["value_eur"].fillna(ptbl["cost_eur"]).sum())
+                        float(ptbl["value"].fillna(ptbl["cost"]).sum())
                         if not ptbl.empty
                         else 0.0
                     )
-                    # Build the message web-side from the flag's fields (tax_es
-                    # stays English for the CLI); localize the ≥/< 50k branch here.
-                    _flag = modelo_720_flag(foreign)
-                    _msg = tr(
-                        "portfolio.modelo_720_reportable"
-                        if _flag.reportable
-                        else "portfolio.modelo_720_ok",
-                        val=f"{_flag.total_value_eur:,.0f}",
-                    )
-                    st.caption(tr("portfolio.modelo_720", message=_msg))
-                st.caption(tr("portfolio.planning_aid"))
+                    # The priced table is EUR and the thresholds are in the
+                    # jurisdiction's own currency, so a non-EUR filer's total
+                    # converts at spot: this is a threshold check, not a basis
+                    # (FBAR's year-end Treasury rate isn't worth a second
+                    # replay for a line that says "may apply").
+                    _fx = 1.0 if _ccy == "EUR" else (eur_spot(_ccy) or 0.0)
+                    if _fx:
+                        for _flag in _jur.reporting_flags(
+                            foreign * _fx, _tset
+                        ):
+                            st.caption(
+                                tax_ui.flag_caption(_code, _flag, _ccy))
+                st.caption(tax_ui.t(_code, "planning_aid"))
 
 # ------------------------------------------------------------------- Dividends
 if tab_div.open:
@@ -1053,10 +1336,10 @@ if tab_div.open:
             with st.container(border=True):
                 rows = [
                     {
-                        "year": yr, "gross_eur": d.gross_eur,
-                        "withheld_eur": d.withheld_eur,
-                        "net_eur": d.net_eur, "creditable_eur": d.creditable_eur,
-                        "reclaimable_eur": d.reclaimable_eur,
+                        "year": yr, "gross": d.gross,
+                        "withheld": d.withheld,
+                        "net": d.net, "creditable": d.creditable,
+                        "reclaimable": d.reclaimable,
                     }
                     for yr, d in sorted(years.items())
                 ]
@@ -1065,19 +1348,19 @@ if tab_div.open:
                     .set_index("year")
                     .rename_axis(tr("portfolio.col_year"))
                     .rename(columns={
-                        "gross_eur": tr("portfolio.col_gross"),
-                        "withheld_eur": tr("portfolio.col_withheld"),
-                        "net_eur": tr("portfolio.col_net"),
-                        "creditable_eur": tr("portfolio.col_creditable"),
-                        "reclaimable_eur": tr("portfolio.col_reclaimable"),
+                        "gross": tr("portfolio.col_gross"),
+                        "withheld": tr("portfolio.col_withheld"),
+                        "net": tr("portfolio.col_net"),
+                        "creditable": tr("portfolio.col_creditable"),
+                        "reclaimable": tr("portfolio.col_reclaimable"),
                     })
                 )
                 # Five money columns pan off a phone: there each year becomes a
-                # card with one "label — €amount" line per column.
+                # card with one "label — amount" line per column.
                 data_table(
                     div_frame,
                     index_title=True,
-                    fmt=dict.fromkeys(div_frame.columns, "€{:,.0f}"),
+                    fmt=dict.fromkeys(div_frame.columns, f"{REPORT_SYM}{{:,.0f}}"),
                 )
                 st.caption(tr("portfolio.dividends_caption"))
 
@@ -1104,61 +1387,61 @@ if tab_fees.open:
 
             with st.container(border=True):
                 st.subheader(tr("portfolio.fees_title"))
-                volume = sum(b.volume_eur for b in brokers.values())
-                explicit = sum(b.explicit_eur for b in brokers.values())
-                spread = sum(s.spread_eur for s in spreads.values())
+                volume = sum(b.volume for b in brokers.values())
+                explicit = sum(b.explicit for b in brokers.values())
+                spread = sum(s.spread for s in spreads.values())
                 total = explicit + spread
                 st.html(kpi_grid_html([
-                    (tr("portfolio.fees_explicit"), f"€{explicit:,.2f}",
+                    (tr("portfolio.fees_explicit"), f"{REPORT_SYM}{explicit:,.2f}",
                      None, tr("portfolio.fees_explicit_help")),
                     (tr("portfolio.fees_spread"),
-                     f"€{spread:,.2f}" if bars_ok else tr("portfolio.na"),
+                     f"{REPORT_SYM}{spread:,.2f}" if bars_ok else tr("portfolio.na"),
                      None, tr("portfolio.fees_spread_help")),
                     (tr("portfolio.fees_pct_volume"),
                      f"{total / volume:.2%}" if volume else tr("portfolio.na"),
                      None, tr("portfolio.fees_pct_volume_help")),
                 ]))
 
-                any_other = any(b.other_fees_eur for b in brokers.values())
+                any_other = any(b.other_fees for b in brokers.values())
                 rows = []
-                for name in sorted(brokers, key=lambda n: -brokers[n].volume_eur):
+                for name in sorted(brokers, key=lambda n: -brokers[n].volume):
                     b, s = brokers[name], spreads.get(name)
                     row = {
-                        "broker": name,
+                        "broker": broker_name(name),
                         "trades": b.trades,
-                        "volume_eur": b.volume_eur,
-                        "commission_eur": b.commission_eur,
+                        "volume": b.volume,
+                        "commission": b.commission,
                     }
                     if any_other:
-                        row["other_eur"] = b.other_fees_eur
+                        row["other"] = b.other_fees
                     if bars_ok:
-                        row["spread_eur"] = s.spread_eur if s else 0.0
+                        row["spread"] = s.spread if s else 0.0
                         row["spread_bps"] = s.spread_bps if s else 0.0
-                    row["total_eur"] = b.explicit_eur + (s.spread_eur if s else 0.0)
+                    row["total"] = b.explicit + (s.spread if s else 0.0)
                     row["cost_pct"] = (
-                        row["total_eur"] / b.volume_eur if b.volume_eur else None
+                        row["total"] / b.volume if b.volume else None
                     )
                     rows.append(row)
                 fee_frame = pd.DataFrame(rows).set_index("broker").rename_axis(
                     tr("portfolio.col_broker"))
                 fee_fmt = {
                     tr("portfolio.col_trades"): "{:,.0f}",
-                    tr("portfolio.col_volume"): "€{:,.0f}",
-                    tr("portfolio.col_commissions"): "€{:,.2f}",
-                    tr("portfolio.col_other_fees"): "€{:,.2f}",
-                    tr("portfolio.col_spread"): "€{:,.2f}",
+                    tr("portfolio.col_volume"): f"{REPORT_SYM}{{:,.0f}}",
+                    tr("portfolio.col_commissions"): f"{REPORT_SYM}{{:,.2f}}",
+                    tr("portfolio.col_other_fees"): f"{REPORT_SYM}{{:,.2f}}",
+                    tr("portfolio.col_spread"): f"{REPORT_SYM}{{:,.2f}}",
                     tr("portfolio.col_spread_bps"): "{:,.1f}",
-                    tr("portfolio.col_total_cost"): "€{:,.2f}",
+                    tr("portfolio.col_total_cost"): f"{REPORT_SYM}{{:,.2f}}",
                     tr("portfolio.col_cost_pct"): "{:.2%}",
                 }
                 fee_frame = fee_frame.rename(columns={
                     "trades": tr("portfolio.col_trades"),
-                    "volume_eur": tr("portfolio.col_volume"),
-                    "commission_eur": tr("portfolio.col_commissions"),
-                    "other_eur": tr("portfolio.col_other_fees"),
-                    "spread_eur": tr("portfolio.col_spread"),
+                    "volume": tr("portfolio.col_volume"),
+                    "commission": tr("portfolio.col_commissions"),
+                    "other": tr("portfolio.col_other_fees"),
+                    "spread": tr("portfolio.col_spread"),
                     "spread_bps": tr("portfolio.col_spread_bps"),
-                    "total_eur": tr("portfolio.col_total_cost"),
+                    "total": tr("portfolio.col_total_cost"),
                     "cost_pct": tr("portfolio.col_cost_pct"),
                 })
                 # Many money columns pan off a phone: there each broker becomes
@@ -1175,8 +1458,10 @@ if tab_fees.open:
                         st.caption(tr("portfolio.fees_spread_coverage",
                                       measured=measured,
                                       total=measured + skipped))
-                    outside = sum(s.outside_range_eur for s in spreads.values())
+                    outside = sum(s.outside_range for s in spreads.values())
                     if outside > 0.005:
-                        st.caption(tr("portfolio.fees_outside_range",
-                                      val=f"{outside:,.2f}"))
+                        st.caption(tr(
+                            "portfolio.fees_outside_range",
+                            val=f"{REPORT_SYM}{outside:,.2f}",
+                        ))
                 st.caption(tr("portfolio.fees_caption"))

@@ -71,13 +71,13 @@ def test_import_csv(tmp_path):
 
 def test_fifo_cost_basis_eur():
     txs = [Transaction("2025-01-02", "AAPL", "buy", 10, 100, "USD", 10)]
-    positions, realized = build(txs, to_eur=flat_fx)
+    positions, realized = build(txs, to_base=flat_fx)
     assert not realized
     p = positions[0]
     # native cost = 10*100 + 10 fee = 1010; EUR at 0.9 = 909
     assert p.cost_native == pytest.approx(1010)
-    assert p.cost_eur == pytest.approx(909)
-    assert p.avg_cost_eur == pytest.approx(90.9)
+    assert p.cost == pytest.approx(909)
+    assert p.avg_cost == pytest.approx(90.9)
 
 
 def test_fifo_partial_sell_realized_gain():
@@ -85,16 +85,16 @@ def test_fifo_partial_sell_realized_gain():
         Transaction("2025-01-02", "AAPL", "buy", 10, 100, "USD", 10),
         Transaction("2025-06-01", "AAPL", "sell", 5, 120, "USD", 0),
     ]
-    positions, realized = build(txs, to_eur=flat_fx)
+    positions, realized = build(txs, to_base=flat_fx)
     assert len(realized) == 1
     s = realized[0]
     # cost = 909 * 5/10 = 454.5 ; proceeds = 5 * 120 * 0.9 = 540
-    assert s.cost_eur == pytest.approx(454.5)
-    assert s.proceeds_eur == pytest.approx(540)
-    assert s.gain_eur == pytest.approx(85.5)
+    assert s.cost == pytest.approx(454.5)
+    assert s.proceeds == pytest.approx(540)
+    assert s.gain == pytest.approx(85.5)
     # 5 shares remain, half the basis
     assert positions[0].quantity == pytest.approx(5)
-    assert positions[0].cost_eur == pytest.approx(454.5)
+    assert positions[0].cost == pytest.approx(454.5)
 
 
 def test_fifo_spans_multiple_lots():
@@ -103,7 +103,7 @@ def test_fifo_spans_multiple_lots():
         Transaction("2025-02-02", "AAPL", "buy", 5, 200, "USD", 0),
         Transaction("2025-06-01", "AAPL", "sell", 8, 300, "USD", 0),
     ]
-    positions, realized = build(txs, to_eur=flat_fx)
+    positions, realized = build(txs, to_base=flat_fx)
     # FIFO: 5 @100 then 3 @200 consumed
     assert len(realized) == 2
     assert realized[0].quantity == pytest.approx(5)
@@ -116,10 +116,10 @@ def test_split_scales_quantity_keeps_basis():
         Transaction("2025-01-02", "AAPL", "buy", 10, 100, "USD", 0),
         Transaction("2025-03-01", "AAPL", "split", 4),  # 4:1
     ]
-    positions, _ = build(txs, to_eur=flat_fx)
+    positions, _ = build(txs, to_base=flat_fx)
     assert positions[0].quantity == pytest.approx(40)
-    assert positions[0].cost_eur == pytest.approx(900)  # unchanged
-    assert positions[0].avg_cost_eur == pytest.approx(22.5)
+    assert positions[0].cost == pytest.approx(900)  # unchanged
+    assert positions[0].avg_cost == pytest.approx(22.5)
 
 
 def test_oversell_raises():
@@ -128,7 +128,7 @@ def test_oversell_raises():
         Transaction("2025-06-01", "AAPL", "sell", 10, 120, "USD"),
     ]
     with pytest.raises(ValueError, match="exceeds held"):
-        build(txs, to_eur=flat_fx)
+        build(txs, to_base=flat_fx)
 
 
 # --- dividends ---
@@ -138,22 +138,22 @@ def test_dividends_by_year():
         Transaction("2025-03-10", "AAPL", "dividend", 0, 100, "USD", 15),  # US 15% WHT
         Transaction("2025-09-10", "AAPL", "dividend", 0, 100, "USD", 15),
     ]
-    years = dividends.by_year(txs, to_eur=flat_fx)
+    years = dividends.by_year(txs, to_base=flat_fx)
     d = years[2025]
-    assert d.gross_eur == pytest.approx(180)  # 200 * 0.9
-    assert d.withheld_eur == pytest.approx(27)  # 30 * 0.9
-    assert d.net_eur == pytest.approx(153)
+    assert d.gross == pytest.approx(180)  # 200 * 0.9
+    assert d.withheld == pytest.approx(27)  # 30 * 0.9
+    assert d.net == pytest.approx(153)
     # withheld exactly at 15% treaty cap -> fully creditable, nothing reclaimable
-    assert d.creditable_eur == pytest.approx(27)
-    assert d.reclaimable_eur == pytest.approx(0)
+    assert d.creditable == pytest.approx(27)
+    assert d.reclaimable == pytest.approx(0)
 
 
 def test_dividend_reclaimable_above_treaty_cap():
     # France withholds 25% domestically; treaty cap 15% -> 10% reclaimable
     txs = [Transaction("2025-05-01", "RMS.PA", "dividend", 0, 100, "EUR", 25)]
-    d = dividends.by_year(txs, to_eur=flat_fx)[2025]
-    assert d.creditable_eur == pytest.approx(15)
-    assert d.reclaimable_eur == pytest.approx(10)
+    d = dividends.by_year(txs, to_base=flat_fx)[2025]
+    assert d.creditable == pytest.approx(15)
+    assert d.reclaimable == pytest.approx(10)
 
 
 def test_new_db_is_stamped_with_the_current_schema_version(tmp_path):

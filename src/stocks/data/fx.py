@@ -22,9 +22,10 @@ HISTORICAL_URL = "https://api.frankfurter.dev/v1/{date}?base={base}&symbols={quo
 RANGE_URL = "https://api.frankfurter.dev/v1/{start}..{end}?base={base}&symbols={quote}"
 FX_CACHE = DATA_DIR / "fx_history.json"
 
-# (amount, currency, iso_date) -> EUR. The injectable-converter signature used
-# by positions / dividends / portfolio so tests run without network.
-ToEur = Callable[[float, str, str], float]
+# (amount, currency, iso_date) -> reporting currency. The injectable-converter
+# signature used by positions / dividends / portfolio so tests run without
+# network — `converter()` builds one bound to a base.
+ToBase = Callable[[float, str, str], float]
 
 
 # Spot rates memoized in-process: sizing a book calls spot() once per
@@ -161,8 +162,30 @@ def prefetch(pairs: Iterable[tuple[str, str]], quote: str = "EUR") -> None:
         _save_cache(cache)
 
 
-def to_eur(amount: float, currency: str, day: str | _date) -> float:
-    """Convert `amount` of `currency` to EUR at the ECB rate for `day`."""
-    if currency.upper() == "EUR":
+def to_base(
+    amount: float, currency: str, day: str | _date, base: str = "EUR"
+) -> float:
+    """Convert `amount` of `currency` to `base` at the rate for `day`.
+
+    The reporting currency is a tax-jurisdiction property, not a constant: a
+    Spanish filer's basis is EUR at the ECB rate for the trade date, a US
+    filer's is USD at that date's rate. Frankfurter derives non-EUR bases from
+    the same ECB series, so the pair is one request either way.
+    """
+    if currency.upper() == base.upper():
         return amount
-    return amount * rate_on(day, currency, "EUR")
+    return amount * rate_on(day, currency, base)
+
+
+def converter(base: str = "EUR") -> ToBase:
+    """A `to_base`-bound converter with the injectable `ToBase` signature.
+
+    Every ledger replay goes through one of these: the reporting currency is a
+    preference (and, for the tax figures, a jurisdiction property), so the
+    conversion has to be a parameter rather than a module-level function.
+    """
+
+    def convert(amount: float, currency: str, day: str | _date) -> float:
+        return to_base(amount, currency, day, base)
+
+    return convert

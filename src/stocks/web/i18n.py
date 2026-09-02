@@ -120,6 +120,16 @@ def translate(key: str, lang: str, /, **kwargs) -> str:
     return s.format(**kwargs) if kwargs else s
 
 
+def has(key: str) -> bool:
+    """True when the source (English) catalog defines `key`.
+
+    Lets a caller pick the most specific key it has copy for — the tax tab asks
+    for `portfolio.us_estimated_tax_help` and falls back to the neutral
+    `portfolio.estimated_tax_help` when a jurisdiction ships no override.
+    """
+    return key in _catalog(DEFAULT_LANG)
+
+
 def t(key: str, /, **kwargs) -> str:
     """Translate a key for the run's active language.
 

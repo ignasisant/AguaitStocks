@@ -1,6 +1,6 @@
 """Merged "€ (+%)" table cells — the pair collapse in widgets.ticker_table_html.
 
-The Positions table showed each move twice (day_eur next to day_pct), so the
+The Positions table showed each move twice (day next to day_pct), so the
 desktop grid carried ten columns of which four were the same two numbers. The
 pair merge is what allows one cell per move; these tests pin the parts that
 would silently regress it: the dropped column, the sign colors, the
@@ -27,14 +27,14 @@ from stocks.web.widgets import (
 WEB = Path(__file__).resolve().parents[1] / "src" / "stocks" / "web"
 
 FMT = {
-    "value_eur": "€{:,.0f}",
-    "day_eur": "€{:+,.0f}",
+    "value": "€{:,.0f}",
+    "day": "€{:+,.0f}",
     "day_pct": "{:+.1%}",
-    "pnl_eur": "€{:,.0f}",
+    "pnl": "€{:,.0f}",
     "pnl_pct": "{:+.1%}",
 }
-SIGNED = ("day_eur", "day_pct", "pnl_eur", "pnl_pct")
-PAIRS = (("day_eur", "day_pct"), ("pnl_eur", "pnl_pct"))
+SIGNED = ("day", "day_pct", "pnl", "pnl_pct")
+PAIRS = (("day", "day_pct"), ("pnl", "pnl_pct"))
 
 
 @pytest.fixture(autouse=True)
@@ -47,10 +47,10 @@ def _plain_ticker_cells(monkeypatch):
 def _frame():
     return pd.DataFrame({
         "ticker": ["GOOG", "META", "NVO"],
-        "value_eur": [8372.0, 4436.0, 3511.0],
-        "day_eur": [-97.0, 93.0, 0.0],
+        "value": [8372.0, 4436.0, 3511.0],
+        "day": [-97.0, 93.0, 0.0],
         "day_pct": [-0.011, 0.021, 0.0],
-        "pnl_eur": [2798.0, -288.0, float("nan")],
+        "pnl": [2798.0, -288.0, float("nan")],
         "pnl_pct": [0.502, -0.061, float("nan")],
     })
 
@@ -93,7 +93,7 @@ def test_missing_pct_leaves_plain_text_not_an_empty_pill():
 
 
 def test_off_session_rows_dim_only_the_day_pair():
-    rows = _cells(_table(muted={"GOOG"}, muted_cols=("day_eur", "day_pct")))
+    rows = _cells(_table(muted={"GOOG"}, muted_cols=("day", "day_pct")))
     assert LOSS_COLOR_MUTED in rows[0][2]      # day pair dimmed
     assert UP_COLOR in rows[0][3]              # total P/L keeps full color
     # A live row is untouched by the muting.
@@ -101,15 +101,15 @@ def test_off_session_rows_dim_only_the_day_pair():
 
 
 def test_labels_still_name_the_merged_column():
-    html = _table(labels={"day_eur": "Today", "pnl_eur": "Total P/L"})
+    html = _table(labels={"day": "Today", "pnl": "Total P/L"})
     heads = re.findall(r"<th[^>]*>(.*?)</th>", html)
     assert "Today" in heads and "Total P/L" in heads
-    assert "day_eur" not in heads and "pnl_eur" not in heads
+    assert "day" not in heads and "pnl" not in heads
 
 
 def test_positions_table_ships_translated_headers():
     """The bug that started this: the Positions grid rendered raw frame keys
-    (cost_eur, day_pct) as headers. Every column it feeds the table needs a
+    (cost, day_pct) as headers. Every column it feeds the table needs a
     label, in both catalogs."""
     src = (WEB / "app_pages" / "portfolio.py").read_text()
     keys = set(re.findall(r'tr\("(portfolio\.col_[a-z_]+)"\)', src))
@@ -180,7 +180,7 @@ def test_phone_row_puts_the_badge_next_to_the_symbol(monkeypatch):
         _frame().assign(weight=[0.077, 0.041, 0.032]),
         fmt={**FMT, "weight": "{:.1%}"},
         signed=SIGNED,
-        mobile={"value": "value_eur", "delta": "day_pct",
+        mobile={"value": "value", "delta": "day_pct",
                 "badge": "pnl_pct", "sub": ("weight",)},
     )
     line1 = re.search(r'<div class="agr-l1">(.*?)</div>', html, re.S).group(1)
@@ -196,18 +196,18 @@ def _realized_frame():
         "buy": ["2021-03-04", "2022-01-10"],
         "sell": ["2024-05-06", "2024-08-01"],
         "qty": [12.5, 3.0],
-        "cost_eur": [1000.0, 500.0],
-        "proceeds_eur": [1500.0, 480.0],
-        "gain_eur": [500.0, -20.0],
+        "cost": [1000.0, 500.0],
+        "proceeds": [1500.0, 480.0],
+        "gain": [500.0, -20.0],
         "gain_pct": [0.5, -0.04],
     })
 
 
 REALIZED_FMT = {
-    "qty": "{:,.4f}", "cost_eur": "€{:,.2f}", "proceeds_eur": "€{:,.2f}",
-    "gain_eur": "€{:+,.2f}", "gain_pct": "{:+.1%}",
+    "qty": "{:,.4f}", "cost": "€{:,.2f}", "proceeds": "€{:,.2f}",
+    "gain": "€{:+,.2f}", "gain_pct": "{:+.1%}",
 }
-REALIZED_SIGNED = ("gain_eur", "gain_pct")
+REALIZED_SIGNED = ("gain", "gain_pct")
 
 
 def test_realized_sales_merge_gain_and_return_on_desktop():
@@ -215,8 +215,8 @@ def test_realized_sales_merge_gain_and_return_on_desktop():
     cell, so the phone badge and the desktop grid share one column set."""
     html = ticker_table_html(
         _realized_frame(), fmt=REALIZED_FMT, signed=REALIZED_SIGNED,
-        left_cols=("buy", "sell"), pairs=(("gain_eur", "gain_pct"),),
-        labels={"gain_eur": "Gain"},
+        left_cols=("buy", "sell"), pairs=(("gain", "gain_pct"),),
+        labels={"gain": "Gain"},
     )
     headers = re.findall(r"<th[^>]*>(.*?)</th>", html)
     assert "gain_pct" not in html and headers.count("Gain") == 1
@@ -232,7 +232,7 @@ def test_realized_sales_render_as_phone_rows(monkeypatch):
     html = ticker_table_html(
         _realized_frame(), fmt=REALIZED_FMT, signed=REALIZED_SIGNED,
         names=False,
-        mobile={"value": "proceeds_eur", "delta": "gain_eur",
+        mobile={"value": "proceeds", "delta": "gain",
                 "badge": "gain_pct", "wrap": True,
                 "sub": ("buy", "sell", "qty"),
                 "sub_labels": {"buy": "Bought", "sell": "Sold",

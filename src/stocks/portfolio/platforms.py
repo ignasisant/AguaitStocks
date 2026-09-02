@@ -9,8 +9,9 @@ appending a Platform here; validation, preview and commit are shared.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from stocks.portfolio import (
     clicktrade,
@@ -22,6 +23,8 @@ from stocks.portfolio import (
     revolut_pdf,
     trading212,
 )
+from stocks.portfolio.fees import broker_of
+from stocks.portfolio.ledger import Transaction
 from stocks.portfolio.revolut import ParseResult
 
 
@@ -154,3 +157,81 @@ def by_key(key: str) -> Platform:
         if p.key == key:
             return p
     return PLATFORMS[0]
+
+
+# Ledger note prefixes (`fees.broker_of`) -> display name. The prefix is what
+# the importers stamp, so it isn't always a Platform key: "revolut crypto ..."
+# reads back as "revolut" (same broker), a hand-entered row as "manual", and
+# an LLM-mapped export as whatever its own note says.
+BROKER_NAMES = {
+    "revolut": "Revolut",
+    "trading212": "Trading 212",
+    "degiro": "DEGIRO",
+    "ibkr": "IBKR",
+    "clicktrade": "ClickTrade",
+    "saxo": "Saxo",
+}
+
+
+def broker_label(key: str) -> str:
+    """Display name for a ledger broker prefix; unknown ones title-case."""
+    return BROKER_NAMES.get(key, key.replace("_", " ").title())
+
+
+def broker_domain(key: str) -> str | None:
+    """Brand website for a ledger broker prefix (its logo), when a platform of
+    that exact key declares one — "manual" and one-off notes have none."""
+    for p in PLATFORMS:
+        if p.key == key:
+            return p.domain
+    return None
+
+
+# ------------------------------------------------------------ import origin
+# Attribution is carried by the note's first word (`fees.broker_of`), and every
+# broker parser stamps its own. A file no parser owned — an LLM-mapped export,
+# a ledger-format CSV — arrives with nothing in front, so the origin has to be
+# asked for at import time: without it the rows land under whatever their note
+# happened to say and the Fees and Custody views can't place the shares.
+
+OTHER = "other"  # a real origin, just not one this registry parses
+
+
+def broker_options() -> tuple[str, ...]:
+    """Keys to offer when the user names an upload's origin: every broker the
+    ledger already knows by name, `OTHER` last."""
+    return (*sorted(BROKER_NAMES), OTHER)
+
+
+def broker_key(name: str) -> str:
+    """A typed-in broker name as a ledger prefix — one lowercase word, since
+    only the note's first word is ever read back as the broker."""
+    return "_".join(re.findall(r"[a-z0-9]+", name.lower()))[:24] or OTHER
+
+
+def detected_broker(transactions: list[Transaction]) -> str:
+    """The origin the rows already name, when their parser stamped one and
+    every row agrees; "" when nothing in the batch names a known broker, which
+    is exactly when the user has to be asked."""
+    keys = {broker_of(t) for t in transactions}
+    key = keys.pop() if len(keys) == 1 else ""
+    return key if key in BROKER_NAMES else ""
+
+
+def stamp_broker(transactions: list[Transaction], broker: str) -> list[Transaction]:
+    """Copies of `transactions` whose notes start with `broker`.
+
+    A broker word already in front is replaced rather than having a second one
+    stacked on it, so re-stating an origin (or overriding a parser's) stays
+    idempotent; the rest of the note — an instrument name, a mapped label —
+    stays behind it.
+    """
+    key = broker_key(broker)
+    known = {p.key for p in PLATFORMS} | set(BROKER_NAMES) | {OTHER, "manual", key}
+    out = []
+    for tx in transactions:
+        words = tx.note.split()
+        if words and words[0].lower() in known:
+            words = words[1:]
+        out.append(replace(tx, note=" ".join([key, *words])[:120]))
+    return out

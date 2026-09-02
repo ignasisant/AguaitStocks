@@ -23,8 +23,7 @@ import pandas as pd
 
 from stocks.config import Holding, load_watchlist
 from stocks.data.fetch import fetch_many
-from stocks.data.fx import ToEur
-from stocks.data.fx import to_eur as _default_to_eur
+from stocks.data.fx import ToBase, converter
 
 if TYPE_CHECKING:
     from datetime import datetime
@@ -199,13 +198,20 @@ def position_table(holdings: list[Holding], prices: dict[str, float]) -> pd.Data
 
 
 # ------------------------------------------------------------ injected vs value
-# (amount, currency, iso_date) -> EUR, injectable so tests skip the network.
-# The live converter is stocks.data.fx.to_eur (bound above as _default_to_eur).
-ToEurFn = ToEur | None
+# (amount, currency, iso_date) -> the reporting currency, injectable so tests
+# skip the network. The live one is stocks.data.fx.converter(base).
+ToBaseFn = ToBase | None
 
 
 def shares_frame(transactions, end: str | None = None) -> pd.DataFrame:
-    """Daily shares held per ticker, replaying buys/sells/splits in ledger order.
+    """Daily shares held per ticker, replaying buys/sells in ledger order.
+
+    Split-adjusted throughout: price history is back-adjusted, so a trade's
+    quantity is scaled by every split that came after it and the split itself
+    is not a step in the path. Stepping shares up on the split date instead
+    would leave the pre-split stretch valued at post-split prices — the
+    position reads ~1/ratio of its real size and its buys look like instant
+    losses in the flow-adjusted return.
 
     Calendar-daily index from the first transaction to `end` (default today),
     forward-filled between events; 0 before a ticker's first buy.
@@ -213,15 +219,25 @@ def shares_frame(transactions, end: str | None = None) -> pd.DataFrame:
     txs = sorted(transactions, key=lambda t: (t.date, t.id or 0))
     if not txs:
         return pd.DataFrame()
+    splits: dict[str, list[tuple[str, float]]] = {}
+    for t in txs:
+        if t.action == "split" and t.quantity > 0:
+            splits.setdefault(t.ticker, []).append((t.date, t.quantity))
+
+    def adjusted(t) -> float:
+        """Quantity in today's shares: splits strictly after the trade date.
+        A split shares its date with post-split trades, which need no scaling."""
+        return t.quantity * math.prod(
+            ratio for day, ratio in splits.get(t.ticker, ()) if day > t.date
+        )
+
     qty: dict[str, float] = {}
     snap: dict[str, dict[str, float]] = {}
     for t in txs:
         if t.action == "buy":
-            qty[t.ticker] = qty.get(t.ticker, 0.0) + t.quantity
+            qty[t.ticker] = qty.get(t.ticker, 0.0) + adjusted(t)
         elif t.action == "sell":
-            qty[t.ticker] = qty.get(t.ticker, 0.0) - t.quantity
-        elif t.action == "split":
-            qty[t.ticker] = qty.get(t.ticker, 0.0) * t.quantity
+            qty[t.ticker] = qty.get(t.ticker, 0.0) - adjusted(t)
         else:
             continue
         snap.setdefault(t.date, {})[t.ticker] = qty[t.ticker]
@@ -231,19 +247,21 @@ def shares_frame(transactions, end: str | None = None) -> pd.DataFrame:
     return frame.reindex(idx).ffill().fillna(0.0).clip(lower=0.0)
 
 
-def injected_series(transactions, to_eur: ToEurFn = None) -> pd.Series:
-    """Cumulative net cash put into the book, EUR at the transaction-date rate.
+def injected_series(
+    transactions, to_base: ToBaseFn = None, base: str = "EUR"
+) -> pd.Series:
+    """Cumulative net cash put in, in `base` at each transaction date's rate.
 
     Buys add cost incl. commission; sells subtract net proceeds. Dividends and
     standalone fees don't move contributed capital. Index = transaction dates.
     """
-    to_eur = to_eur or _default_to_eur
+    to_base = to_base or converter(base)
     flows: dict[str, float] = {}
     for t in sorted(transactions, key=lambda t: (t.date, t.id or 0)):
         if t.action == "buy":
-            amt = to_eur(t.quantity * t.price + t.fee, t.currency, t.date)
+            amt = to_base(t.quantity * t.price + t.fee, t.currency, t.date)
         elif t.action == "sell":
-            amt = -to_eur(t.quantity * t.price - t.fee, t.currency, t.date)
+            amt = -to_base(t.quantity * t.price - t.fee, t.currency, t.date)
         else:
             continue
         flows[t.date] = flows.get(t.date, 0.0) + amt
@@ -258,16 +276,18 @@ def injected_vs_value(
     transactions,
     closes: dict[str, pd.Series],
     fx: dict[str, pd.Series] | None = None,
-    to_eur: ToEurFn = None,
+    to_base: ToBaseFn = None,
+    base: str = "EUR",
 ) -> pd.DataFrame:
-    """Daily injected capital vs mark-to-market EUR value of the book.
+    """Daily injected capital vs mark-to-market value of the book, in `base`.
 
     `closes` = native-currency close series per ticker; `fx` = daily
-    currency->EUR rate series (EUR itself implied 1.0). Held days without a
-    usable close/FX quote — ticker absent, delisted mid-hold, or (like a
-    delisted ORGN) a stray quote outside the holding window — are carried at
-    cost (cumulative net invested EUR): no fake loss, no mark-to-market either.
-    Columns: injected_eur, value_eur, pnl_pct. Tickers ever carried at cost
+    currency->`base` rate series (the base currency itself implied 1.0). Held
+    days without a usable close/FX quote — ticker absent, delisted mid-hold, or
+    (like a delisted ORGN) a stray quote outside the holding window — are
+    carried at cost (cumulative net invested): no fake loss, no mark-to-market
+    either.
+    Columns: injected, value, pnl_pct. Tickers ever carried at cost
     while held are listed in df.attrs['carried_at_cost'].
     """
     shares = shares_frame(transactions)
@@ -303,26 +323,29 @@ def injected_vs_value(
         gap = held if mtm is None else (mtm.isna() & held)
         if gap.any():
             proxy = injected_series(
-                [t for t in transactions if t.ticker == ticker], to_eur
+                [t for t in transactions if t.ticker == ticker], to_base
             ).reindex(idx).ffill().fillna(0.0)
             value += proxy.where(gap, 0.0).clip(lower=0.0)
             carried.append(ticker)
         if mtm is not None:
             value += mtm.fillna(0.0)
 
-    injected = injected_series(transactions, to_eur).reindex(idx).ffill().fillna(0.0)
+    injected = injected_series(transactions, to_base).reindex(idx).ffill().fillna(0.0)
     pct = pd.Series(float("nan"), index=idx)
     mask = injected > 0
     pct[mask] = value[mask] / injected[mask] - 1
-    df = pd.DataFrame({"injected_eur": injected, "value_eur": value, "pnl_pct": pct})
+    df = pd.DataFrame({"injected": injected, "value": value, "pnl_pct": pct})
     df.attrs["carried_at_cost"] = carried
     return df
 
 
 def flow_series(
-    transactions, to_eur: ToEurFn = None, tickers: set[str] | None = None
+    transactions,
+    to_base: ToBaseFn = None,
+    tickers: set[str] | None = None,
+    base: str = "EUR",
 ) -> pd.Series:
-    """Net external cash flow per date in EUR: buys +, sells −, dividends −.
+    """Net external cash flow per date in `base`: buys +, sells −, dividends −.
 
     Dividends count as withdrawals so the time-weighted return gets credit for
     them (the market value path never includes cash). Leave `tickers` unset when
@@ -330,17 +353,17 @@ def flow_series(
     restrict it when those names are absent from the value entirely, otherwise
     their buys read as instant losses in the TWR.
     """
-    to_eur = to_eur or _default_to_eur
+    to_base = to_base or converter(base)
     flows: dict[str, float] = {}
     for t in transactions:
         if tickers is not None and t.ticker not in tickers:
             continue
         if t.action == "buy":
-            amt = to_eur(t.quantity * t.price + t.fee, t.currency, t.date)
+            amt = to_base(t.quantity * t.price + t.fee, t.currency, t.date)
         elif t.action == "sell":
-            amt = -to_eur(t.quantity * t.price - t.fee, t.currency, t.date)
+            amt = -to_base(t.quantity * t.price - t.fee, t.currency, t.date)
         elif t.action == "dividend":
-            amt = -to_eur(t.price - t.fee, t.currency, t.date)
+            amt = -to_base(t.price - t.fee, t.currency, t.date)
         else:
             continue
         flows[t.date] = flows.get(t.date, 0.0) + amt
@@ -355,13 +378,25 @@ def time_weighted_returns(value: pd.Series, flows: pd.Series) -> pd.Series:
     r_t = (V_t - F_t) / V_{t-1} - 1, flows treated as arriving at day-t close.
     Days with no prior value (before the first buy, or after the book was
     emptied) drop out; performance is unaffected by deposit/withdrawal timing.
+
+    Days pricing below -100% also drop out, their dates listed in
+    .attrs['dropped_days']: a long-only book cannot lose more than everything,
+    so r <= -1 means the day's flow never landed in the value path (an
+    unrecorded split, a corporate action, a ticker with no history). One such
+    sample drives the cumulative path negative and takes the annualised
+    return, volatility and drawdown down with it.
     """
     if value.empty:
         return pd.Series(dtype=float)
     f = flows.reindex(value.index, fill_value=0.0) if not flows.empty else 0.0
     prev = value.shift(1)
     r = (value - f) / prev - 1
-    return r[prev > 1e-9]
+    r = r[prev > 1e-9]
+    impossible = r.index[r <= -1]
+    if len(impossible):
+        r = r.drop(impossible)
+    r.attrs["dropped_days"] = list(impossible)
+    return r
 
 
 def money_weighted_return(
@@ -517,21 +552,25 @@ def holdings_from_positions(positions) -> list[Holding]:
     ]
 
 
-def market_value_eur(ticker: str, quantity: float, currency: str) -> float | None:
-    """Live EUR market value of a position; None if price/FX lookup fails."""
+def market_value(
+    ticker: str, quantity: float, currency: str, base: str = "EUR"
+) -> float | None:
+    """Live market value of a position in `base`; None if a lookup fails."""
     from stocks.data.fetch import latest_price
     from stocks.data.fx import spot
 
     try:
         price = latest_price(ticker)
-        rate, _ = spot(currency, "EUR")
+        rate, _ = spot(currency, base)
     except Exception:
         return None
     return quantity * price * rate
 
 
-def market_values_eur(positions, max_workers: int = 8) -> dict[str, float]:
-    """Live EUR market value per open position, fetched concurrently.
+def market_values(
+    positions, max_workers: int = 8, base: str = "EUR"
+) -> dict[str, float]:
+    """Live market value per open position in `base`, fetched concurrently.
 
     Shared by the CLI (positions/tax) and the dashboard so neither loops the
     network serially. Positions whose price/FX lookup fails are absent.
@@ -542,25 +581,33 @@ def market_values_eur(positions, max_workers: int = 8) -> dict[str, float]:
     # identical FX fetches for the same pair.
     for ccy in {p.currency for p in positions}:
         try:
-            spot(ccy, "EUR")
+            spot(ccy, base)
         except Exception:
             pass  # workers fall back to per-position lookups / None
     with ThreadPoolExecutor(max_workers=max_workers) as pool:
         pairs = pool.map(
-            lambda p: (p.ticker, market_value_eur(p.ticker, p.quantity, p.currency)),
+            lambda p: (
+                p.ticker,
+                market_value(p.ticker, p.quantity, p.currency, base),
+            ),
             positions,
         )
     return {t: v for t, v in pairs if v is not None}
 
 
-def market_value_weights_eur(
-    positions, prices: dict[str, float], meta: dict[str, dict]
+def market_value_weights_base(
+    positions,
+    prices: dict[str, float],
+    meta: dict[str, dict],
+    base: str = "EUR",
 ) -> dict[str, float]:
-    """EUR market-value weights: qty * latest native price * native->EUR spot.
+    """Weights from qty * latest native price * native->`base` spot.
 
     Mixing currencies makes native-value weighting wrong for a multi-currency
-    book (Revolut = mostly USD + some EUR), so weights are put on a common EUR
-    footing here. Tickers without a price drop out and the rest renormalise.
+    book (mostly USD with some EUR, say), so weights are put on one currency's
+    footing here — the reporting currency, not necessarily EUR. Tickers without
+    a price drop out and the rest renormalise. The sibling above weights raw
+    shares * price and is right only for a single-currency book.
     """
     from stocks.data.fx import spot
 
@@ -571,7 +618,7 @@ def market_value_weights_eur(
             continue
         ccy = (meta.get(p.ticker) or {}).get("currency") or p.currency
         try:
-            rate, _ = spot(ccy, "EUR")
+            rate, _ = spot(ccy, base)
         except Exception:
             rate = 1.0
         values[p.ticker] = p.quantity * px * rate
@@ -579,34 +626,38 @@ def market_value_weights_eur(
     return {t: v / total for t, v in values.items()} if total else {}
 
 
-def positions_frame_eur(positions) -> pd.DataFrame:
-    """Per-position EUR table: qty, cost, live value, unrealised P/L.
+def positions_frame(positions, base: str = "EUR") -> pd.DataFrame:
+    """Per-position table in `base`: qty, cost, live value, unrealised P/L.
 
-    Live prices come from market_values_eur (thread pool), so a 20-name book
-    costs one concurrent burst, not 20 serial price+FX round-trips.
+    Live prices come from market_values (thread pool), so a 20-name book costs
+    one concurrent burst, not 20 serial price+FX round-trips. `cost` comes from
+    the lots, valued at each trade date's rate — so it only lines up with
+    `value` when the ledger was replayed in this same base.
     """
-    values = market_values_eur(positions)
+    values = market_values(positions, base=base)
     rows = []
     for p in positions:
         value = values.get(p.ticker)
-        pnl = value - p.cost_eur if value is not None else None
-        pnl_pct = (value / p.cost_eur - 1) if value and p.cost_eur else None
+        pnl = value - p.cost if value is not None else None
+        pnl_pct = (value / p.cost - 1) if value and p.cost else None
         rows.append(
             {
                 "ticker": p.ticker,
                 "shares": p.quantity,
                 "ccy": p.currency,
-                "cost_eur": p.cost_eur,
-                "value_eur": value,
-                "pnl_eur": pnl,
+                "cost": p.cost,
+                "value": value,
+                "pnl": pnl,
                 "pnl_pct": pnl_pct,
             }
         )
     return pd.DataFrame(rows).set_index("ticker") if rows else pd.DataFrame()
 
 
-def position_values_history(positions, period: str = "3mo") -> pd.DataFrame:
-    """Daily EUR value per open position at *today's* quantities (fixed basket).
+def position_values_history(
+    positions, period: str = "3mo", base: str = "EUR"
+) -> pd.DataFrame:
+    """Daily `base` value per open position at *today's* quantities.
 
     Current shares × daily native close × daily ECB FX, forward-filled onto the
     price index. Powers the day/week/month change chips and the per-ticker day
@@ -629,9 +680,9 @@ def position_values_history(positions, period: str = "3mo") -> pd.DataFrame:
 
     fx: dict[str, pd.Series] = {}
     start = px.index[0].date().isoformat()
-    for ccy in {p.currency for p in positions if p.currency != "EUR"}:
+    for ccy in {p.currency for p in positions if p.currency != base}:
         try:
-            rates = rates_range(start, date.today().isoformat(), ccy, "EUR")
+            rates = rates_range(start, date.today().isoformat(), ccy, base)
         except Exception:
             rates = {}
         if rates:
@@ -643,7 +694,7 @@ def position_values_history(positions, period: str = "3mo") -> pd.DataFrame:
     for p in positions:
         if p.ticker not in px.columns:
             continue
-        if p.currency == "EUR":
+        if p.currency == base:
             values[p.ticker] = p.quantity * px[p.ticker]
         elif p.currency in fx:
             values[p.ticker] = p.quantity * px[p.ticker] * fx[p.currency]
@@ -651,7 +702,7 @@ def position_values_history(positions, period: str = "3mo") -> pd.DataFrame:
 
 
 def basket_change(values: pd.DataFrame, days: int) -> tuple[float, float] | None:
-    """(EUR change, pct change) of the basket over the last ~`days` calendar days.
+    """(change, pct change) of the basket over the last ~`days` calendar days.
 
     `days=1` compares the last two rows (previous trading day); longer windows
     anchor on the last row at or before `end - days`. Only tickers priced at

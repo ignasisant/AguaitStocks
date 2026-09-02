@@ -575,26 +575,27 @@ def _tx_revolut(path: Path, *, commit: bool) -> None:
 
 
 def cmd_positions(args: argparse.Namespace) -> None:
-    from stocks.analysis.portfolio import market_values_eur
+    from stocks.analysis.portfolio import market_values
     from stocks.portfolio.ledger import all_transactions
     from stocks.portfolio.positions import build
 
-    positions, _ = build(all_transactions())
+    ccy = args.currency.upper()
+    positions, _ = build(all_transactions(), base=ccy)
     if not positions:
         print("no open positions")
         return
-    values = market_values_eur(positions)  # concurrent price+FX lookups
-    print(f"{'TICKER':8s} {'QTY':>10s} {'COST EUR':>12s} {'VALUE EUR':>12s} "
-          f"{'P/L EUR':>12s}")
+    values = market_values(positions, base=ccy)  # concurrent price+FX lookups
+    print(f"{'TICKER':8s} {'QTY':>10s} {f'COST {ccy}':>12s} "
+          f"{f'VALUE {ccy}':>12s} {f'P/L {ccy}':>12s}")
     total_cost = total_value = 0.0
     for p in positions:
         value = values.get(p.ticker)
-        total_cost += p.cost_eur
+        total_cost += p.cost
         vstr = f"{value:>12,.0f}" if value is not None else f"{'n/a':>12s}"
-        plstr = f"{value - p.cost_eur:>12,.0f}" if value is not None else f"{'n/a':>12s}"
+        plstr = f"{value - p.cost:>12,.0f}" if value is not None else f"{'n/a':>12s}"
         if value is not None:
             total_value += value
-        print(f"{p.ticker:8s} {p.quantity:>10.4f} {p.cost_eur:>12,.0f} {vstr} {plstr}")
+        print(f"{p.ticker:8s} {p.quantity:>10.4f} {p.cost:>12,.0f} {vstr} {plstr}")
     print("-" * 58)
     print(f"{'TOTAL':8s} {'':>10s} {total_cost:>12,.0f} {total_value:>12,.0f} "
           f"{total_value - total_cost:>12,.0f}")
@@ -604,7 +605,8 @@ def cmd_realized(args: argparse.Namespace) -> None:
     from stocks.portfolio.ledger import all_transactions
     from stocks.portfolio.positions import build
 
-    _, realized = build(all_transactions())
+    ccy = args.currency.upper()
+    _, realized = build(all_transactions(), base=ccy)
     if args.year:
         realized = [s for s in realized if int(s.sell_date[:4]) == args.year]
     if not realized:
@@ -613,55 +615,100 @@ def cmd_realized(args: argparse.Namespace) -> None:
     for s in realized:
         print(
             f"{s.ticker:8s} buy {s.buy_date} sell {s.sell_date} "
-            f"qty {s.quantity:.4f}  cost {s.cost_eur:,.0f}  "
-            f"proceeds {s.proceeds_eur:,.0f}  gain {s.gain_eur:>+,.0f} EUR"
+            f"qty {s.quantity:.4f}  cost {s.cost:,.0f}  "
+            f"proceeds {s.proceeds:,.0f}  gain {s.gain:>+,.0f} {ccy}"
         )
-    print(f"\ntotal realized gain: {sum(s.gain_eur for s in realized):>+,.0f} EUR")
+    print(
+        f"\ntotal realized gain: "
+        f"{sum(s.gain for s in realized):>+,.0f} {ccy}"
+    )
 
 
 def cmd_tax(args: argparse.Namespace) -> None:
-    from collections import defaultdict
+    """Realized-gains summary under one jurisdiction's rules.
 
-    from stocks.analysis.portfolio import market_values_eur
+    The ledger is replayed in the jurisdiction's own currency (EUR for Spain,
+    USD for the US) because the cost basis is a per-transaction conversion,
+    not something you can convert once at the end.
+    """
+    from collections import defaultdict
+    from datetime import date
+
+    from stocks.analysis.portfolio import market_values
+    from stocks.data.funds import is_fund
+    from stocks.data.fx import rate_on
+    from stocks.portfolio import tax
     from stocks.portfolio.ledger import all_transactions
     from stocks.portfolio.positions import build
-    from stocks.portfolio.tax_es import fiscal_year, modelo_720_flag
 
+    jur = tax.get(args.jurisdiction)
+    ccy = jur.currency
     txs = all_transactions()
-    positions, realized = build(txs)
+    settings = tax.TaxSettings(
+        filing_status=args.filing_status,
+        other_income=args.other_income,
+        include_niit=args.niit,
+        church_tax_rate=args.church_tax,
+        # Classified from the learned quoteType cache, never a live fetch: the
+        # German partial exemption needs to know which holdings are funds.
+        fund_tickers=frozenset(
+            t.ticker.upper() for t in txs if is_fund(t.ticker, fetch=False)
+        ),
+    )
+    # The jurisdiction's own share-identification rule, not the app default.
+    positions, realized = build(txs, base=ccy, matching=jur.matching)
     buy_dates: dict[str, list[str]] = defaultdict(list)
     for t in txs:
         if t.action == "buy":
             buy_dates[t.ticker].append(t.date)
 
-    ty = fiscal_year(realized, args.year, buy_dates)
-    print(f"=== IRPF savings base — FY {ty.year} ===")
-    print(f"realized gains:        {ty.realized_gain_eur:>12,.0f} EUR")
-    print(f"realized losses:       {ty.realized_loss_eur:>12,.0f} EUR")
-    if ty.deferred_loss_eur:
-        print(f"  of which deferred:   {ty.deferred_loss_eur:>12,.0f} EUR (2-month rule)")
-    print(f"deductible losses:     {ty.deductible_loss_eur:>12,.0f} EUR")
-    if ty.recovered_loss_eur:
+    ty = jur.fiscal_year(realized, args.year, buy_dates, settings)
+    print(f"=== {jur.code} realized result — FY {jur.year_label(ty.year)} ===")
+    print(f"realized gains:        {ty.realized_gain:>12,.0f} {ccy}")
+    print(f"realized losses:       {ty.realized_loss:>12,.0f} {ccy}")
+    if ty.disallowed_loss:
+        print(f"  of which disallowed: {ty.disallowed_loss:>12,.0f} {ccy}"
+              " (repurchase rule)")
+    print(f"deductible losses:     {ty.deductible_loss:>12,.0f} {ccy}")
+    if ty.recovered_loss:
         print(
-            f"recovered deferrals:   {ty.recovered_loss_eur:>12,.0f} EUR"
+            f"recovered losses:      {ty.recovered_loss:>12,.0f} {ccy}"
             " (replacement sold)"
         )
-    print(f"net taxable base:      {ty.net_taxable_eur:>12,.0f} EUR")
-    print(f"estimated tax:         {ty.estimated_tax_eur:>12,.0f} EUR")
-    if ty.carryforward_loss_eur:
-        print(f"loss carryforward:     {ty.carryforward_loss_eur:>12,.0f} EUR (4 years)")
+    for kpi in ty.kpis():
+        if kpi.key in ("net_taxable", "estimated_tax", "carryforward_loss"):
+            continue  # printed below, in a fixed order
+        print(f"{kpi.key.replace('_', ' ') + ':':<22} {kpi.value:>12,.0f} {ccy}")
+    print(f"net taxable:           {ty.net_taxable:>12,.0f} {ccy}")
+    print(f"estimated tax:         {ty.estimated_tax:>12,.0f} {ccy}")
+    if ty.carryforward_loss:
+        years = jur.carryforward_years
+        span = f"{years} years" if years else "indefinite"
+        print(f"loss carryforward:     {ty.carryforward_loss:>12,.0f} {ccy} ({span})")
 
-    values = market_values_eur(positions)  # concurrent price+FX lookups
-    foreign = sum(values.get(p.ticker) or p.cost_eur for p in positions)
-    print(f"\n{modelo_720_flag(foreign).message}")
-    print("\nnote: planning aid, not tax advice. Verify with your gestor / Renta.")
+    # Reporting thresholds are jurisdiction-currency amounts; the priced book
+    # comes back in EUR, so a non-EUR jurisdiction converts at spot.
+    values = market_values(positions)  # concurrent price+FX lookups
+    foreign = sum(values.get(p.ticker) or p.cost for p in positions)
+    if ccy != "EUR":
+        try:
+            foreign *= float(rate_on(date.today(), "EUR", ccy))
+        except Exception:
+            foreign = 0.0  # FX down: skip the flags rather than mis-state them
+    flags = jur.reporting_flags(foreign, settings) if foreign else []
+    if flags:
+        print()
+        for f in flags:
+            print(f.message)
+    print("\nnote: planning aid, not tax advice. Verify before you file.")
 
 
 def cmd_dividends(args: argparse.Namespace) -> None:
     from stocks.portfolio.dividends import by_year
     from stocks.portfolio.ledger import all_transactions
 
-    years = by_year(all_transactions())
+    ccy = args.currency.upper()
+    years = by_year(all_transactions(), base=ccy)
     if args.year:
         years = {y: d for y, d in years.items() if y == args.year}
     if not years:
@@ -670,11 +717,11 @@ def cmd_dividends(args: argparse.Namespace) -> None:
     for yr in sorted(years):
         d = years[yr]
         print(f"=== dividends {yr} ===")
-        print(f"  gross:       {d.gross_eur:>10,.0f} EUR")
-        print(f"  withheld:    {d.withheld_eur:>10,.0f} EUR")
-        print(f"  net:         {d.net_eur:>10,.0f} EUR")
-        print(f"  creditable:  {d.creditable_eur:>10,.0f} EUR (Spain double-tax credit)")
-        print(f"  reclaimable: {d.reclaimable_eur:>10,.0f} EUR (from source country)")
+        print(f"  gross:       {d.gross:>10,.0f} {ccy}")
+        print(f"  withheld:    {d.withheld:>10,.0f} {ccy}")
+        print(f"  net:         {d.net:>10,.0f} {ccy}")
+        print(f"  creditable:  {d.creditable:>10,.0f} {ccy} (double-tax credit)")
+        print(f"  reclaimable: {d.reclaimable:>10,.0f} {ccy} (from source country)")
 
 
 def cmd_report(args: argparse.Namespace) -> None:
@@ -871,6 +918,20 @@ def cmd_backup(args: argparse.Namespace) -> None:
         sys.exit(f"backup: {exc}")
 
 
+def _add_currency(parser: argparse.ArgumentParser) -> None:
+    """The reporting currency for a money-printing command.
+
+    Money is computed *in* it — every ledger leg at its own trade-date rate —
+    so this is not a display flag: the figures differ from a converted total.
+    """
+    from stocks.config import CURRENCIES
+
+    parser.add_argument(
+        "-c", "--currency", default="EUR", choices=CURRENCIES,
+        help="reporting currency the ledger is valued in (default EUR)",
+    )
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="stocks", description="Stock tracking toolkit")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -1034,19 +1095,44 @@ def build_parser() -> argparse.ArgumentParser:
     tx_sub.add_parser("list", help="print all transactions")
     p_tx.set_defaults(func=cmd_tx)
 
-    p_pos = sub.add_parser("positions", help="open positions + unrealized P/L (EUR)")
+    p_pos = sub.add_parser(
+        "positions", help="open positions + unrealized P/L"
+    )
+    _add_currency(p_pos)
     p_pos.set_defaults(func=cmd_positions)
 
-    p_real = sub.add_parser("realized", help="realized sales (FIFO, EUR)")
+    p_real = sub.add_parser("realized", help="realized sales (FIFO)")
     p_real.add_argument("--year", type=int, help="filter to one calendar year")
+    _add_currency(p_real)
     p_real.set_defaults(func=cmd_realized)
 
-    p_tax = sub.add_parser("tax", help="Spanish IRPF savings-base summary")
+    p_tax = sub.add_parser("tax", help="realized-gains tax summary by jurisdiction")
     p_tax.add_argument("--year", type=int, required=True, help="fiscal year, e.g. 2025")
+    p_tax.add_argument(
+        "-j", "--jurisdiction", default=None,
+        help="tax residence: ES, US, UK or DE (see stocks.portfolio.tax)",
+    )
+    p_tax.add_argument(
+        "--filing-status", default="single",
+        help="US only: single | mfj | mfs | hoh",
+    )
+    p_tax.add_argument(
+        "--other-income", type=float, default=0.0,
+        help="US only: other taxable income the gains stack on (after deductions)",
+    )
+    p_tax.add_argument(
+        "--niit", action="store_true",
+        help="US only: add the 3.8%% net investment income tax",
+    )
+    p_tax.add_argument(
+        "--church-tax", type=float, default=0.0, choices=[0.0, 0.08, 0.09],
+        help="DE only: Kirchensteuer as a share of the tax (0.08 or 0.09)",
+    )
     p_tax.set_defaults(func=cmd_tax)
 
-    p_div = sub.add_parser("dividends", help="dividend income + withholding (EUR)")
+    p_div = sub.add_parser("dividends", help="dividend income + withholding")
     p_div.add_argument("--year", type=int, help="filter to one calendar year")
+    _add_currency(p_div)
     p_div.set_defaults(func=cmd_dividends)
 
     p_rep = sub.add_parser(

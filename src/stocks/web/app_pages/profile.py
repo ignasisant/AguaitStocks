@@ -12,7 +12,9 @@ import streamlit as st
 
 from stocks import storage
 from stocks.config import load_watchlist
-from stocks.web import auth, i18n, widgets
+from stocks.portfolio import tax
+from stocks.portfolio.tax import de as tax_de
+from stocks.web import auth, i18n, tax_ui, widgets
 from stocks.web.i18n import t as tr
 
 # Account identity, prefs and the watchlist editor are all per-account.
@@ -97,6 +99,111 @@ with tab_prefs:
         auth.save_prefs(prefs)
         st.toast(tr("profile.currency_set", ccy=ccy), icon=":material/check:")
     st.caption(tr("profile.currency_caption"))
+
+    # ---------------------------------------------------------- tax residence
+    # Which country's rules the Realized & tax tab applies. "auto" reads the
+    # region off the browser locale (en-US -> US) and lands on Spain when it
+    # recognizes nothing — the ledger has to be taxed under some set of rules.
+    # The bracket inputs below only render for jurisdictions that read them;
+    # Spain's savings base doesn't care about filing status or other income.
+    st.subheader(tr("profile.tax_section"))
+    _res_opts = [tax_ui.AUTO, *tax.codes()]
+    _res_current = prefs.get(tax_ui.PREF_RESIDENCE) or tax_ui.AUTO
+
+    def _res_label(code: str) -> str:
+        return (
+            tr("profile.tax_residence_auto")
+            if code == tax_ui.AUTO
+            else tax_ui.label(code)
+        )
+
+    residence = st.selectbox(
+        tr("profile.tax_residence"),
+        _res_opts,
+        index=_res_opts.index(
+            _res_current if _res_current in _res_opts else tax_ui.AUTO),
+        format_func=_res_label,
+        key="pref_tax_residence",
+    )
+    _res_val = None if residence == tax_ui.AUTO else residence
+    if _res_val != prefs.get(tax_ui.PREF_RESIDENCE):
+        prefs[tax_ui.PREF_RESIDENCE] = _res_val
+        auth.save_prefs(prefs)
+        st.toast(
+            tr("profile.tax_set", label=_res_label(residence)),
+            icon=":material/check:",
+        )
+        st.rerun()  # the tab's rules, currency and wording all change with it
+    st.caption(tr("profile.tax_residence_caption"))
+
+    # Only the knobs the active jurisdiction actually reads: Spain's savings
+    # base has no filing status and no bracket to stack income on, so an ES
+    # account sees nothing below. The order is the jurisdiction's.
+    _active = tax.get(tax_ui.resolve_code(prefs))
+    _fields = _active.settings_fields
+    if "filing_status" in _fields:
+        _statuses = list(_active.filing_statuses)
+        _status_current = prefs.get(tax_ui.PREF_FILING_STATUS) or _statuses[0]
+        status = st.selectbox(
+            tr("profile.tax_filing_status"),
+            _statuses,
+            index=_statuses.index(
+                _status_current if _status_current in _statuses else _statuses[0]),
+            format_func=lambda c: tr(f"profile.tax_status_{c}"),
+            key="pref_tax_filing_status",
+        )
+        if status != prefs.get(tax_ui.PREF_FILING_STATUS):
+            prefs[tax_ui.PREF_FILING_STATUS] = status
+            auth.save_prefs(prefs)
+        st.caption(
+            tr(f"profile.tax_filing_status_caption_{_active.code.lower()}")
+        )
+
+    if "church_tax_rate" in _fields:
+        # Kirchensteuer: 8% of the tax in Bavaria and Baden-Württemberg, 9%
+        # in the other states, nothing if the filer is not church-registered.
+        _rates = list(tax_de.CHURCH_TAX_RATES)
+        try:
+            _rate_now = float(prefs.get(tax_ui.PREF_CHURCH_TAX) or 0.0)
+        except (TypeError, ValueError):
+            _rate_now = 0.0
+        church = st.selectbox(
+            tr("profile.tax_church"),
+            _rates,
+            index=_rates.index(_rate_now if _rate_now in _rates else 0.0),
+            format_func=lambda r: tr(f"profile.tax_church_{int(r * 100)}"),
+            key="pref_tax_church",
+        )
+        if float(church) != _rate_now:
+            prefs[tax_ui.PREF_CHURCH_TAX] = float(church)
+            auth.save_prefs(prefs)
+        st.caption(tr("profile.tax_church_caption"))
+
+    if "other_income" in _fields:
+        income = st.number_input(
+            tr("profile.tax_other_income"),
+            min_value=0.0,
+            step=1_000.0,
+            value=float(prefs.get(tax_ui.PREF_OTHER_INCOME) or 0.0),
+            key="pref_tax_other_income",
+        )
+        if float(income) != float(prefs.get(tax_ui.PREF_OTHER_INCOME) or 0.0):
+            prefs[tax_ui.PREF_OTHER_INCOME] = float(income)
+            auth.save_prefs(prefs)
+        st.caption(
+            tr(f"profile.tax_other_income_caption_{_active.code.lower()}")
+        )
+
+    if "include_niit" in _fields:
+        niit = st.toggle(
+            tr("profile.tax_niit"),
+            value=bool(prefs.get(tax_ui.PREF_NIIT)),
+            key="pref_tax_niit",
+        )
+        if niit != bool(prefs.get(tax_ui.PREF_NIIT)):
+            prefs[tax_ui.PREF_NIIT] = niit
+            auth.save_prefs(prefs)
+        st.caption(tr("profile.tax_niit_caption"))
 
     # ------------------------------------------------------------ danger zone
     # The deletion path the privacy policy promises. Owner account never gets

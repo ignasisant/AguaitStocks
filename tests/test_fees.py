@@ -37,17 +37,17 @@ def test_by_broker_groups_and_excludes_dividend_withholding():
         Transaction("2024-05-01", "A", "dividend", price=50, currency="EUR",
                     fee=7.5, note="revolut"),
     ]
-    out = by_broker(txs, to_eur=_eur)
+    out = by_broker(txs, to_base=_eur)
     rev, ibkr = out["revolut"], out["ibkr"]
     assert rev.trades == 2
-    assert abs(rev.volume_eur - 160.0) < 1e-9  # 100 buy + 60 sell
-    assert abs(rev.commission_eur - 3.0) < 1e-9
-    assert rev.other_fees_eur == 0.0
+    assert abs(rev.volume - 160.0) < 1e-9  # 100 buy + 60 sell
+    assert abs(rev.commission - 3.0) < 1e-9
+    assert rev.other_fees == 0.0
     assert ibkr.trades == 1
-    assert abs(ibkr.volume_eur - 100.0) < 1e-9  # 200 USD @ 0.5
-    assert abs(ibkr.commission_eur - 2.0) < 1e-9  # 4 USD @ 0.5
-    assert abs(ibkr.other_fees_eur - 3.0) < 1e-9
-    assert abs(ibkr.explicit_eur - 5.0) < 1e-9
+    assert abs(ibkr.volume - 100.0) < 1e-9  # 200 USD @ 0.5
+    assert abs(ibkr.commission - 2.0) < 1e-9  # 4 USD @ 0.5
+    assert abs(ibkr.other_fees - 3.0) < 1e-9
+    assert abs(ibkr.explicit - 5.0) < 1e-9
 
 
 def test_spread_vs_session_midpoint():
@@ -62,12 +62,12 @@ def test_spread_vs_session_midpoint():
                     currency="EUR", note="revolut"),
     ]
     bars = {"A": _bars(["2024-01-02", "2024-01-03"], [11, 11], [9, 9])}
-    out = spread_by_broker(txs, bars, to_eur=_eur)
+    out = spread_by_broker(txs, bars, to_base=_eur)
     s = out["revolut"]
     assert s.measured == 2 and s.skipped == 1
-    assert abs(s.spread_eur - 3.0) < 1e-9  # 0.2*10 + 0.1*10
-    assert abs(s.measured_volume_eur - 201.0) < 1e-9
-    assert s.outside_range_eur == 0.0
+    assert abs(s.spread - 3.0) < 1e-9  # 0.2*10 + 0.1*10
+    assert abs(s.measured_volume - 201.0) < 1e-9
+    assert s.outside_range == 0.0
     assert abs(s.spread_bps - 3.0 / 201.0 * 1e4) < 1e-6
 
 
@@ -77,9 +77,9 @@ def test_spread_outside_range_is_definite_markup():
                     currency="EUR", note="revolut"),
     ]
     bars = {"A": _bars(["2024-01-02"], [11], [9])}
-    s = spread_by_broker(txs, bars, to_eur=_eur)["revolut"]
-    assert abs(s.spread_eur - 4.0) < 1e-9  # (12 - 10) * 2
-    assert abs(s.outside_range_eur - 2.0) < 1e-9  # (12 - 11) * 2
+    s = spread_by_broker(txs, bars, to_base=_eur)["revolut"]
+    assert abs(s.spread - 4.0) < 1e-9  # (12 - 10) * 2
+    assert abs(s.outside_range - 2.0) < 1e-9  # (12 - 11) * 2
 
 
 def test_spread_split_adjusts_pre_split_trades():
@@ -90,10 +90,10 @@ def test_spread_split_adjusts_pre_split_trades():
         Transaction("2024-06-01", "A", "split", quantity=4),
     ]
     bars = {"A": _bars(["2024-01-02"], [26], [24])}  # split-adjusted mid = 25
-    s = spread_by_broker(txs, bars, to_eur=_eur)["revolut"]
+    s = spread_by_broker(txs, bars, to_base=_eur)["revolut"]
     # Adjusted execution 25 == mid -> no spread; EUR value preserved.
-    assert abs(s.spread_eur) < 1e-9
-    assert abs(s.measured_volume_eur - 100.0) < 1e-9
+    assert abs(s.spread) < 1e-9
+    assert abs(s.measured_volume - 100.0) < 1e-9
 
 
 def test_spread_sign_can_be_negative():
@@ -102,5 +102,5 @@ def test_spread_sign_can_be_negative():
                     currency="EUR", note="degiro extra"),
     ]
     bars = {"A": _bars(["2024-01-02"], [11], [9])}
-    s = spread_by_broker(txs, bars, to_eur=_eur)["degiro"]
-    assert abs(s.spread_eur - (-5.0)) < 1e-9  # bought below mid
+    s = spread_by_broker(txs, bars, to_base=_eur)["degiro"]
+    assert abs(s.spread - (-5.0)) < 1e-9  # bought below mid
