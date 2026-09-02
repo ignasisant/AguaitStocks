@@ -11,7 +11,8 @@ plain Starlette routes it now shares the server with:
     /lp/*          the landing's own assets — brand mark, share card
     /robots.txt    crawl rules, generated for whatever host we answer on
     /sitemap.xml   both landing URLs, cross-linked by hreflang
-    /healthz       liveness probe for uptime checks (scripts/setup_monitoring.sh)
+    /livez         liveness probe for uptime checks (scripts/setup_monitoring.sh)
+    /healthz       the same probe, for local runs and the Docker HEALTHCHECK
     /legal/*       privacy policy and terms of use (static, bilingual)
     everything else    Streamlit: /portfolio, /ticker, /_stcore/…, /oauth2callback
 
@@ -69,12 +70,12 @@ PARAM_LANDING = "landing"
 
 # The marketing site's own paths — deliberately excluding `/`, which is only
 # the landing when the gate says so. Anything not listed here is the app, and
-# gets stamped noindex on the way out. /healthz and the legal pages ride along:
-# they are public documents that must not set the app cookie (an uptime probe
-# or a privacy-page reader has not "been to the app").
+# gets stamped noindex on the way out. The probes and the legal pages ride
+# along: they are public documents that must not set the app cookie (an uptime
+# probe or a privacy-page reader has not "been to the app").
 _MARKETING_PREFIXES = (
-    PATH_ES, ASSET_BASE, "/robots.txt", "/sitemap.xml", "/healthz", "/status",
-    "/legal/",
+    PATH_ES, ASSET_BASE, "/robots.txt", "/sitemap.xml", "/livez", "/healthz",
+    "/status", "/legal/",
 )
 
 # A Host header ends up inside canonical and Open Graph URLs, so it is checked
@@ -410,6 +411,14 @@ async def sitemap(request: Request) -> Response:
 async def healthz(request: Request) -> Response:
     """Liveness for uptime checks: the ASGI stack answers, nothing deeper.
 
+    Served at both /livez and /healthz. /livez is the one to probe from
+    outside: on Cloud Run a request for /healthz is answered by Google's
+    frontend with its own 404 and never reaches the container (no
+    x-cloud-trace-context on the response, no entry in the request log),
+    so the route below is unreachable in production. /healthz is kept
+    because it does work everywhere else — local runs, the Docker
+    HEALTHCHECK, any other host.
+
     Deliberately no storage or market-data round trip — this runs once a
     minute from several regions, and a dependency blip should page through
     the error-rate alert (which sees the real user impact), not by taking
@@ -482,6 +491,7 @@ routes = [
     Route(PATH_ES.rstrip("/"), es_redirect, methods=["GET", "HEAD"]),
     Route("/robots.txt", robots, methods=["GET", "HEAD"]),
     Route("/sitemap.xml", sitemap, methods=["GET", "HEAD"]),
+    Route("/livez", healthz, methods=["GET", "HEAD"]),
     Route("/healthz", healthz, methods=["GET", "HEAD"]),
     Route("/status", status, methods=["GET", "HEAD"]),
     Route("/legal/{doc:str}", legal_page, methods=["GET", "HEAD"]),

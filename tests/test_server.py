@@ -308,8 +308,12 @@ def test_the_oidc_callback_is_never_bounced_to_another_host(pinned_client):
 # ------------------------------------------------------------------ liveness
 
 
-def test_healthz_answers_without_touching_the_app(client):
-    r = client.get("/healthz")
+@pytest.mark.parametrize("path", ["/livez", "/healthz"])
+def test_liveness_answers_without_touching_the_app(client, path):
+    # Two paths, one handler. /livez is the one monitoring probes: Google's
+    # frontend answers /healthz itself on Cloud Run, so the route never runs
+    # there — it stays for local runs and the Docker HEALTHCHECK.
+    r = client.get(path)
     assert r.status_code == 200
     assert r.json() == {"status": "ok"}
     assert r.headers["cache-control"] == "no-store"

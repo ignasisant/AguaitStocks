@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 # One-time Cloud Monitoring setup for the Cloud Run service: an uptime check
-# on /healthz, an alert when it fails, and an alert on ERROR-severity app logs.
+# on /livez, an alert when it fails, and an alert on ERROR-severity app logs.
+#
+# The path is /livez, not /healthz: Google's frontend answers /healthz itself
+# with a 404 before the request reaches Cloud Run, so a check on that path
+# would fail forever while the service is perfectly healthy.
 #
 # Usage:
 #   ./scripts/setup_monitoring.sh you@example.com
@@ -39,7 +43,7 @@ else
     echo "channel exists: $CHANNEL"
 fi
 
-# --- uptime check on /healthz -------------------------------------------------
+# --- uptime check on /livez -------------------------------------------------
 if gcloud monitoring uptime list-configs --project "$PROJECT" \
     --format 'value(displayName)' | grep -qx "stocks-healthz"; then
     echo "uptime check exists"
@@ -48,7 +52,7 @@ else
         --project "$PROJECT" \
         --resource-type uptime-url \
         --resource-labels "host=$HOST,project_id=$PROJECT" \
-        --protocol https --path /healthz --port 443 \
+        --protocol https --path /livez --port 443 \
         --period 5 --timeout 10
     echo "created uptime check"
 fi
