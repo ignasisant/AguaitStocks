@@ -2,15 +2,18 @@
 
 import re
 
+import pytest
 import yaml
 
 from stocks.config import DATA_DIR, PROJECT_ROOT, load_watchlist
+from stocks.web import auth
 from stocks.web.auth import (
     DEFAULT_PREFS,
     _legacy_slug,
     all_tags,
     ensure_user_data,
     load_prefs,
+    mark_login,
     paths_for,
     save_prefs,
     save_watchlist_entries,
@@ -67,6 +70,55 @@ def test_ensure_user_data_seeds_starter_watchlist(tmp_path):
     assert [h.ticker for h in load_watchlist(p.watchlist)] == ["NVDA"]
 
 
+def test_ensure_user_data_reports_only_the_seeding_call(tmp_path):
+    p = paths_for("jane@example.com", users_dir=tmp_path)
+    assert ensure_user_data(p) is True  # created the account
+    assert ensure_user_data(p) is False  # already there
+
+
+def test_mark_login_dates_a_signup_exactly(tmp_path):
+    p = paths_for("jane@example.com", users_dir=tmp_path)
+    seeded = ensure_user_data(p)
+    assert mark_login(p, seeded=seeded) == "signup"
+    prefs = load_prefs(p.prefs)
+    assert prefs["first_seen"].startswith(prefs["last_seen"])  # ISO stamp, same day
+    assert prefs["first_seen_estimated"] is False
+
+    # Returning: first_seen is never restamped, and the account is not a
+    # second signup.
+    assert mark_login(p, seeded=False) == "login"
+    assert load_prefs(p.prefs)["first_seen"] == prefs["first_seen"]
+
+
+def test_mark_login_backfills_an_account_it_did_not_create(tmp_path):
+    p = paths_for("jane@example.com", users_dir=tmp_path)
+    ensure_user_data(p)
+    # No first_seen and nothing seeded this run -> the account predates the
+    # bookkeeping: dated, flagged inexact, and NOT counted as a signup.
+    assert mark_login(p, seeded=False) == "login"
+    prefs = load_prefs(p.prefs)
+    assert prefs["first_seen"]
+    assert prefs["first_seen_estimated"] is True
+
+
+def test_mark_login_leaves_prefs_untouched_within_the_day(tmp_path):
+    p = paths_for("jane@example.com", users_dir=tmp_path)
+    mark_login(p, seeded=ensure_user_data(p))
+    before = p.prefs.read_text()
+    mark_login(p, seeded=False)  # same day: no write, so no bucket PUT
+    assert p.prefs.read_text() == before
+
+
+def test_mark_login_keeps_the_rest_of_prefs(tmp_path):
+    p = paths_for("jane@example.com", users_dir=tmp_path)
+    ensure_user_data(p)
+    save_prefs({**DEFAULT_PREFS, "currency": "USD", "telegram_chat_id": 7}, p.prefs)
+    mark_login(p, seeded=False)
+    prefs = load_prefs(p.prefs)
+    assert prefs["currency"] == "USD"
+    assert prefs["telegram_chat_id"] == 7
+
+
 def test_ensure_user_data_migrates_legacy_dir(tmp_path):
     email = "jane@example.com"
     p = paths_for(email, users_dir=tmp_path)
@@ -81,6 +133,56 @@ def test_ensure_user_data_migrates_legacy_dir(tmp_path):
     (legacy / "watchlist.yaml").write_text("watchlist:\n  - ticker: EVIL\n")
     ensure_user_data(p, legacy_root=legacy)
     assert [h.ticker for h in load_watchlist(p.watchlist)] == ["NVDA"]
+
+
+def _signed_in(monkeypatch, tmp_path, email="jane@example.com"):
+    """resolve_user() against a fake Streamlit session, rooted at tmp_path."""
+    # paths_for() binds users_dir as a default argument, so patching
+    # auth.USERS_DIR alone would let the account land in the real data dir.
+    monkeypatch.setattr(auth, "USERS_DIR", tmp_path)
+    monkeypatch.setattr(
+        auth, "paths_for",
+        lambda addr, owner=None: paths_for(addr, owner, users_dir=tmp_path),
+    )
+    monkeypatch.setattr(
+        auth, "guest_paths", lambda: paths_for("_guest", users_dir=tmp_path)
+    )
+    monkeypatch.setattr(auth, "is_logged_in", lambda: bool(email))
+    monkeypatch.setattr(auth.st, "user", type("U", (), {"email": email}), raising=False)
+    monkeypatch.setattr(auth.st, "secrets", {}, raising=False)
+    monkeypatch.setattr(auth.st, "session_state", {}, raising=False)
+    return auth.st.session_state
+
+
+def test_resolve_user_stamps_a_signup_once_per_identity(monkeypatch, tmp_path):
+    state = _signed_in(monkeypatch, tmp_path)
+    paths = auth.resolve_user()
+    assert state["_login_kind"] == "signup"
+    assert state["_login_marked"] == "jane@example.com"
+    stamp = paths.prefs.read_text()
+
+    # Reruns must not re-read or rewrite prefs: prefs.json is mirrored to the
+    # bucket, so an unguarded stamp would be a PUT on every interaction.
+    monkeypatch.setattr(
+        auth, "mark_login", lambda *a, **k: pytest.fail("restamped on rerun")
+    )
+    auth.resolve_user()
+    assert paths.prefs.read_text() == stamp
+
+
+def test_resolve_user_clears_the_verdict_on_sign_out(monkeypatch, tmp_path):
+    state = _signed_in(monkeypatch, tmp_path)
+    auth.resolve_user()
+    monkeypatch.setattr(auth, "is_logged_in", lambda: False)
+    auth.resolve_user()
+    assert state["_login_kind"] == ""  # no auth.* event for a guest run
+    assert "_login_marked" not in state  # a later sign-in is evaluated again
+
+
+def test_resolve_user_does_not_stamp_a_guest(monkeypatch, tmp_path):
+    _signed_in(monkeypatch, tmp_path, email="")
+    paths = auth.resolve_user()
+    assert not paths.prefs.exists()
 
 
 def test_prefs_roundtrip_and_corrupt_fallback(tmp_path):

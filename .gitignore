@@ -28,6 +28,10 @@ wheels/
 /data/portfolio.db
 /data/portfolio.db.bak*
 /data/fx_history.json
+
+# Learned Yahoo quoteType per symbol (stocks.data.funds) — a regenerable
+# cache; the catalog in funds.py seeds the common funds without it
+/data/quote_types.json
 /data/last_import.json
 
 # Production log snapshots (`stocks logs export`) — they carry account slugs

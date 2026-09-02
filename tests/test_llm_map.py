@@ -14,7 +14,7 @@ import json
 
 import pytest
 
-from stocks.portfolio import llm_map
+from stocks.portfolio import instruments, llm_map
 
 # A hand-kept Spanish spreadsheet: two preamble rows, semicolons, comma
 # decimals, dotted thousands, an action column in Spanish and a trailing
@@ -38,6 +38,14 @@ MAPPING = {
     "thousands": ".",
     "action_map": {"compra": "buy", "venta": "sell", "dividendo": "dividend"},
 }
+
+
+@pytest.fixture(autouse=True)
+def clear_symbol_memo():
+    """Resolution is memoised process-wide; each test starts with none."""
+    instruments._memo.clear()
+    yield
+    instruments._memo.clear()
 
 
 class _StubProvider:
@@ -227,6 +235,33 @@ def test_apply_mapping_skips_a_row_with_no_symbol():
     assert result.skipped[0]["reason"] == "no symbol"
 
 
+def test_apply_mapping_skips_a_row_whose_symbol_is_its_currency():
+    """The currency column mapped as the symbol — a well-formed misread."""
+    grid = [["date", "ticker", "action", "currency"],
+            ["2024-01-02", "EUR", "dividend", "EUR"]]
+    mapping = {**MAPPING, "header_row": 0,
+               "columns": {"date": 0, "ticker": 1, "action": 2, "currency": 3,
+                           "quantity": None, "price": None, "fee": None}}
+    result = llm_map.apply_mapping(grid, mapping)
+    assert not result.transactions
+    assert result.skipped[0]["reason"] == "ticker is the currency EUR"
+
+
+def test_extracted_row_whose_symbol_is_its_currency_is_dropped():
+    tx, why = llm_map._transaction_from({
+        "date": "2024-12-27", "ticker": "USD", "action": "dividend",
+        "price": 1.08, "currency": "USD"})
+    assert tx is None and why == "ticker is the currency USD"
+
+
+def test_the_extracted_label_is_kept_verbatim_for_resolution():
+    """_transaction_from copies what the page said; symbols come later."""
+    tx, why = llm_map._transaction_from({
+        "date": "2024-08-29", "ticker": "PDD Holdings Inc - ADR",
+        "action": "buy", "quantity": 22, "price": 94.41, "currency": "USD"})
+    assert tx is not None and tx.ticker == "PDD HOLDINGS INC - ADR"
+
+
 def test_apply_mapping_accepts_an_already_canonical_action():
     """A file that already says "buy" needs no action_map entry."""
     grid = [["date", "ticker", "action"], ["2024-01-02", "AAPL", "BUY"]]
@@ -287,6 +322,96 @@ def test_extracted_trades_become_transactions(monkeypatch):
     assert found.kind == llm_map.KIND_TRADES
     assert (tx.date, tx.ticker, tx.action) == ("2024-01-02", "AAPL", "buy")
     assert (tx.quantity, tx.price, tx.fee, tx.currency) == (10.0, 180.5, 1.2, "USD")
+
+
+def test_the_resolution_call_is_retried_once(monkeypatch):
+    """It lands right behind the extraction calls, into a per-minute limit."""
+    _batches(monkeypatch, [TRADES_PAGE])
+    monkeypatch.setattr(llm_map, "RESOLVE_RETRY_SECONDS", 0)
+    replies = iter([
+        _extraction("trades", [{"date": "2024-01-02", "ticker": "Tesla Inc.",
+                                "action": "buy", "quantity": 1, "price": 10}]),
+        RuntimeError("429 rate limited"),
+        '{"TESLA INC.": "TSLA"}',
+    ])
+
+    class _RateLimitedOnce(_StubProvider):
+        def complete(self, api_key, model, system, messages):
+            reply = next(replies)
+            if isinstance(reply, Exception):
+                raise reply
+            return reply
+
+    found = llm_map.extract("statement.pdf", b"%PDF", _RateLimitedOnce(), "k")
+    assert found.result.transactions[0].ticker == "TSLA"
+
+
+def test_labels_become_tickers_in_one_extra_call(monkeypatch):
+    """Names and ISINs are resolved by the model, once, after the read."""
+    _batches(monkeypatch, [TRADES_PAGE])
+    replies = iter([
+        _extraction("trades", [
+            {"date": "2024-11-13", "ticker": "LVMH Moet Hennessy Louis Vuitton",
+             "action": "buy", "quantity": 5, "price": 575, "currency": "EUR"},
+            {"date": "2024-12-05", "ticker": "IL0011595993",
+             "action": "buy", "quantity": 112, "price": 18.16},
+            {"date": "2024-12-05", "ticker": "LVMH Moet Hennessy Louis Vuitton",
+             "action": "sell", "quantity": 5, "price": 629.9, "currency": "EUR"},
+        ]),
+        '{"LVMH MOET HENNESSY LOUIS VUITTON": "MC.PA", "IL0011595993": "INMD"}',
+    ])
+
+    class _Sequence(_StubProvider):
+        def complete(self, api_key, model, system, messages):
+            self.calls.append(messages)
+            return next(replies)
+
+    provider = _Sequence()
+    found = llm_map.extract("statement.pdf", b"%PDF", provider, "k")
+
+    assert [tx.ticker for tx in found.result.transactions] == [
+        "MC.PA", "INMD", "MC.PA"]
+    assert len(provider.calls) == 2  # one read, one resolution for three rows
+
+
+def test_an_unresolved_label_keeps_its_name_for_the_preview(monkeypatch):
+    """Nothing is guessed: the row reaches validation named as printed."""
+    _batches(monkeypatch, [TRADES_PAGE])
+    replies = iter([
+        _extraction("trades", [{"date": "2024-01-02", "ticker": "Banco Fictício SA",
+                                "action": "buy", "quantity": 1, "price": 10}]),
+        '{"BANCO FICTÍCIO SA": null}',
+    ])
+
+    class _Sequence(_StubProvider):
+        def complete(self, api_key, model, system, messages):
+            return next(replies)
+
+    found = llm_map.extract("statement.pdf", b"%PDF", _Sequence(), "k")
+    assert found.result.transactions[0].ticker == "BANCO FICTÍCIO SA"
+
+
+def test_a_dead_provider_leaves_the_labels_alone(monkeypatch):
+    """The read succeeded; only resolution failed. Keep what was read."""
+    _batches(monkeypatch, [TRADES_PAGE])
+    monkeypatch.setattr(llm_map, "RESOLVE_RETRY_SECONDS", 0)
+    replies = iter([_extraction("trades", [{"date": "2024-01-02",
+                                            "ticker": "Tesla Inc.",
+                                            "action": "buy", "quantity": 1,
+                                            "price": 10}])])
+
+    class _DiesOnResolution(_StubProvider):
+        def complete(self, api_key, model, system, messages):
+            try:
+                return next(replies)
+            except StopIteration:
+                raise RuntimeError("network down") from None
+
+    provider = _DiesOnResolution()
+    found = llm_map.extract("statement.pdf", b"%PDF", provider, "k")
+    assert found.result.transactions[0].ticker == "TESLA INC."
+    # and the preview says why, instead of blaming the statement
+    assert "symbols could not be looked up" in found.result.skipped[0]["reason"]
 
 
 def test_one_page_of_trades_outweighs_pages_of_holdings(monkeypatch):

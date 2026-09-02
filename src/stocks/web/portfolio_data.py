@@ -28,6 +28,7 @@ from stocks.analysis.portfolio import (
     position_values_history,
     positions_frame_eur,
     session_moves,
+    session_quote,
     time_weighted_returns,
 )
 from stocks.portfolio.ledger import all_transactions
@@ -70,6 +71,17 @@ def last_session_moves(tickers: tuple[str, ...]) -> dict[str, float]:
     Yahoo quotes one, the last completed session once those windows shut. Keyed
     by the ticker tuple; ttl refreshes it around the next open."""
     return session_moves(list(tickers))
+
+
+@st.cache_data(ttl=120, show_spinner=False)
+def last_session_quote(ticker: str) -> dict | None:
+    """Cached one-ticker quote snapshot: price, day % move, pre/post label.
+
+    The ticker page's price hero reads this off-session — the daily closes miss
+    the extended-hours move entirely, so a -13% premarket gap would render as
+    yesterday's session on both the price and the delta. Short ttl: premarket
+    prices move fast and this is a single request."""
+    return session_quote(ticker)
 
 
 def enriched_positions(db: str, mtime: float) -> pd.DataFrame:
@@ -179,3 +191,22 @@ def eur_spot(quote: str) -> float | None:
         return float(rate_on(date.today(), "EUR", quote))
     except Exception:
         return None  # FX down → headline falls back to EUR
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def native_eur_rates(ccys: tuple[str, ...]) -> dict[str, float]:
+    """{currency: native->EUR spot} for the currencies a book trades in.
+
+    positions_frame_eur multiplies each native price by this rate, so dividing
+    an EUR figure back by it recovers the quote-currency number a ticker is
+    actually priced in. Pairs whose lookup fails are absent (caller falls back
+    to "n/a" rather than printing a EUR figure under a foreign symbol)."""
+    from stocks.data.fx import spot
+
+    out: dict[str, float] = {}
+    for c in ccys:
+        try:
+            out[c] = float(spot(c, "EUR")[0])
+        except Exception:
+            pass
+    return out

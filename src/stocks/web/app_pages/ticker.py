@@ -42,6 +42,7 @@ from stocks.data.estimates import (
 )
 from stocks.data.fetch import fetch_history
 from stocks.data.fundamentals import fetch_fundamentals
+from stocks.data.funds import FundProfile, fetch_profile, is_fund
 from stocks.data.fx import usd_eur
 from stocks.data.insiders import (
     BUY_CODE,
@@ -53,6 +54,7 @@ from stocks.formatting import compact_money
 from stocks.portfolio.ledger import all_transactions
 from stocks.portfolio.positions import build as build_positions
 from stocks.web import auth, notices, skeletons
+from stocks.web.i18n import active_language
 from stocks.web.i18n import t as tr
 from stocks.web.kpi_text import kpi_desc, sources_table
 from stocks.web.widgets import (
@@ -248,6 +250,12 @@ def _event_markers(
                 txt += tr("ticker.hover_div_yield", pct=f"{amt / close * 100:.2f}")
             events.append(("d", ts, txt))
 
+    # A fund pays distributions (marked above, they ride in the history frame)
+    # but never reports, so the earnings calendar is a wasted round trip that
+    # answers "No earnings dates found" for every ETF.
+    if is_fund(ticker):
+        return events
+
     dates, results = _earnings_events(ticker)
     by_date = {r.date: r for r in results}
     lo, hi = df.index[0].normalize(), df.index[-1]
@@ -301,6 +309,17 @@ def _position_values_eur(db: str) -> dict[str, float]:
 
     held = _held(db)
     return market_values_eur(list(held.values())) if held else {}
+
+
+def _live_quote(ticker: str) -> dict | None:
+    """Quote snapshot (`price`/`pct`/`session`) while `ticker` is outside its
+    regular session, else None — during the session the fetched history's last
+    close already tracks the live price. Crypto trades 24/7, so it never
+    overrides. See `analysis.portfolio.session_quote`."""
+    from stocks.analysis.portfolio import market_live
+    from stocks.web.portfolio_data import last_session_quote
+
+    return None if market_live(ticker) else last_session_quote(ticker)
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
@@ -405,9 +424,16 @@ def _plain(md: str) -> str:
     return re.sub(r":\w+\[(.*?)\]", r"\1", md).replace("**", "")
 
 
-def _mobile_summary_html(df: pd.DataFrame, sel: str, my_pos, db: str) -> str:
+def _mobile_summary_html(
+    df: pd.DataFrame,
+    sel: str,
+    my_pos,
+    db: str,
+    price_now: float,
+    day_pct: float,
+    session_note: str = "",
+) -> str:
     last = float(df["Close"].iloc[-1])
-    prev = float(df["Close"].iloc[-2])
     first = float(df["Close"].iloc[0])
     period_pct = (last - first) / first * 100
     rsi_val = float(df["RSI14"].iloc[-1])
@@ -417,8 +443,9 @@ def _mobile_summary_html(df: pd.DataFrame, sel: str, my_pos, db: str) -> str:
     parts = [
         '<div style="display:flex;align-items:flex-end;gap:10px;flex-wrap:wrap">'
         "<span style=\"font-family:'Epilogue','Instrument Sans',sans-serif;"
-        f'font-weight:700;font-size:{FS_3XL};line-height:1.1">{last:,.2f}</span>'
-        + _pill_html((last - prev) / prev * 100)
+        f'font-weight:700;font-size:{FS_3XL};line-height:1.1">{price_now:,.2f}</span>'
+        + _pill_html(day_pct)
+        + (_muted(session_note) if session_note else "")
         + f'<span style="font-size:{FS_SM};padding-bottom:2px;'
         f'color:{UP_COLOR if period_pct >= 0 else DOWN_COLOR}">'
         + html.escape(
@@ -498,6 +525,112 @@ def _position_metrics(cols, pos, last: float) -> None:
     )
     p4.metric(tr("ticker.avg_buy_price"), f"{pos.avg_cost_native:,.2f} {pos.currency}")
     p4.caption(tr("ticker.n_shares", n=f"{pos.quantity:,.4f}"))
+
+
+# Drag-zooming the price chart picks a custom window, but Plotly reports that
+# as a client-side relayout and Streamlit surfaces no relayout event (only
+# box/lasso *selections*, which would cost the drag-to-zoom gesture and a
+# server round-trip per drag). So the change over the picked window is computed
+# in the browser: the price series rides along in the readout slot's data
+# attributes — Plotly serializes numeric arrays as base64 ({"dtype", "bdata"}),
+# so gd.data is not readable from JS without decoding it — and the picked
+# window is read off the chart's own layout once the drag ends. No rerun, so
+# the line lands as the mouse comes up. Desktop only: phones pin both axes.
+_RANGE_JS = r"""
+<script>
+(function () {
+  if (window.__topstocksRangeChange) return;  /* wire once per session */
+  window.__topstocksRangeChange = true;
+  /* Axis range endpoints arrive as "2026-06-28 15:07:03.5225" (space, and a
+     sub-millisecond fraction outside the ISO grammar Safari holds to); our own
+     stamps are ISO. Neither carries a zone — the frame is exchange-local wall
+     time, as the chart's — so both parse alike and only their span is used. */
+  const ms = (v) => {
+    if (typeof v === "number") return v;
+    return Date.parse(String(v).replace(" ", "T").replace(/(\.\d{3})\d+/, "$1"));
+  };
+  /* The price chart is the one carrying a meta="price" trace; every other
+     chart on the page keeps its own zoom to itself. */
+  const chart = () =>
+    Array.prototype.find.call(
+      document.querySelectorAll(".js-plotly-plot"),
+      (gd) => (gd.data || []).some((t) => t.meta === "price")
+    );
+  const clear = (b) => {
+    if (b) { b.textContent = ""; b.style.display = "none"; }
+  };
+  const read = () => {
+    /* Both nodes are looked up per event, never captured: Streamlit replaces
+       them on every rerun (period or chart-type switch), and the fresh slot
+       starts out empty. */
+    const gd = chart();
+    const b = document.querySelector(".ts-range-change");
+    if (!gd || !b) return;
+    const ax = (gd.layout || {}).xaxis || {};
+    if (ax.autorange || !ax.range) { clear(b); return; }  /* back to the window */
+    const xs = (b.dataset.x || "").split(",");
+    const ys = (b.dataset.y || "").split(",");
+    const lo = Math.min(ms(ax.range[0]), ms(ax.range[1]));
+    const hi = Math.max(ms(ax.range[0]), ms(ax.range[1]));
+    let i0 = -1, i1 = -1;
+    for (let i = 0; i < xs.length; i++) {
+      if (!ys[i]) continue;  /* gap in the series */
+      const t = ms(xs[i]);
+      if (!(t >= lo && t <= hi)) continue;
+      if (i0 < 0) i0 = i;
+      i1 = i;
+    }
+    if (i0 < 0 || i1 === i0) { clear(b); return; }  /* under two bars in view */
+    const a = parseFloat(ys[i0]), z = parseFloat(ys[i1]);
+    if (!a || isNaN(z)) { clear(b); return; }
+    const pct = (z / a - 1) * 100;
+    /* Intraday windows land inside one date: label those with the clock. */
+    const fmt = new Intl.DateTimeFormat(b.dataset.locale || undefined,
+      ms(xs[i1]) - ms(xs[i0]) < 2 * 864e5
+        ? {day: "numeric", month: "short", hour: "2-digit", minute: "2-digit"}
+        : {day: "numeric", month: "short", year: "2-digit"});
+    b.textContent = (b.dataset.tmpl || "{pct} {start} {end}")
+      .replace("{pct}", (pct >= 0 ? "+" : "") + pct.toFixed(2) + "%")
+      .replace("{start}", fmt.format(new Date(ms(xs[i0]))))
+      .replace("{end}", fmt.format(new Date(ms(xs[i1]))));
+    b.style.color = pct >= 0 ? b.dataset.up : b.dataset.down;
+    b.style.display = "";
+  };
+  /* Deliberately not gd.on("plotly_relayout"): Streamlit re-plots the same
+     div on a fragment rerun, and Plotly.newPlot purges the handlers off it
+     while the element (so any "already wired" mark on it) survives — the
+     readout then goes dead for the rest of the session. Document-level
+     listeners outlive every remount. The drag ends on mouseup, the reset on
+     dblclick, and the modebar buttons on their own click; the timeout lets
+     Plotly land the relayout before the layout is read.
+     The listeners take no target filter: Plotly covers the whole document
+     with a .dragcover while a drag is live, so the mouseup that ends a zoom
+     lands outside the chart. read() is a no-op whenever the axis is not
+     zoomed, which is every other click on the page. */
+  const after = () => setTimeout(read, 80);
+  document.addEventListener("mouseup", after, true);
+  document.addEventListener("dblclick", after, true);
+})();
+</script>
+"""
+
+
+def _range_readout(box, df: pd.DataFrame) -> None:
+    """Empty slot under the period change, filled by _RANGE_JS on zoom."""
+    xs = ",".join(df.index.strftime("%Y-%m-%dT%H:%M"))
+    ys = ",".join("" if pd.isna(v) else f"{v:.4f}" for v in df["Close"])
+    # The catalog string formatted with its own placeholders back in, so the
+    # browser substitutes the numbers into a translated template.
+    tmpl = tr("ticker.range_change", pct="{pct}", start="{start}", end="{end}")
+    box.html(
+        '<div class="ts-range-change"'
+        f' style="display:none;font-size:{FS_XS};line-height:1.6"'
+        f' data-x="{xs}" data-y="{ys}"'
+        f' data-locale="{html.escape(active_language(), quote=True)}"'
+        f' data-up="{UP_COLOR}" data-down="{DOWN_COLOR}"'
+        f' data-tmpl="{html.escape(tmpl, quote=True)}"></div>' + _RANGE_JS,
+        unsafe_allow_javascript=True,
+    )
 
 
 @st.fragment
@@ -582,11 +715,23 @@ def _price_section(ticker: str) -> None:
 
     last = float(df["Close"].iloc[-1])
     prev = float(df["Close"].iloc[-2])
+    # The last two daily closes miss the extended-hours move entirely, so a
+    # -13% premarket gap on earnings would still render as yesterday's session.
+    # Off-session the hero's level and day % come from the quote instead: the
+    # pre/after-hours price while that window trades, else the last close.
+    live = _live_quote(ticker)
+    extended = bool(live and live["session"])
+    price_now = live["price"] if extended else last
+    day_pct = live["pct"] * 100 if live else (last - prev) / prev * 100
+    # The level is no longer a close, so the hero says which session it is.
+    session_note = tr(f"ticker.session_{live['session']}") if extended else ""
     if _MOBILE:
         # Phone summary per the design: price hero + 2×2 position tiles.
         # Built before the slot is claimed: _mobile_summary_html triggers its
         # own position-values fetch, which belongs under the shimmer.
-        summary = _mobile_summary_html(df, sel, my_pos, db)
+        summary = _mobile_summary_html(
+            df, sel, my_pos, db, price_now, day_pct, session_note
+        )
         metrics_slot.container().html(summary)
     else:
         with metrics_slot.container():
@@ -595,9 +740,9 @@ def _price_section(ticker: str) -> None:
             cols = metric_cells(7 if my_pos else 3)
             c1, c2, c3 = cols[:3]
             c1.metric(
-                tr("ticker.price"),
-                f"{last:,.2f}",
-                f"{(last - prev) / prev * 100:+.2f}%",
+                tr("ticker.price") + (f" · {session_note}" if session_note else ""),
+                f"{price_now:,.2f}",
+                f"{day_pct:+.2f}%",
             )
             # Change over the selected range: df is already trimmed to the
             # display window, so the first Close is the period's start.
@@ -611,6 +756,9 @@ def _price_section(ticker: str) -> None:
                     period=tr(f"ticker.period_{sel}"),
                 )
             )
+            # Second line, hidden until the reader drag-zooms the chart to a
+            # window of their own (see _RANGE_JS).
+            _range_readout(c1, df)
 
             rsi_val = float(df["RSI14"].iloc[-1])
             c2.metric(
@@ -649,7 +797,7 @@ def _price_section(ticker: str) -> None:
         fig.add_trace(
             go.Scatter(
                 x=df.index, y=df["Close"], name=tr("ticker.price"),
-                mode="lines",
+                mode="lines", meta="price",
                 line=dict(color=BRAND_ACCENT, width=2),
                 fill="tonexty",
                 fillgradient=dict(
@@ -668,6 +816,7 @@ def _price_section(ticker: str) -> None:
                 low=df["Low"],
                 close=df["Close"],
                 name=tr("ticker.price"),
+                meta="price",
                 increasing_line_color=CANDLE_UP,
                 increasing_fillcolor=CANDLE_UP,
                 decreasing_line_color=CANDLE_DOWN,
@@ -970,6 +1119,154 @@ def _crypto_section(t: str) -> None:
 if is_crypto(ticker):
     with st.container(border=True):
         _crypto_section(ticker)
+    st.stop()
+
+
+# ------------------------------------------------------------------ funds
+@st.cache_data(ttl=86400, show_spinner=False)
+def _fund(t: str) -> FundProfile | None:
+    """Fund profile for `t`, None when it's a stock.
+
+    `is_fund` answers from the catalog or the learned type cache for every
+    symbol seen before, so a stock pays one `.info` lookup ever and a fund
+    pays a second one for its basket — cached for a day, which is faster than
+    holdings and costs actually move.
+    """
+    return fetch_profile(t) if is_fund(t) else None
+
+
+def _fund_pct(value: float | None, digits: int = 2) -> str:
+    return f"{value * 100:.{digits}f}%" if value is not None else tr("ticker.na")
+
+
+def _fund_kpis(p: FundProfile) -> None:
+    """Cost, size and income tiles — the fund's answer to the KPI grid.
+
+    Yahoo's coverage of UCITS lines is thinner than of US funds (no AUM, no
+    category, rarely a yield), so every tile stands on its own and prints n/a
+    rather than the section hiding when one field is missing. A bond sleeve
+    swaps the top-10 concentration tile — meaningless when Yahoo publishes no
+    basket for it — for effective duration, the number that actually decides
+    what a rate move does to it.
+    """
+    sym = auth.CURRENCY_SYMBOL.get(str(p.currency or "").upper(), "")
+    tiles = [
+        (tr("ticker.fund_ter"), _fund_pct(p.expense_ratio, 2), None,
+         tr("ticker.fund_ter_help")),
+        (tr("ticker.fund_aum"),
+         compact_money(p.aum, sym) if p.aum else tr("ticker.na"), None,
+         tr("ticker.fund_aum_help")),
+        (tr("ticker.fund_yield"), _fund_pct(p.dividend_yield, 2), None,
+         tr("ticker.fund_yield_help")),
+        (tr("ticker.fund_turnover"), _fund_pct(p.turnover, 1), None,
+         tr("ticker.fund_turnover_help")),
+    ]
+    if p.is_bond_fund or (p.bond_duration and not p.holdings):
+        tiles.append((
+            tr("ticker.fund_duration"),
+            f"{p.bond_duration:.2f}" if p.bond_duration else tr("ticker.na"),
+            None,
+            tr("ticker.fund_duration_help"),
+        ))
+    else:
+        tiles.append((
+            tr("ticker.fund_top10"),
+            _fund_pct(p.disclosed_weight, 1) if p.holdings else tr("ticker.na"),
+            None,
+            tr("ticker.fund_top10_help"),
+        ))
+    st.html(kpi_grid_html(tiles))
+
+
+def _fund_holdings_table(p: FundProfile) -> None:
+    """The disclosed basket, each line linked to its own page.
+
+    Yahoo publishes the top ten only, so the caption says what the rows add up
+    to — a reader who sees ten names must not read them as the whole fund.
+    """
+    if not p.holdings:
+        st.caption(tr("ticker.fund_no_holdings"))
+        return
+    frame = pd.DataFrame(
+        [{"ticker": h.symbol, "weight": h.weight} for h in p.holdings]
+    )
+    st.html(
+        ticker_table_html(
+            frame,
+            fmt={"weight": "{:.2%}"},
+            labels={"ticker": tr("ticker.fund_holding"),
+                    "weight": tr("ticker.fund_weight")},
+            mobile={"value": "weight"},
+        )
+    )
+    st.caption(
+        tr(
+            "ticker.fund_holdings_caption",
+            n=len(p.holdings),
+            pct=_fund_pct(p.disclosed_weight, 1),
+        )
+    )
+
+
+def _fund_exposure_chart(p: FundProfile) -> None:
+    """Sector weights as a horizontal bar — the basket's real bet.
+
+    Bars, not a donut: the reader's question here is "how big is the tech
+    sleeve", which is a length comparison, and sector names are too long to
+    ride slices.
+    """
+    if not p.sectors:
+        return
+    labels = [label for label, _ in p.sectors][::-1]
+    values = [weight * 100 for _, weight in p.sectors][::-1]
+    fig = go.Figure(
+        go.Bar(
+            x=values,
+            y=labels,
+            orientation="h",
+            marker=dict(color=BRAND_ACCENT),
+            hovertemplate="<b>%{y}</b>  %{x:.1f}%<extra></extra>",
+        )
+    )
+    fig.update_layout(
+        # Height grows with the bucket count so eleven sectors don't compress
+        # into unreadable 8px bars.
+        **chart_layout(
+            title=tr("ticker.fund_sectors"), height=max(220, 26 * len(labels) + 90)
+        ),
+        xaxis=dict(ticksuffix="%", fixedrange=True),
+        yaxis=dict(fixedrange=True),
+        showlegend=False,
+    )
+    show_chart(fig)
+
+
+def _fund_section(p: FundProfile) -> None:
+    """Everything a fund has instead of fundamentals: cost, basket, exposure."""
+    st.subheader(tr("ticker.fund_profile"))
+    meta = " · ".join(
+        x for x in (p.legal_type, p.category, p.family) if x
+    )
+    if meta:
+        st.caption(meta)
+    _fund_kpis(p)
+    if p.asset_classes:
+        st.caption(
+            tr("ticker.fund_assets") + "  "
+            + " · ".join(f"{label} {w * 100:.1f}%" for label, w in p.asset_classes)
+        )
+    _fund_exposure_chart(p)
+    _fund_holdings_table(p)
+    st.caption(tr("ticker.fund_caption"))
+
+
+# Funds stop here for the same reason coins do: a wrapper has no statements,
+# no insider filings and no comparables, and every one of those sections
+# costs a fetch to render an empty card.
+_fund_profile = _fund(ticker)
+if _fund_profile is not None:
+    with st.container(border=True):
+        _fund_section(_fund_profile)
     st.stop()
 
 

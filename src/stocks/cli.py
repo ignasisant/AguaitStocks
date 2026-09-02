@@ -164,7 +164,7 @@ def cmd_screen(args: argparse.Namespace) -> None:
     )
     from stocks.config import tickers as watchlist_tickers
 
-    metrics = fetch_metrics_many(watchlist_tickers())
+    metrics = fetch_metrics_many(watchlist_tickers(), drop_funds=True)
     df = metrics_frame(metrics)
 
     filters = [Filter(k, "min", v) for k, v in _parse_kv(args.min)]
@@ -303,9 +303,68 @@ def cmd_dashboard(args: argparse.Namespace) -> None:
     subprocess.run([sys.executable, "-m", "streamlit", "run", str(app)], check=False)
 
 
+def _print_fund(profile) -> None:
+    """A fund's own numbers, the way `fundamentals` prints a company's."""
+    from stocks.formatting import compact_money, pct
+
+    print(f"{profile.ticker}  {profile.name}")
+    meta = " · ".join(
+        x for x in (profile.legal_type, profile.category, profile.family) if x
+    )
+    if meta:
+        print(f"  {meta}")
+    aum = compact_money(profile.aum) if profile.aum else "n/a"
+    print(
+        f"  expense ratio {pct(profile.expense_ratio)}"
+        f"   size {aum}"
+        f"   yield {pct(profile.dividend_yield)}"
+        f"   turnover {pct(profile.turnover)}"
+    )
+    if profile.bond_duration:
+        print(
+            f"  duration {profile.bond_duration:.2f}y"
+            f"   maturity {profile.bond_maturity or float('nan'):.2f}y"
+        )
+    if profile.asset_classes:
+        mix = " · ".join(f"{k} {v * 100:.1f}%" for k, v in profile.asset_classes)
+        print(f"  asset mix: {mix}")
+    if profile.sectors:
+        print("\n  sector exposure")
+        for label, weight in profile.sectors:
+            print(f"    {label:<24} {weight * 100:>5.1f}%")
+    if profile.holdings:
+        print(
+            f"\n  top {len(profile.holdings)} holdings"
+            f" ({profile.disclosed_weight * 100:.1f}% of the fund)"
+        )
+        for h in profile.holdings:
+            print(f"    {h.symbol:<8} {h.name[:38]:<38} {h.weight * 100:>5.2f}%")
+
+
+def cmd_fund(args: argparse.Namespace) -> None:
+    from stocks.data.funds import fetch_profile
+
+    ticker = args.ticker.upper()
+    profile = fetch_profile(ticker)
+    if profile is None:
+        print(
+            f"{ticker} is not a fund (or Yahoo doesn't quote it) — "
+            "use `stocks fundamentals` for a company."
+        )
+        return
+    _print_fund(profile)
+
+
 def cmd_fundamentals(args: argparse.Namespace) -> None:
     from stocks.analysis.fundamentals import comparables_table
     from stocks.analysis.screener import fetch_metrics_many
+    from stocks.data.funds import fetch_profile
+
+    # A fund has none of the KPIs below; printing a column of n/a instead of
+    # what it does have would be the wrong kind of honest.
+    if profile := fetch_profile(args.ticker):
+        _print_fund(profile)
+        return
 
     tickers = [args.ticker.upper()]
     tickers += [p.strip().upper() for p in args.peers.split(",") if p.strip()]
@@ -347,8 +406,17 @@ def cmd_fundamentals(args: argparse.Namespace) -> None:
 
 def cmd_value(args: argparse.Namespace) -> None:
     from stocks.analysis.valuation import summarize
+    from stocks.data.funds import is_fund
 
     ticker = args.ticker.upper()
+    # A DCF discounts a business's cash flows. A fund has none of its own —
+    # its price is its holdings' — so there is nothing here to value.
+    if is_fund(ticker):
+        print(
+            f"{ticker} is a fund — a DCF needs a business's cash flows. "
+            f"Use `stocks fund {ticker}`, or value its holdings."
+        )
+        return
     data = _valuation_gather(ticker, args)
     price = data["price"]
     cons = data["consensus"]
@@ -574,7 +642,10 @@ def cmd_tax(args: argparse.Namespace) -> None:
         print(f"  of which deferred:   {ty.deferred_loss_eur:>12,.0f} EUR (2-month rule)")
     print(f"deductible losses:     {ty.deductible_loss_eur:>12,.0f} EUR")
     if ty.recovered_loss_eur:
-        print(f"recovered deferrals:   {ty.recovered_loss_eur:>12,.0f} EUR (replacement sold)")
+        print(
+            f"recovered deferrals:   {ty.recovered_loss_eur:>12,.0f} EUR"
+            " (replacement sold)"
+        )
     print(f"net taxable base:      {ty.net_taxable_eur:>12,.0f} EUR")
     print(f"estimated tax:         {ty.estimated_tax_eur:>12,.0f} EUR")
     if ty.carryforward_loss_eur:
@@ -611,8 +682,18 @@ def cmd_report(args: argparse.Namespace) -> None:
 
     from stocks.analysis.report import gather, render_report
     from stocks.config import load_watchlist
+    from stocks.data.funds import is_fund
 
     ticker = args.ticker.upper()
+    # The scaffold's sections are thesis, fundamentals, valuation, risks — all
+    # written about a business. Filling them for a wrapper would produce a
+    # document that reads authoritative and means nothing.
+    if is_fund(ticker):
+        print(
+            f"{ticker} is a fund — the 7-section scaffold is about a company. "
+            f"Use `stocks fund {ticker}` for its cost, basket and exposure."
+        )
+        return
     peers = [p.strip().upper() for p in args.peers.split(",") if p.strip()]
     name = next(
         (h.name for h in load_watchlist() if h.ticker.upper() == ticker), ""
@@ -718,6 +799,45 @@ def cmd_feedback(args: argparse.Namespace) -> None:
             print(f"    {line}")
         print()
     print(f"{len(items)} submissions")
+
+
+def cmd_users(args: argparse.Namespace) -> None:
+    """Account roster with signup dates (notify.fanout.iter_accounts).
+
+    The registered-account count the logs can't give: prefs.json outlives the
+    30-day log retention, so an account that signed up once and never came
+    back is still here.
+    """
+    from datetime import datetime, timedelta
+
+    from stocks.notify.fanout import iter_accounts
+
+    rows = iter_accounts()
+    if not rows:
+        print("(no accounts)")
+        return
+    if args.json:
+        print(json.dumps(rows, indent=2))
+        return
+
+    head = f"{'account':<40} {'first seen':<22} {'last seen':<11} {'telegram':>8}"
+    print(head)
+    print("-" * len(head))
+    for r in sorted(rows, key=lambda r: r["first_seen"] or "9999"):
+        first = (r["first_seen"] or "-") + (" ~" if r["estimated"] else "")
+        print(
+            f"{r['label'][:40]:<40} {first:<22} {r['last_seen'] or '-':<11} "
+            f"{'yes' if r['telegram'] else '-':>8}"
+        )
+
+    print(f"\n{len(rows)} accounts")
+    cutoff = (datetime.now(UTC).date() - timedelta(days=args.days)).isoformat()
+    new = sum(1 for r in rows if r["first_seen"] >= cutoff)
+    active = sum(1 for r in rows if r["last_seen"] >= cutoff)
+    print(f"{new} new, {active} active in the last {args.days} days")
+    if any(r["estimated"] for r in rows):
+        print("\n~ first seen backfilled on that account's next sign-in, not exact "
+              "(it predates this bookkeeping)")
 
 
 def cmd_backup(args: argparse.Namespace) -> None:
@@ -863,6 +983,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_dash = sub.add_parser("dashboard", help="launch the Streamlit dashboard")
     p_dash.set_defaults(func=cmd_dashboard)
+
+    p_etf = sub.add_parser(
+        "fund", help="print an ETF/fund profile: cost, basket, exposure"
+    )
+    p_etf.add_argument("ticker", help="fund ticker, e.g. SPY or IWDA.AS")
+    p_etf.set_defaults(func=cmd_fund)
 
     p_fund = sub.add_parser("fundamentals", help="print fundamental KPIs")
     p_fund.add_argument("ticker", help="main ticker, e.g. AAPL")
@@ -1031,6 +1157,13 @@ def build_parser() -> argparse.ArgumentParser:
     # ---- feedback: read what users sent through the in-app widget ----------
     p_fb = sub.add_parser("feedback", help="print user feedback (in-app widget)")
     p_fb.set_defaults(func=cmd_feedback)
+
+    p_users = sub.add_parser(
+        "users", help="account roster: signup + last-seen dates per account")
+    p_users.add_argument("--days", type=int, default=30,
+                         help="window for the new/active tallies (default 30)")
+    p_users.add_argument("--json", action="store_true", help="raw rows as JSON")
+    p_users.set_defaults(func=cmd_users)
 
     return parser
 

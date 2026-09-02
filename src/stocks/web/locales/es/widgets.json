@@ -11,6 +11,8 @@
   "widgets.sort_by": "Ordenar por",
   "widgets.analyze": "Analizar **{q}**",
   "widgets.no_tickers": "Sin valores.",
+  "widgets.searching": "Buscando…",
+  "widgets.no_results": "Sin resultados.",
   "widgets.crypto": "Cripto",
   "widgets.recent": "Recientes",
   "widgets.from_sec_search": "De la búsqueda de símbolos de la SEC",
@@ -43,5 +45,6 @@
   "widgets.alert_t_rsi_above": "RSI por encima de",
   "widgets.alert_t_sma_cross": "Cruce de SMA",
   "widgets.alert_t_high_52w": "Nuevo máximo de 52 semanas",
-  "widgets.alert_t_low_52w": "Nuevo mínimo de 52 semanas"
+  "widgets.alert_t_low_52w": "Nuevo mínimo de 52 semanas",
+  "widgets.funds": "ETFs y fondos"
 }

@@ -100,7 +100,7 @@ def _day_bars(df: pd.DataFrame) -> dict[str, tuple[float, float]]:
     if df is None or df.empty or "High" not in df or "Low" not in df:
         return {}
     out: dict[str, tuple[float, float]] = {}
-    for ts, high, low in zip(df.index, df["High"], df["Low"]):
+    for ts, high, low in zip(df.index, df["High"], df["Low"], strict=True):
         if pd.notna(high) and pd.notna(low):
             out[ts.date().isoformat()] = (float(high), float(low))
     return out

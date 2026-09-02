@@ -71,6 +71,105 @@ def test_mid_answer_failure_reraises_instead_of_switching(monkeypatch):
     assert out == ["partial "]
 
 
+class _FakeModels:
+    def __init__(self, ids):
+        self._ids = ids
+
+    def list(self):
+        return [type("M", (), {"id": i})() for i in self._ids]
+
+
+def _fake_openai(ids):
+    """Stands in for openai.OpenAI so _live_model can read a /models list."""
+
+    class _Client:
+        def __init__(self, **kw):
+            self.models = _FakeModels(ids)
+
+    return _Client
+
+
+def _retired(bid, live_model=None):
+    """A backend whose configured slug is gone; `live_model` answers instead."""
+    gone = RuntimeError(f"Error code: 404 - model_not_found: The model "
+                        f"`model-{bid}` does not exist")
+
+    def stream(api_key, model, system, messages):
+        if model != live_model:
+            raise gone
+        yield f"{model}-said-hi"
+
+    return _FreeBackend(bid, f"key-{bid}", f"model-{bid}", stream,
+                        f"https://{bid}.example/v1")
+
+
+@pytest.fixture(autouse=True)
+def _clear_live_model_cache():
+    llm._free_live_model.clear()
+    yield
+    llm._free_live_model.clear()
+
+
+def test_retired_slug_is_replaced_from_the_backends_model_list(monkeypatch):
+    b = _retired("groq", live_model="llama-9-instant")
+    monkeypatch.setattr(llm, "_free_backends", lambda: [b])
+    monkeypatch.setattr("openai.OpenAI",
+                        _fake_openai(["whisper-large-v3", "llama-9-instant"]))
+    assert list(llm._free_stream("", "auto", "sys", [])) == ["llama-9-instant-said-hi"]
+
+
+def test_a_proven_replacement_is_reused_for_the_next_call(monkeypatch):
+    monkeypatch.setattr(llm, "_free_secrets",
+                        lambda: {"groq": "gsk-x", "groq_model": "retired-slug"})
+    llm._free_live_model["groq"] = "llama-9-instant"
+    assert llm._free_backends()[0].model == "llama-9-instant"
+
+
+def test_only_a_retired_model_triggers_the_model_list(monkeypatch):
+    # A rate limit must fall straight through to the next backend: asking for
+    # /models would spend a request on a tier that is already over its cap.
+    calls = []
+    monkeypatch.setattr(llm, "_live_model", lambda b: calls.append(b.id))
+    monkeypatch.setattr(
+        llm, "_free_backends", lambda: [_dead("groq"), _ok("cerebras", ["c"])]
+    )
+    assert list(llm._free_stream("", "auto", "sys", [])) == ["c"]
+    assert calls == []
+
+
+def test_backend_that_hides_its_model_list_falls_through(monkeypatch):
+    monkeypatch.setattr(
+        llm, "_free_backends",
+        lambda: [_retired("groq", live_model="never"), _ok("cerebras", ["c"])],
+    )
+
+    def _boom(**kw):
+        raise RuntimeError("403 Forbidden")
+
+    monkeypatch.setattr("openai.OpenAI", _boom)
+    assert list(llm._free_stream("", "auto", "sys", [])) == ["c"]
+
+
+def test_chat_model_preference_skips_non_chat_slugs():
+    assert llm._pick_chat_model(
+        ["whisper-large-v3", "llama-guard-4-12b", "playai-tts",
+         "llama-3.1-8b-instant", "llama-4-70b-versatile"]
+    ) == "llama-4-70b-versatile"
+    assert llm._pick_chat_model(["whisper-large-v3", "playai-tts"]) is None
+    assert llm._pick_chat_model([]) is None
+    # Nothing preferred: first chat slug alphabetically, not a guard model.
+    assert llm._pick_chat_model(["zeta-9", "llama-guard-x", "alpha-1"]) == "alpha-1"
+
+
+def test_retired_model_detection():
+    assert llm._retired_model(RuntimeError("model_not_found"))
+    assert llm._retired_model(RuntimeError("The model `x` does not exist"))
+    assert not llm._retired_model(RuntimeError("429 rate limited"))
+    rate_limited = RuntimeError("model_not_found")
+    rate_limited.status_code = 429  # status wins over the message
+    assert not llm._retired_model(rate_limited)
+
+
 def test_error_mapping():
     assert llm._free_error(FreeTierExhausted()) == "chat.free_exhausted"
     assert llm._free_error(RuntimeError("anything else")) == "chat.api_error"

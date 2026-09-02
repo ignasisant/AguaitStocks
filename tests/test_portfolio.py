@@ -382,6 +382,7 @@ from stocks.analysis.portfolio import (  # noqa: E402
     _session_move,
     market_active,
     market_live,
+    session_quote,
     us_extended_session,
 )
 
@@ -463,3 +464,43 @@ def test_session_move_falls_back_to_last_completed_session(monkeypatch):
 def test_session_move_none_when_quote_missing(monkeypatch):
     _patch_quote(monkeypatch, {"marketState": "PRE"})
     assert _session_move("AAPL") is None
+
+
+def test_session_quote_prices_the_premarket_move(monkeypatch):
+    # Earnings gap: the price hero has to show the premarket level, not the
+    # last close, and label the session.
+    _patch_quote(
+        monkeypatch,
+        {
+            "marketState": "PRE",
+            "regularMarketPrice": 500.0,
+            "regularMarketPreviousClose": 480.0,
+            "preMarketPrice": 435.0,
+        },
+    )
+    quote = session_quote("MDB")
+    assert quote["session"] == "pre"
+    assert quote["price"] == 435.0
+    assert abs(quote["pct"] - (435.0 / 500.0 - 1)) < 1e-9
+
+
+def test_session_quote_labels_after_hours_but_not_a_shut_market(monkeypatch):
+    info = {
+        "marketState": "POST",
+        "regularMarketPrice": 110.0,
+        "regularMarketPreviousClose": 100.0,
+        "postMarketPrice": 121.0,
+    }
+    _patch_quote(monkeypatch, info)
+    quote = session_quote("NVDA")
+    assert quote["session"] == "post" and quote["price"] == 121.0
+    assert abs(quote["pct"] - 0.21) < 1e-9
+    # Overnight the last after-hours print still sets the level, but it is not
+    # a live session — the hero must not claim "after hours".
+    _patch_quote(monkeypatch, {**info, "marketState": "CLOSED"})
+    assert session_quote("NVDA")["session"] is None
+
+
+def test_session_quote_none_when_quote_missing(monkeypatch):
+    _patch_quote(monkeypatch, {"marketState": "PRE"})
+    assert session_quote("AAPL") is None

@@ -48,6 +48,11 @@ DEFAULT_PREFS = {  # language None = auto (browser); picker_sort_by None = defau
     "language": None,
     "picker_sort_by": None,
     "recent_searches": [],  # tickers clicked from the top-bar search, newest first
+    # Registration accounting, stamped by mark_login(). first_seen is the
+    # signup moment (ISO, UTC); last_seen is a date, rewritten once a day.
+    "first_seen": None,
+    "last_seen": None,
+    "first_seen_estimated": False,
     # Telegram notifications: chat_id is set by the Profile linking flow; the
     # toggles only take effect once it is. The cron (notify/fanout.py) reads
     # these headless straight from prefs.json.
@@ -189,8 +194,11 @@ def _migrate_legacy(paths: UserPaths, legacy_root: Path) -> None:
         storage.persist(legacy_root / name)  # gone locally -> delete old key
 
 
-def ensure_user_data(paths: UserPaths, legacy_root: Path | None = None) -> None:
+def ensure_user_data(paths: UserPaths, legacy_root: Path | None = None) -> bool:
     """First login: create the account's folder and seed a starter watchlist.
+
+    Returns True when this call seeded a brand-new account — the one moment a
+    signup can be dated exactly, which mark_login() records.
 
     With [storage] configured, the account's files are pulled from the bucket
     first (once per process), so an ephemeral redeploy starts from the
@@ -208,14 +216,22 @@ def ensure_user_data(paths: UserPaths, legacy_root: Path | None = None) -> None:
         paths.root.mkdir(parents=True, exist_ok=True)
         storage.restore_once(
             paths.root,
-            (paths.watchlist, paths.db, paths.last_import, paths.prefs, paths.chat),
+            (
+                paths.watchlist,
+                paths.db,
+                paths.last_import,
+                paths.prefs,
+                paths.chat,
+            ),
         )
     except Exception:
         st.error(tr("common.storage_restore_failed"), icon=":material/cloud_off:")
         st.stop()
-    if not paths.watchlist.exists():
-        paths.watchlist.write_text(STARTER_WATCHLIST)
-        _persist(paths.watchlist)
+    if paths.watchlist.exists():
+        return False
+    paths.watchlist.write_text(STARTER_WATCHLIST)
+    _persist(paths.watchlist)
+    return True
 
 
 def delete_account(paths: UserPaths) -> None:
@@ -265,6 +281,51 @@ def is_logged_in() -> bool:
     )
 
 
+def current_email() -> str:
+    """The signed-in account's email, or "" for a guest. One accessor so
+    callers (and tests) never have to reach into st.user themselves."""
+    return str(getattr(st.user, "email", "") or "").strip()
+
+
+# ------------------------------------------------------- login accounting
+# Cloud Logging keeps 30 days, so "how many accounts exist" is not a question
+# the logs can answer — anyone who signed up and never came back has aged out
+# of them. Each account's own prefs.json carries the two dates that can, and
+# `stocks users` reads them straight out of the bucket. telemetry.bind_run
+# turns the same verdict into auth.signup/auth.login events, so a signup is
+# also visible in place on the log timeline.
+
+
+def mark_login(paths: UserPaths, *, seeded: bool = False) -> str:
+    """Stamp this account's first/last login; return "signup" or "login".
+
+    `seeded` is ensure_user_data()'s verdict: True only when this run created
+    the account's dir, so only then is the stamp an exact signup date. An
+    account that predates this bookkeeping gets first_seen backfilled to now
+    with first_seen_estimated=True and counts as a plain login — the roster
+    never claims a precision it doesn't have.
+
+    prefs.json is mirrored to the bucket on every save, so this writes at most
+    once per account per day: a PUT on each sign-in would cost more than the
+    metric is worth, and last_seen is only ever read at day granularity.
+    """
+    prefs = load_prefs(paths.prefs)
+    today = datetime.now(UTC).date().isoformat()
+    kind = "login"
+    changed = False
+    if not prefs.get("first_seen"):
+        prefs["first_seen"] = datetime.now(UTC).isoformat(timespec="seconds")
+        prefs["first_seen_estimated"] = not seeded
+        kind = "signup" if seeded else "login"
+        changed = True
+    if prefs.get("last_seen") != today:
+        prefs["last_seen"] = today
+        changed = True
+    if changed:
+        save_prefs(prefs, paths.prefs)
+    return kind
+
+
 def resolve_user() -> UserPaths:
     """Resolve the session's data paths without gating; call before the nav.
 
@@ -273,7 +334,9 @@ def resolve_user() -> UserPaths:
     the paths in session state for the page modules.
     """
     legacy = None
-    if is_logged_in():
+    logged_in = is_logged_in()
+    email = ""
+    if logged_in:
         email = str(st.user.email).strip()
         owner = str(st.secrets.get("app", {}).get("owner_email", "")).strip() or None
         paths = paths_for(email, owner)
@@ -281,7 +344,16 @@ def resolve_user() -> UserPaths:
             legacy = USERS_DIR / _legacy_slug(email)
     else:
         paths = guest_paths()
-    ensure_user_data(paths, legacy_root=legacy)
+    seeded = ensure_user_data(paths, legacy_root=legacy)
+    # Streamlit reruns this on every interaction; the guard keeps the stamp
+    # (and its prefs read) to the first run under a given identity, and a
+    # sign-out clears it so a later sign-in is evaluated again.
+    if not logged_in:
+        st.session_state.pop("_login_marked", None)
+        st.session_state["_login_kind"] = ""
+    elif st.session_state.get("_login_marked") != email:
+        st.session_state["_login_marked"] = email
+        st.session_state["_login_kind"] = mark_login(paths, seeded=seeded)
     st.session_state["user_paths"] = paths
     return paths
 

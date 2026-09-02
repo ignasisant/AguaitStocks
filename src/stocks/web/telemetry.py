@@ -71,3 +71,10 @@ def bind_run(page: str | None = None) -> None:
     if st.session_state.get("_obs_user") != user:
         st.session_state["_obs_user"] = user
         obs.event("session.start", logged_in=user not in ("guest", "?"))
+        # auth.resolve_user() ran before this (app.py orders them that way),
+        # so its verdict is already in session state. Emitted here rather than
+        # there because only bind_run() has bound the user/session fields —
+        # a signup event without the account slug says very little.
+        kind = st.session_state.get("_login_kind")
+        if kind:
+            obs.event(f"auth.{kind}")

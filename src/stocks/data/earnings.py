@@ -127,6 +127,18 @@ def fetch_earnings(ticker: str) -> tuple[list[date], list[EarningsResult]]:
     import yfinance as yf
     from yfinance.exceptions import YFRateLimitError
 
+    from stocks.data.crypto import is_crypto
+    from stocks.data.funds import is_fund
+
+    # Coins and funds never report. Screened here, the one choke point every
+    # caller goes through (the calendar, the digest, the price chart's event
+    # markers), so a watchlist holding an ETF stops spending a round trip per
+    # refresh on Yahoo answering "no earnings dates found". Classification is
+    # cache-only: a fund the cache hasn't met yet costs one empty lookup, not
+    # a blocking `.info` inside a thread pool.
+    if is_crypto(ticker) or is_fund(ticker, fetch=False):
+        return [], []
+
     # A dead symbol failing in resolve()/Ticker() must not abort a whole
     # pool.map in upcoming()/calendar_events() — but rate limits re-raise so
     # the web app's banner still sees them.

@@ -110,6 +110,19 @@ st.html(
             > script:only-child) {
           display: none;
         }
+        /* Same problem, different fix, for the two containers whose content is
+           viewport-fixed (the bottom tab bar and the mobile header strip):
+           display:none would take the fixed child down with them, so unwrap
+           the boxes instead. What is left is a display:none style element and
+           a fixed element — neither is a flex item, so neither adds a gap. */
+        [data-testid="stElementContainer"]:has(> [data-testid="stHtml"]
+            > .ts-bottomnav),
+        [data-testid="stElementContainer"]:has(> [data-testid="stHtml"]
+            > .topstocks-mheader),
+        [data-testid="stHtml"]:has(> .ts-bottomnav),
+        [data-testid="stHtml"]:has(> .topstocks-mheader) {
+          display: contents;
+        }
         /* Open drawer must cover the viewport-fixed topbar search
            (z 999999, widgets.py) and chat launcher (z 1000000,
            chat_core.py) instead of sliding under them. */
@@ -145,6 +158,15 @@ st.html(
         }
         [data-testid="stMarkdown"] table td,
         [data-testid="stMarkdown"] table th {white-space: nowrap;}
+        /* One screen title per phone screen (DS mobile spec): it lives in the
+           header strip, so a page-level st.title under it would only repeat
+           the nav label. Scoped to Streamlit's own heading block — the pages
+           that write their own h1 (the ticker hero, which names the company,
+           not the screen) render through stHtml and are untouched. */
+        [data-testid="stMainBlockContainer"]
+          [data-testid="stHeadingWithActionElements"]:has(h1) {
+          display: none;
+        }
       }
       [data-testid="stMainBlockContainer"] [data-testid="stVerticalBlock"] {gap: 0.55rem;}
       [data-testid="stMetric"] {padding: 0;}
@@ -407,9 +429,15 @@ st.html(
           flex: 0 0 44px; margin-left: -44px; align-self: stretch;
           pointer-events: none;
           /* Chevron stroke is TEXT_MUTED #827F8C — var() can't reach inside
-             a data URI. */
+             a data URI. The URI is wrapped with backslash continuations to
+             stay inside the line limit; they join with no newline, so the
+             continuation lines start at column 0 — any indent would land
+             inside the URI. */
           background:
-            url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23827F8C' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='9 18 15 12 9 6'/%3E%3C/svg%3E")
+            url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' \
+viewBox='0 0 24 24' fill='none' stroke='%23827F8C' stroke-width='1.5' \
+stroke-linecap='round' stroke-linejoin='round'%3E\
+%3Cpolyline points='9 18 15 12 9 6'/%3E%3C/svg%3E")
               right 6px center / 16px 16px no-repeat,
             linear-gradient(to right, transparent, var(--ag-surface-page) 70%);
         }
@@ -562,9 +590,25 @@ if is_mobile():
         (function () {
           if (window.__topstocksChartReadout) return;  /* wire once */
           window.__topstocksChartReadout = true;
-          const read = (gd, ro) => {
+          const wired = new WeakSet();
+          const rowOf = (gd) => {
+            const host =
+              gd.closest('[data-testid="stPlotlyChart"]') || gd.parentElement;
+            if (!host) return null;
+            let ro = host.querySelector(".ts-chart-readout");
+            if (!ro) {
+              /* Streamlit replaces the host's children on rerun, so the row is
+                 looked up (and recreated) per event, never captured. */
+              ro = document.createElement("div");
+              ro.className = "ts-chart-readout";
+              host.appendChild(ro);
+            }
+            return ro;
+          };
+          const read = (gd) => {
             const layer = gd.querySelector(".hoverlayer");
-            if (!layer) return;
+            const ro = rowOf(gd);
+            if (!layer || !ro) return;
             const parts = [];
             layer.querySelectorAll("text").forEach((t) => {
               const s = Array.from(t.childNodes)
@@ -572,29 +616,48 @@ if is_mobile():
                 .replace(/\\s+/g, " ").trim();
               if (s && parts.indexOf(s) === -1) parts.push(s);
             });
-            if (parts.length) ro.textContent = parts.join(" \\u00b7 ");
+            /* Cap the row: a unified box can carry OHLC plus both SMAs, which
+               would just ellipsize away on a phone. */
+            if (parts.length) ro.textContent = parts.slice(0, 4).join(" \u00b7 ");
           };
           const wire = () => {
-            document
-              .querySelectorAll(".js-plotly-plot:not([data-ts-readout])")
-              .forEach((gd) => {
-                if (typeof gd.on !== "function") return;
-                gd.setAttribute("data-ts-readout", "1");
-                const host =
-                  gd.closest('[data-testid="stPlotlyChart"]') || gd.parentElement;
-                if (!host) return;
-                let ro = host.querySelector(".ts-chart-readout");
-                if (!ro) {
-                  ro = document.createElement("div");
-                  ro.className = "ts-chart-readout";
-                  host.appendChild(ro);
-                }
-                gd.on("plotly_hover", () => {
-                  requestAnimationFrame(() => read(gd, ro));
-                });
-              });
+            document.querySelectorAll(".js-plotly-plot").forEach((gd) => {
+              if (typeof gd.on !== "function" || wired.has(gd)) return;
+              wired.add(gd);
+              gd.on("plotly_hover", () => requestAnimationFrame(() => read(gd)));
+              /* The row is a live readout, not a caption: it clears with the
+                 crosshair so a stale figure never sits over the chart. */
+              const clear = () => {
+                const ro = rowOf(gd);
+                if (ro) ro.textContent = "";
+              };
+              gd.on("plotly_unhover", () => requestAnimationFrame(clear));
+              /* Plotly resolves hover from mouse events only; bridge touch
+                 drags onto it so the readout tracks the finger (DS mobile
+                 chart spec). dragmode is off on phones, so nothing pans. */
+              const drag = gd.querySelector(".nsewdrag") || gd;
+              drag.addEventListener("touchmove", (ev) => {
+                const t = ev.touches && ev.touches[0];
+                if (!t) return;
+                drag.dispatchEvent(new MouseEvent("mousemove", {
+                  clientX: t.clientX, clientY: t.clientY, bubbles: true,
+                }));
+              }, {passive: true});
+              /* Lifting the finger fires no unhover on touch; retire the row
+                 shortly after so it does not linger over the plot. */
+              drag.addEventListener("touchend", () => {
+                clearTimeout(gd.__tsReadoutTimer);
+                gd.__tsReadoutTimer = setTimeout(clear, 2000);
+              }, {passive: true});
+            });
           };
-          new MutationObserver(wire).observe(document.body, {
+          let queued = false;
+          const schedule = () => {
+            if (queued) return;
+            queued = true;
+            requestAnimationFrame(() => { queued = false; wire(); });
+          };
+          new MutationObserver(schedule).observe(document.body, {
             subtree: true, childList: true,
           });
           wire();

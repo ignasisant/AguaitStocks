@@ -8,6 +8,10 @@ Telegram and left the matching toggle on are yielded. With storage
 unconfigured (local dev) the same discovery runs over the local filesystem,
 so `stocks alerts --all-users` is testable without a bucket.
 
+That discovery is the only place accounts are enumerated, so the account
+roster (`stocks users`, via iter_accounts) is served from here too even
+though it has nothing to do with notifications.
+
 Write discipline: the alerts/digest crons write only alerts_state.json;
 prefs.json and watchlist.yaml belong to live app sessions. The telegram-chat
 job (stocks.chat.bot) additionally writes prefs.json (link completion, free
@@ -142,6 +146,38 @@ def iter_all_users() -> list[NotifyUser]:
         )
 
     return users
+
+
+def _account_row(label: str, prefs_path: Path) -> dict:
+    prefs = _read_prefs(prefs_path)
+    return {
+        "label": label,
+        "first_seen": str(prefs.get("first_seen") or ""),
+        "last_seen": str(prefs.get("last_seen") or ""),
+        "estimated": bool(prefs.get("first_seen_estimated")),
+        "telegram": bool(prefs.get("telegram_chat_id")),
+    }
+
+
+def iter_accounts() -> list[dict]:
+    """Every account's registration dates — the roster behind `stocks users`.
+
+    Cheaper than iter_all_users(): the dates (first_seen/last_seen, stamped by
+    auth.mark_login) live in prefs.json, so nothing else is restored. Same
+    discovery as the crons — the bucket when configured, the local filesystem
+    otherwise — so it answers from a bare checkout with no user data in it.
+    """
+    rows: list[dict] = []
+    for slug_name in sorted(_slugs()):
+        prefs_path = USERS_DIR / slug_name / "prefs.json"
+        _restore_user_files(prefs_path)
+        rows.append(_account_row(slug_name, prefs_path))
+
+    owner_prefs = DATA_DIR / "prefs.json"
+    _restore_user_files(owner_prefs)
+    if owner_prefs.exists():
+        rows.append(_account_row("owner", owner_prefs))
+    return rows
 
 
 def iter_notify_users(kind: str) -> list[NotifyUser]:

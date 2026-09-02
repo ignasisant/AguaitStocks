@@ -60,6 +60,30 @@ def test_iter_all_users_includes_unlinked(local):
     assert users[0].chat_path == local / "users" / "carol_11223344" / "chat.json"
 
 
+def test_iter_accounts_reports_registration_dates(local):
+    _user(local, "jane_ab12cd34", {**LINKED, "first_seen": "2026-01-05T10:00:00+00:00",
+                                   "last_seen": "2026-02-01"})
+    _user(local, "carol_11223344", {"first_seen": "2026-03-09T08:00:00+00:00",
+                                    "last_seen": "2026-03-09",
+                                    "first_seen_estimated": True})
+    _user(local, "_guest", {"first_seen": "2020-01-01T00:00:00+00:00"})
+    (local / "prefs.json").write_text(json.dumps({"first_seen": "2025-12-01T00:00:00Z"}))
+
+    rows = {r["label"]: r for r in fanout.iter_accounts()}
+    assert set(rows) == {"jane_ab12cd34", "carol_11223344", "owner"}  # no _guest
+    assert rows["jane_ab12cd34"]["last_seen"] == "2026-02-01"
+    assert rows["jane_ab12cd34"]["telegram"] is True
+    assert rows["carol_11223344"]["estimated"] is True
+    assert rows["jane_ab12cd34"]["estimated"] is False
+
+
+def test_iter_accounts_tolerates_prefs_without_dates(local):
+    _user(local, "jane_ab12cd34", {"currency": "EUR"})
+    (row,) = fanout.iter_accounts()
+    assert row == {"label": "jane_ab12cd34", "first_seen": "", "last_seen": "",
+                   "estimated": False, "telegram": False}
+
+
 def test_owner_chat_path_is_data_chat_json(local):
     (local / "prefs.json").write_text(json.dumps({"telegram_chat_id": 999}))
     (owner,) = fanout.iter_all_users()

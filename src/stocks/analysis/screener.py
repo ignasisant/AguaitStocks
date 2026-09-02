@@ -121,7 +121,27 @@ def _safe_metrics(ticker: str) -> dict:
         return {"ticker": ticker.upper()}
 
 
-def fetch_metrics_many(tickers: list[str], max_workers: int = 8) -> list[dict]:
-    """Compute metrics for many tickers concurrently (yfinance calls are IO-bound)."""
+def fetch_metrics_many(
+    tickers: list[str], max_workers: int = 8, *, drop_funds: bool = False
+) -> list[dict]:
+    """Compute metrics for many tickers concurrently (yfinance calls are IO-bound).
+
+    Every row carries the instrument kind Yahoo reported, so this is also
+    where funds get classified for free: the types are recorded for the
+    cache-only checks the pages make before they fetch anything.
+
+    `drop_funds` removes fund rows — what a cross-sectional *screen* wants (an
+    ETF has no P/E, no ROIC and no margins to rank on), but not what the
+    callers that asked for named tickers want: report.gather reads rows
+    positionally and `stocks fundamentals` prints exactly what it was given,
+    so both keep the default and get every row back.
+    """
+    from stocks.data import funds
+
     with ThreadPoolExecutor(max_workers=max_workers) as pool:
-        return list(pool.map(_safe_metrics, tickers))
+        rows = list(pool.map(_safe_metrics, tickers))
+    for row in rows:
+        funds.remember(str(row.get("ticker") or ""), row.get("quote_type"))
+    if drop_funds:
+        rows = [r for r in rows if not funds.is_fund_type(r.get("quote_type"))]
+    return rows

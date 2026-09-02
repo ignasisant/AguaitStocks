@@ -87,7 +87,7 @@ _REQUIRED = ("date", "side", "quantity", "price", "currency")
 _STOCK_TYPES = ("stock", "share", "etf", "etn", "equity", "accion", "fondo cotizado")
 
 # Saxo exchange code (after the ":" in the symbol) -> Yahoo suffix.
-_EXCHANGE_SUFFIX = {
+EXCHANGE_SUFFIX = {
     "xnas": "", "xngs": "", "xnys": "", "xase": "", "arcx": "", "bats": "",
     "xmce": ".MC", "xmad": ".MC",
     "xetr": ".DE", "xeta": ".DE", "xfra": ".F",
@@ -263,7 +263,7 @@ def _resolve_ticker(symbol: str, isin: str) -> str:
     isin = isin.strip().upper()
     sym, _, exchange = symbol.strip().upper().partition(":")
     if sym:
-        suffix = _EXCHANGE_SUFFIX.get(exchange.lower()) if exchange else ""
+        suffix = EXCHANGE_SUFFIX.get(exchange.lower()) if exchange else ""
         if suffix is not None:
             return sym + suffix
     if isin:

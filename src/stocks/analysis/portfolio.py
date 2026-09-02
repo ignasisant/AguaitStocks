@@ -147,10 +147,26 @@ def top_n_weight(weights: dict[str, float], n: int = 5) -> float:
 
 
 def allocation(weights: dict[str, float], meta: dict[str, dict], key: str) -> pd.Series:
-    """Sum weights grouped by a metadata field ('sector' | 'country' | 'currency')."""
+    """Sum weights grouped by a metadata field ('sector' | 'country' | 'currency').
+
+    A fund carries a *split* instead of one label: `meta[ticker]["<key>_weights"]`
+    maps bucket -> fraction of that holding (see `_profile`), and the holding's
+    weight is spread across them. That look-through is the difference between
+    "38% Unknown" and a sector pie that reads the book as it actually is — an
+    S&P 500 ETF next to four tech names is mostly one bet, and only the split
+    shows it. Fractions that don't sum to 1 (Yahoo rounding, an undisclosed
+    remainder) leave the missing part in "Unknown" rather than being scaled up.
+    """
     agg: dict[str, float] = {}
     for ticker, w in weights.items():
-        label = (meta.get(ticker) or {}).get(key) or "Unknown"
+        row = meta.get(ticker) or {}
+        if split := row.get(f"{key}_weights"):
+            for label, share in split.items():
+                agg[label] = agg.get(label, 0.0) + w * share
+            if (rest := 1.0 - sum(split.values())) > 0.001:
+                agg["Unknown"] = agg.get("Unknown", 0.0) + w * rest
+            continue
+        label = row.get(key) or "Unknown"
         agg[label] = agg.get(label, 0.0) + w
     return pd.Series(agg, dtype=float).sort_values(ascending=False)
 
@@ -444,6 +460,7 @@ def _profile(ticker: str) -> dict:
 
     from stocks.data.crypto import split_pair
     from stocks.data.fetch import resolve
+    from stocks.data.funds import fetch_profile, remember, sector_split
 
     # Crypto pairs: yfinance has no sector/country for coins — label the
     # allocation bucket directly and skip the profile fetch.
@@ -453,6 +470,22 @@ def _profile(ticker: str) -> dict:
         info = yf.Ticker(resolve(ticker)).info or {}
     except Exception:
         info = {}
+    remember(ticker, info.get("quoteType"))
+    # A fund has no sector of its own; it has the sectors of what it holds.
+    # `sector_split` turns that into the split `allocation` spreads the
+    # position over, and the "Funds" label is only the fallback for a sleeve
+    # with no equity sectors at all (a bond or commodity ETF). Country is left
+    # unknown on purpose: Yahoo publishes no geographic breakdown for funds,
+    # inventing one from the top ten holdings would be a guess dressed as
+    # data, and "Unknown" is the bucket the globe already accounts for out
+    # loud (portfolio.geo_unmapped).
+    if fund := fetch_profile(ticker, info=info):
+        return {
+            "sector": "Funds",
+            "sector_weights": sector_split(fund),
+            "country": None,
+            "currency": fund.currency,
+        }
     return {
         "sector": info.get("sector"),
         "country": info.get("country"),
@@ -763,17 +796,24 @@ def market_active(ticker: str, now_utc: datetime | None = None) -> bool:
     return suffix not in _EXCHANGE_HOURS and us_extended_session(now_utc) is not None
 
 
-def _session_move(ticker: str) -> float | None:
-    """Move since the previous regular close, extended hours included.
+def session_quote(ticker: str) -> dict | None:
+    """Yahoo quote snapshot: `{"price", "pct", "session"}`, or None if missing.
 
-    Reads Yahoo's quote (`.info`): during premarket `regularMarketPrice` is
-    still the last close, so `preMarketPrice / regularMarketPrice - 1` is the
-    move so far today; after the close `postMarketPrice /
-    regularMarketPreviousClose - 1` compounds the session with after-hours.
-    Outside those windows it falls back to the last completed session
-    (`regularMarketPrice / regularMarketPreviousClose - 1`), which is what the
-    daily close-to-close basket gets wrong (a stale/flat premarket bar collapses
-    it to ~0%). None when the quote is missing."""
+    `pct` is the move since the previous regular close, extended hours
+    included. Reads Yahoo's quote (`.info`): during premarket
+    `regularMarketPrice` is still the last close, so `preMarketPrice /
+    regularMarketPrice - 1` is the move so far today; after the close
+    `postMarketPrice / regularMarketPreviousClose - 1` compounds the session
+    with after-hours. Outside those windows it falls back to the last completed
+    session (`regularMarketPrice / regularMarketPreviousClose - 1`), which is
+    what the daily close-to-close basket gets wrong (a stale/flat premarket bar
+    collapses it to ~0%).
+
+    `price` is the price `pct` was measured to — the extended-hours quote while
+    one is trading, else the last regular price. `session` is "pre"/"post" only
+    while that window is actually open per `marketState`, so a fully closed
+    market reads None even though its last after-hours price is still used.
+    """
     import yfinance as yf
 
     from stocks.data.fetch import resolve
@@ -785,14 +825,27 @@ def _session_move(ticker: str) -> float | None:
         prev = quote.get("regularMarketPreviousClose")
         pre, post = quote.get("preMarketPrice"), quote.get("postMarketPrice")
         if state.startswith("PRE") and pre and regular:
-            return float(pre) / float(regular) - 1
+            price = float(pre)
+            return {"price": price, "pct": price / float(regular) - 1, "session": "pre"}
         if post and prev and not state.startswith("PRE"):
-            return float(post) / float(prev) - 1
+            price = float(post)
+            return {
+                "price": price,
+                "pct": price / float(prev) - 1,
+                "session": "post" if state.startswith("POST") else None,
+            }
         if regular and prev:
-            return float(regular) / float(prev) - 1
+            price = float(regular)
+            return {"price": price, "pct": price / float(prev) - 1, "session": None}
     except Exception:
         pass
     return None
+
+
+def _session_move(ticker: str) -> float | None:
+    """Day % move from the quote (see `session_quote`), None when unavailable."""
+    quote = session_quote(ticker)
+    return quote["pct"] if quote else None
 
 
 def session_moves(tickers: list[str], max_workers: int = 8) -> dict[str, float]:

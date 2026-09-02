@@ -336,6 +336,11 @@ def compute_metrics(raw: RawFundamentals) -> dict[str, float | str | None]:
     info = raw.info
     m: dict[str, float | str | None] = {"ticker": raw.ticker}
     m["currency"] = info.get("currency")
+    # Yahoo's instrument kind (EQUITY / ETF / MUTUALFUND). Not a KPI and not in
+    # METRIC_ORDER, so it never reaches a screen column — it is here because
+    # this is the one place that already holds `info`, and cross-sectional
+    # callers need to know a row is a fund whose every ratio will be blank.
+    m["quote_type"] = info.get("quoteType")
     m["price"] = info.get("currentPrice") or info.get("regularMarketPrice")
     m["market_cap"] = info.get("marketCap")
     m["ev"] = info.get("enterpriseValue")

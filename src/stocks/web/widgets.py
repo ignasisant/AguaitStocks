@@ -427,6 +427,10 @@ def chart_layout(
             font=dict(size=12, color=TEXT_SECONDARY),
         )
     layout["margin"] = dict(l=0, r=0, t=top, b=0)
+    if mobile:
+        # DS mobile chart spec: a finger drag drives the crosshair and the
+        # reading row (app.py's touch bridge), so nothing may pan under it.
+        layout["dragmode"] = False
     return layout
 
 
@@ -506,6 +510,13 @@ def _company_name(ticker: str, watchlist: str) -> str | None:
         from stocks.data.crypto import crypto_name
 
         if name := crypto_name(ticker):
+            return name
+        from stocks.data.funds import fund_name
+
+        # The fund catalog is local and covers the lines a EUR investor holds;
+        # the SEC map below knows US filers, so a UCITS ETF would otherwise
+        # render as a bare symbol everywhere a name is shown.
+        if name := fund_name(ticker):
             return name
         from stocks.data.edgar import title_for
 
@@ -966,12 +977,29 @@ def _live_search_component():
     _LIVE_SEARCH = st.components.v2.component(
         "topstocks_live_search",
         html=(
+            '<div class="lsw">'
             '<input id="q" class="lsi" type="text"'
             ' autocomplete="off" spellcheck="false" />'
+            '<span id="spin" class="lss"></span>'
+            "</div>"
         ),
         css="""
+    .lsw { position: relative; display: block; }
+    /* Busy dot on the field's right edge, shown from the keystroke until
+       Python echoes that exact value back (see the JS ack below). The gutter
+       is reserved permanently so the query text never jumps when it appears. */
+    .lss {
+      position: absolute; right: 10px; top: 50%; width: 14px; height: 14px;
+      margin-top: -7px; box-sizing: border-box; border-radius: 50%;
+      border: 2px solid var(--ag-border);
+      border-top-color: var(--ag-brand-accent);
+      opacity: 0; transition: opacity 120ms ease; pointer-events: none;
+    }
+    .lss.on { opacity: 1; animation: lsspin 0.7s linear infinite; }
+    @keyframes lsspin { to { transform: rotate(360deg); } }
     .lsi {
-      width: 100%; box-sizing: border-box; height: 36px; padding: 0 0.75rem;
+      width: 100%; box-sizing: border-box; height: 36px;
+      padding: 0 1.75rem 0 0.75rem;
       /* height set again below for phones — 44px DS touch target */
       background: var(--ag-surface-card); color: var(--ag-text-primary);
       border: 1px solid var(--ag-border);
@@ -985,14 +1013,19 @@ def _live_search_component():
       /* Collapsed 44px icon state (host width is set by the page CSS):
          magnifier glyph, no visible text until focus expands the field.
          var() can't reach inside a data URI — stroke is TEXT_MUTED. */
-      .lsi:not(:focus) {
+      .lsi:not(:focus):placeholder-shown {
         color: transparent;
+        /* Drop the spinner gutter while collapsed: background-position centers
+           on the PADDING box, so the asymmetric padding would sit the
+           magnifier 8px left of the 44px button's middle. The field is empty
+           in this state, so there is no text to shift. */
+        padding: 0;
         /*SEARCH-GLYPH*/
         background-repeat: no-repeat;
         background-position: center;
         background-size: 18px 18px;
       }
-      .lsi:not(:focus)::placeholder { color: transparent; }
+      .lsi:not(:focus):placeholder-shown::placeholder { color: transparent; }
     }
     """.replace("/*SEARCH-GLYPH*/", _SEARCH_GLYPH_CSS),
         js="""
@@ -1000,6 +1033,13 @@ export default function (component) {
   const { parentElement, data, setStateValue } = component
   const input = parentElement.querySelector("#q")
   if (!input) return
+  // Busy state = "the field shows a query Python has not answered yet". Set on
+  // the keystroke itself (before the debounce even fires) and cleared only by
+  // the ack below, so the whole dead window — debounce, a keystroke rerun that
+  // died behind a full app run, every 250-800ms retry — is visibly loading
+  // instead of looking like the field ate the query.
+  const spin = parentElement.querySelector("#spin")
+  const busy = (on) => spin && spin.classList.toggle("on", !!on)
   input.placeholder = (data && data.placeholder) || ""
   const nextValue = (data && data.value) ?? ""
   // Only overwrite the field when the user isn't typing in it — a render whose
@@ -1008,9 +1048,13 @@ export default function (component) {
   if (input.value !== nextValue && !input.matches(":focus")) input.value = nextValue
   if (input.value === nextValue) {
     // Python echoed exactly what the field shows: the keystroke landed, so
-    // stop re-asserting it.
+    // stop re-asserting it. The results (or the server-side "searching" row
+    // this same run draws under the field) take over the feedback from here.
     clearTimeout(input._retry)
     input._retryN = 0
+    busy(false)
+  } else {
+    busy(input.value.trim().length > 0)
   }
   if (data && data.blur) {
     // A row click navigated. Clearing only the DOM input is not enough: the
@@ -1020,6 +1064,7 @@ export default function (component) {
     clearTimeout(input._timer)
     clearTimeout(input._retry)
     input._retryN = 0
+    busy(false)
     input.value = ""
     setStateValue("value", "")
     setStateValue("focused", false)
@@ -1033,25 +1078,31 @@ export default function (component) {
     // Python and the dropdown stays closed even though the field shows the
     // query. Re-assert until a render echoes it back (the ack above); bumping
     // "nonce" defeats same-value dedup so each retry still forces a rerun.
-    // 12 × 800ms outlasts the slowest throttled-Yahoo page run.
+    // Backing off 250ms → 800ms over 14 tries (~9s total) still outlasts the
+    // slowest throttled-Yahoo page run, but recovers in a quarter of a second
+    // when the blocking run was short — the flat 800ms made every miss feel
+    // like a dead field.
     const send = (v) => {
       setStateValue("value", v)
       clearTimeout(input._retry)
-      if ((input._retryN = (input._retryN || 0) + 1) > 12) return
+      if ((input._retryN = (input._retryN || 0) + 1) > 14) return
+      const wait = Math.min(800, 250 * Math.pow(1.25, input._retryN - 1))
       input._retry = setTimeout(() => {
         setStateValue("nonce", (input._nonce = (input._nonce || 0) + 1))
         send(input.value)
-      }, 800)
+      }, wait)
     }
     input.addEventListener("input", (e) => {
       clearTimeout(input._timer)
       input._retryN = 0
       const v = e.target.value
+      busy(v.trim().length > 0)
       input._timer = setTimeout(() => send(v), 160)
     })
     input.addEventListener("keydown", (e) => {
       if (e.key === "Enter") {
-        clearTimeout(input._timer); input._retryN = 0; send(e.target.value)
+        clearTimeout(input._timer); input._retryN = 0
+        busy(e.target.value.trim().length > 0); send(e.target.value)
       }
     })
     // Report focus so Python can show recent searches on an empty, focused
@@ -1166,12 +1217,12 @@ def _topbar_matches(raw: str):
     positions from the ledger folded in), then coins, then the SEC ticker map,
     then a worldwide Yahoo lookup for everything the US-only map can't see,
     plus an "Analyze <SYMBOL>" fallback for a symbol none of them know. Returns
-    `(watch, crypto, sec, world, analyze)` where watch rows carry their
+    `(watch, crypto, funds, sec, world, analyze)` where watch rows carry their
     star/briefcase mark and world rows carry their exchange.
     """
     q = raw.strip().upper()
     if not q:
-        return [], [], [], [], None
+        return [], [], [], [], [], None
     holdings = load_watchlist(auth.watchlist_path())
     labels = {h.ticker: (h.name or h.ticker) for h in holdings}
     fav_set = {h.ticker for h in holdings if h.favorite}
@@ -1205,8 +1256,12 @@ def _topbar_matches(raw: str):
             watch.append((t, labels[t], mark))
 
     from stocks.data.crypto import search_crypto
+    from stocks.data.funds import search_funds
 
     crypto = [(t, n) for t, n in search_crypto(q) if t not in labels]
+    # The fund catalog is local, so this tier is the one that still answers
+    # "where is my ETF" while Yahoo has the deploy's egress IP in timeout.
+    funds = [(t, n) for t, n in search_funds(q) if t not in labels]
     sec = [(t, n) for t, n in sec_matches(q) if t not in labels]
     # Worldwide runs on every query, not just when the tiers above came up
     # empty: their fuzzy fallbacks always produce SOMETHING, so "nothing found
@@ -1214,11 +1269,16 @@ def _topbar_matches(raw: str):
     # SEC map and would have suppressed the one real answer (MIPS.ST). It is
     # deduped against them instead, and `_world_first` decides which of the two
     # groups leads.
-    seen = set(labels) | {t for t, _ in crypto} | {t for t, _ in sec}
+    seen = (
+        set(labels)
+        | {t for t, _ in crypto}
+        | {t for t, _ in funds}
+        | {t for t, _ in sec}
+    )
     world = [(t, n, x) for t, n, x in world_matches(q) if t not in seen]
     known = seen | {t for t, _, _ in world}
     analyze = q if (q not in known and re.fullmatch(r"[A-Z0-9.\-]{1,12}", q)) else None
-    return watch[:8], crypto[:4], sec[:6], world[:3], analyze
+    return watch[:8], crypto[:4], funds[:4], sec[:6], world[:3], analyze
 
 
 def _recent_rows() -> list[tuple[str, str, str]]:
@@ -1327,48 +1387,78 @@ def _topbar_search_panel() -> None:
         q, focused = _live_search_input(
             key="topbar_q", placeholder=tr("widgets.search_placeholder")
         )
+        if not q and is_mobile():
+            # DS mobile header: an empty field is a 44px magnifier button.
+            # Emitted here (not in the page stylesheet) because the dropdown
+            # below is a child of this container — collapsing the host while
+            # results are showing would squash them to 44px. The fragment
+            # reruns as-you-type, so the rule lifts on the first keystroke.
+            st.html(
+                "<style>@media (max-width: 640px) {"
+                ".st-key-topbar_search:not(:focus-within)"
+                " { width: 44px !important; } }</style>"
+            )
         if q:
             # Typed query: live matches. Recents never show here — searching
             # something else replaces them (they only stand in for an empty field).
-            watch, crypto, sec, world, analyze = _topbar_matches(q)
-            if watch or crypto or sec or world or analyze:
-                with st.container(key=_results_key()):
-                    _render_ticker_rows(watch)
-                    if crypto:
-                        st.caption(tr("widgets.crypto"))
-                        for t, name in crypto:
-                            _search_row(t, f"🪙 **{t}**  {name}", f"tbrescx_{_slug(t)}")
-                    def _world_group() -> None:
-                        if world:
-                            st.caption(tr("widgets.from_world_search"))
-                            for t, name, exch in world:
-                                _search_row(
-                                    t, _world_label(t, name, exch), f"tbresw_{_slug(t)}"
-                                )
+            #
+            # The panel opens BEFORE the matches are known. The last tier is a
+            # network round-trip (worldwide symbols, up to a 6s timeout on a
+            # cold query), so computing first and rendering after left the
+            # field looking inert for seconds — the field's own busy dot is
+            # already gone by then, cleared by this run's echo. A "searching"
+            # row goes into the open panel and is replaced in place by the
+            # rows: Streamlit flushes deltas as they are produced, so it
+            # reaches the browser while the tier is still running.
+            with st.container(key=_results_key()):
+                pending = st.empty()
+                with pending.container(key="topbar_pending"):
+                    st.caption(tr("widgets.searching"))
+                watch, crypto, funds, sec, world, analyze = _topbar_matches(q)
+                pending.empty()
+                if not (watch or crypto or funds or sec or world or analyze):
+                    # Never leave the panel blank: an empty bordered box reads
+                    # as "still working", which is what this whole path fixes.
+                    st.caption(tr("widgets.no_results"))
+                _render_ticker_rows(watch)
+                if crypto:
+                    st.caption(tr("widgets.crypto"))
+                    for t, name in crypto:
+                        _search_row(t, f"🪙 **{t}**  {name}", f"tbrescx_{_slug(t)}")
+                if funds:
+                    st.caption(tr("widgets.funds"))
+                    for t, name in funds:
+                        _search_row(t, f"🧺 **{t}**  {name}", f"tbresfd_{_slug(t)}")
 
-                    def _sec_group() -> None:
-                        if sec:
-                            st.caption(tr("widgets.from_sec_search"))
-                            for t, name in sec:
-                                _search_row(
-                                    t, f"🔎 **{t}**  {name}", f"tbressec_{_slug(t)}"
-                                )
+                def _world_group() -> None:
+                    if world:
+                        st.caption(tr("widgets.from_world_search"))
+                        for t, name, exch in world:
+                            _search_row(
+                                t, _world_label(t, name, exch), f"tbresw_{_slug(t)}"
+                            )
 
-                    # Whichever of the two searched the query better goes first.
-                    groups = (_world_group, _sec_group)
-                    if not _world_first(q.strip().upper(), sec):
-                        groups = groups[::-1]
-                    for group in groups:
-                        group()
-                    if analyze:
-                        st.button(
-                            tr("widgets.analyze", q=analyze),
-                            key="tbres_analyze",
-                            on_click=_go_ticker,
-                            args=(analyze,),
-                            width="stretch",
-                            type="primary",
-                        )
+                def _sec_group() -> None:
+                    if sec:
+                        st.caption(tr("widgets.from_sec_search"))
+                        for t, name in sec:
+                            _search_row(t, f"🔎 **{t}**  {name}", f"tbressec_{_slug(t)}")
+
+                # Whichever of the two searched the query better goes first.
+                groups = (_world_group, _sec_group)
+                if not _world_first(q.strip().upper(), sec):
+                    groups = groups[::-1]
+                for group in groups:
+                    group()
+                if analyze:
+                    st.button(
+                        tr("widgets.analyze", q=analyze),
+                        key="tbres_analyze",
+                        on_click=_go_ticker,
+                        args=(analyze,),
+                        width="stretch",
+                        type="primary",
+                    )
         elif focused and (recent := _recent_rows()):
             # Empty but focused: offer the last few explored tickers.
             with st.container(key=_results_key()):
@@ -1581,6 +1671,12 @@ def render_topbar(page_title: str, ticker: str | None = None) -> None:
           font-weight: 400; text-align: left;
         }
         [class*="st-key-topbar_results"] button strong { color: var(--ag-purple-400); }
+        /* "Searching…" row, drawn while the network tier answers. Pulsing so
+           it reads as work in progress rather than a result. */
+        .st-key-topbar_pending [data-testid="stCaptionContainer"] p {
+          animation: tb-pending 1.1s ease-in-out infinite;
+        }
+        @keyframes tb-pending { 50% { opacity: 0.35; } }
         /* Section captions ("crypto" / "SEC search") — small, dim, tight. */
         [class*="st-key-topbar_results"] [data-testid="stCaptionContainer"] {
           padding: 0.25rem 0.5rem 0.1rem; margin: 0;
@@ -1625,12 +1721,12 @@ def render_topbar(page_title: str, ticker: str | None = None) -> None:
             color: var(--ag-text-primary);
             white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
           }
-          /* DS mobile header: the search collapses to a 44px icon button and
-             expands over the title while focused (keyboard up). */
-          .st-key-topbar_search {
-            width: 44px !important;
-            transition: width 150ms ease;
-          }
+          /* DS mobile header: the search collapses to a 44px icon button
+             and expands over the title while focused (keyboard up). The
+             collapse itself is emitted from Python (_topbar_search_panel)
+             only while the field is empty — the autocomplete dropdown is a
+             child of this container, so a 44px host would squash it. */
+          .st-key-topbar_search { transition: width 150ms ease; }
           .st-key-topbar_search:focus-within {
             width: min(300px, 62vw) !important;
           }
@@ -2635,14 +2731,24 @@ def ticker_picker(
     # neither one knows.
     matches: list[tuple[str, str]] = []
     crypto_hits: list[tuple[str, str]] = []
+    fund_hits: list[tuple[str, str]] = []
     world_hits: list[tuple[str, str, str]] = []
     if allow_custom and q:
         matches = [(t, n) for t, n in sec_matches(q) if t not in labels]
         # Coin codes and names too, so "bitcoin" or "btc" offers BTC-USD.
         from stocks.data.crypto import search_crypto
+        from stocks.data.funds import search_funds
 
         crypto_hits = [(t, n) for t, n in search_crypto(q) if t not in labels]
-        seen = set(labels) | {t for t, _ in matches} | {t for t, _ in crypto_hits}
+        # And the fund catalog, so "world" or "sp500" offers the UCITS line a
+        # European broker actually sells — locally, with no Yahoo round trip.
+        fund_hits = [(t, n) for t, n in search_funds(q) if t not in labels]
+        seen = (
+            set(labels)
+            | {t for t, _ in matches}
+            | {t for t, _ in crypto_hits}
+            | {t for t, _ in fund_hits}
+        )
         world_hits = [(t, n, x) for t, n, x in world_matches(q) if t not in seen][:3]
         known = seen | {t for t, _, _ in world_hits}
         if q not in known and re.fullmatch(r"[A-Z0-9.\-]{1,12}", q):
@@ -2692,6 +2798,19 @@ def ticker_picker(
                 st.button(
                     f"🪙 **{t}** {name}",
                     key=f"{key}_cx_{_slug(t)}",
+                    on_click=_select,
+                    args=(t,),
+                    width="stretch",
+                    type="primary" if t == selected else "secondary",
+                )
+        # Funds next, 🧺 for the basket: same no-logo rule, and the symbol
+        # picked is the Yahoo one the catalog stores (IWDA.AS, not IWDA).
+        if fund_hits:
+            st.caption(tr("widgets.funds"))
+            for t, name in fund_hits:
+                st.button(
+                    f"🧺 **{t}** {name}",
+                    key=f"{key}_fd_{_slug(t)}",
                     on_click=_select,
                     args=(t,),
                     width="stretch",

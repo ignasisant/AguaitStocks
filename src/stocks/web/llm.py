@@ -229,6 +229,10 @@ def _gemini_error(exc):
 # secret, so a retired free model is a config change, not a release.
 
 _FREE_BACKEND_DEFAULTS: tuple[tuple[str, str, str], ...] = (
+    # groq retired this slug some time before 2026-09-01 (prod logs: 404
+    # model_not_found on every request). It stays as the first thing tried
+    # because the chain now recovers by itself — see _free_live_model above:
+    # the 404 costs one call per boot, then /models names the replacement.
     ("groq", "llama-3.3-70b-versatile", "https://api.groq.com/openai/v1"),
     # Checked live 2026-08-31 against each backend's /models and a real
     # completion. cerebras: key valid (/models is 200) but every model answers
@@ -254,6 +258,58 @@ class _FreeBackend:
     api_key: str
     model: str
     stream: Callable[[str, str, str, list[dict]], Iterator[str]]
+    base_url: str = ""  # for the /models lookup when `model` has been retired
+
+
+# Free tiers retire model slugs without notice, and the chain's only symptom is
+# a 404 "model does not exist" on every request until an operator edits a
+# secret. These let it recover on its own: on a retired-model failure the
+# backend's own /models list (every OpenAI-compatible host serves one) picks a
+# replacement, and the one that answers is remembered for the rest of the
+# process, so the dead slug costs one call per boot rather than one per chat.
+_free_live_model: dict[str, str] = {}
+
+# Not chat models — Groq alone serves speech, guard and embedding slugs.
+_NON_CHAT_MODEL_HINTS = ("whisper", "tts", "guard", "embed", "rerank", "moderat")
+
+# Substring preferences, best first: hold the tier the retired defaults were
+# (a large instruct model) before dropping to the small/fast ones.
+_CHAT_MODEL_PREFS = (
+    "versatile", "120b", "-70b", "kimi", "qwen3-32b", "maverick", "scout",
+    "instant", "20b", "mini",
+)
+
+
+def _retired_model(exc: Exception) -> bool:
+    """True when a failure says the *model* is gone rather than the tier being
+    rate-limited, out of credit or the key being wrong."""
+    if getattr(exc, "status_code", None) not in (None, 404):
+        return False
+    text = str(exc).lower()
+    return "model_not_found" in text or "does not exist" in text
+
+
+def _pick_chat_model(ids: list[str]) -> str | None:
+    chat = [m for m in sorted(ids)
+            if not any(h in m.lower() for h in _NON_CHAT_MODEL_HINTS)]
+    for pref in _CHAT_MODEL_PREFS:
+        for mid in chat:
+            if pref in mid.lower():
+                return mid
+    return chat[0] if chat else None
+
+
+def _live_model(b: _FreeBackend) -> str | None:
+    """A model this backend actually serves right now, or None if it won't say."""
+    from openai import OpenAI
+
+    try:
+        client = OpenAI(api_key=b.api_key, base_url=b.base_url or None)
+        return _pick_chat_model([m.id for m in client.models.list()])
+    except Exception as exc:  # a backend that hides /models keeps its retired slug
+        obs.warn("llm.free.model_list_failed", backend=b.id,
+                 error_type=type(exc).__name__, error=str(exc)[:200])
+        return None
 
 
 def _free_secrets() -> dict:
@@ -288,8 +344,10 @@ def _free_backends() -> list[_FreeBackend]:
         key = (cfg.get(bid) or "").strip()
         if not key:
             continue
-        out.append(_FreeBackend(bid, key, cfg.get(f"{bid}_model", default_model),
-                                _openai_compat_stream(base_url)))
+        model = (_free_live_model.get(bid)
+                 or cfg.get(f"{bid}_model", default_model))
+        out.append(_FreeBackend(bid, key, model,
+                                _openai_compat_stream(base_url), base_url))
     return out
 
 
@@ -300,29 +358,45 @@ def _free_stream(api_key, model, system, messages):
         raise FreeTierExhausted("no free backend configured")
     started = False
     for attempt, b in enumerate(backends):
-        t0 = time.perf_counter()
-        try:
-            for chunk in b.stream(b.api_key, b.model, system, messages):
-                started = True
-                yield chunk
-            obs.event("llm.free.answered", backend=b.id, model=b.model,
-                      attempt=attempt,
-                      duration_ms=round((time.perf_counter() - t0) * 1000))
-            return
-        except Exception as exc:
-            if started:
-                obs.error("llm.free.mid_answer_failure", exc, backend=b.id, model=b.model)
-                raise  # mid-answer failure: text already on screen, can't switch
-            # rate limit / bad key / retired model — try the next one, but say
-            # which one died and why: this is the operator's only signal that a
-            # free tier went paid or a model was retired. Structured, because
-            # "which backend has been failing all week" is a query, not a read:
-            #   stocks logs stats --event llm.free.backend_failed --by backend
-            obs.warn("llm.free.backend_failed", backend=b.id, model=b.model,
-                     attempt=attempt, error_type=type(exc).__name__,
-                     error=str(exc)[:300],
-                     status=getattr(exc, "status_code", None))
-            continue
+        # Grows by at most one entry: a retired slug appends the replacement
+        # /models named, so the same backend gets a second shot before the
+        # chain moves on.
+        candidates = [b.model]
+        while candidates:
+            model = candidates.pop(0)
+            t0 = time.perf_counter()
+            try:
+                for chunk in b.stream(b.api_key, model, system, messages):
+                    started = True
+                    yield chunk
+                if model != b.model:
+                    _free_live_model[b.id] = model  # proven: skip the dead slug
+                obs.event("llm.free.answered", backend=b.id, model=model,
+                          attempt=attempt,
+                          duration_ms=round((time.perf_counter() - t0) * 1000))
+                return
+            except Exception as exc:
+                if started:
+                    obs.error("llm.free.mid_answer_failure", exc, backend=b.id,
+                              model=model)
+                    raise  # mid-answer failure: text already on screen, can't switch
+                # rate limit / bad key / retired model — try the next one, but say
+                # which one died and why: this is the operator's only signal that a
+                # free tier went paid or a model was retired. Structured, because
+                # "which backend has been failing all week" is a query, not a read:
+                #   stocks logs stats --event llm.free.backend_failed --by backend
+                obs.warn("llm.free.backend_failed", backend=b.id, model=model,
+                         attempt=attempt, error_type=type(exc).__name__,
+                         error=str(exc)[:300],
+                         status=getattr(exc, "status_code", None))
+                if not _retired_model(exc):
+                    break
+                alt = _live_model(b)
+                if not alt or alt == model:
+                    break
+                obs.warn("llm.free.model_substituted", backend=b.id,
+                         retired=model, model=alt)
+                candidates.append(alt)
     obs.error("llm.free.exhausted", backends=[b.id for b in backends])
     raise FreeTierExhausted("all free backends failed")
 

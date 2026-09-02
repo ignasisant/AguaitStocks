@@ -116,7 +116,11 @@ def known_tickers(
         table = json.loads(EDGAR_TICKER_CACHE.read_text())
         known.update(row["ticker"].upper() for row in table.values())
     known.update(h.ticker.upper() for h in load_watchlist(watchlist_path))
+    # Both halves of the map: the broker code the ledger stores, and the Yahoo
+    # symbol it points at — a statement that already prints the mapped symbol
+    # (or an importer that resolved a name to it) is not an unknown ticker.
     known.update(ticker_aliases())
+    known.update(s.upper() for s in ticker_aliases().values())
     from stocks.portfolio.ledger import all_transactions
 
     known.update(t.ticker for t in all_transactions(db_path))

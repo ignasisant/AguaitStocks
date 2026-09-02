@@ -4,7 +4,10 @@
 
 **TopStocks** is a personal equity tracking toolkit: fetch market
 prices, compute technical indicators, run price alerts, and browse a visual
-analytics dashboard.
+analytics dashboard. Stocks, ETFs and traded funds, and crypto pairs are all
+first-class — a fund shows its cost, basket and exposure where a company shows
+fundamentals, and portfolio sector allocation looks through funds to what they
+hold.
 
 ## Quickstart — first 10 minutes
 
@@ -141,6 +144,10 @@ uv run stocks search bank of america   # find tickers by name or symbol (SEC map
 
 # fundamental KPIs + comps table (+ EUR spot, + SEC EDGAR cross-check)
 uv run stocks fundamentals AAPL --peers MSFT,GOOGL --eur --check
+
+# ETFs and traded funds: expense ratio, size, basket, sector exposure
+uv run stocks fund SPY
+uv run stocks fund IWDA.AS        # UCITS listings too (Yahoo symbols)
 
 # 7-section analysis scaffold -> AAPL_analysis.md (quant auto-filled, judgment prompted)
 uv run stocks report AAPL --peers MSFT,GOOGL --eur --pdf
@@ -539,7 +546,26 @@ crashes collapse into one issue with a count instead of scrolling past.
 `stocks logs usage` (default: last 7 days) rolls the same structured events up
 into users / page runs / chat turns / feedback per day, plus per-page totals —
 product analytics with no tracker: everything comes from the logs the app
-already writes.
+already writes. Sign-ins show up event-by-event too: the first run of a
+session emits `auth.login`, or `auth.signup` when that run created the
+account.
+
+### Accounts
+
+Logs are kept 30 days, so they cannot answer *how many accounts exist* — an
+account that signed up once and never came back has aged out of them. Every
+account's `prefs.json` carries the two dates that survive (`first_seen`,
+`last_seen`, stamped by `auth.mark_login` at most once a day), and the roster
+reads them straight from the bucket:
+
+```bash
+uv run stocks users                  # signup + last-seen date per account
+uv run stocks users --days 7         # ...with new/active tallies over 7 days
+uv run stocks users --json           # rows for a script
+```
+
+Accounts that predate this bookkeeping get `first_seen` backfilled on their
+next sign-in and are marked `~` — dated, but not exact.
 
 ### User feedback
 

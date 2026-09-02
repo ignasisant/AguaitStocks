@@ -30,6 +30,7 @@ from stocks.analysis.portfolio import (
 from stocks.config import Holding, load_watchlist
 from stocks.data.crypto import is_crypto
 from stocks.data.earnings import calendar_events
+from stocks.data.funds import is_fund
 from stocks.portfolio.ledger import all_transactions
 from stocks.web import auth, notices, skeletons
 from stocks.web.earnings_ui import calendar_component, render_result_body
@@ -41,6 +42,7 @@ from stocks.web.portfolio_data import (
     last_session_moves,
     ledger_history,
     ledger_state,
+    native_eur_rates,
     positions_table,
 )
 from stocks.web.widgets import (
@@ -207,9 +209,26 @@ _setup_card()
 # Movers table: ticker, live share price with the day move as a chip beside it
 # ("$226.10  +18.92%"), live market value (display currency), portfolio weight.
 # The price/value/weight columns come from enriched_positions (tbl) reindexed to
-# each list's tickers; fmt for the price and value columns is built at render
-# since both need the display-currency symbol.
+# each list's tickers; the value column's fmt is built at render (it needs the
+# display-currency symbol) and the price cells are pre-formatted per row in
+# their own quote currency.
 MOVER_FMT = {"weight": "{:.1%}", "day_pct": "{:+.2%}"}
+
+
+def _native_price(value: float, ccy: str, rates: dict[str, float]) -> str:
+    """One share price, formatted in the ticker's own quote currency.
+
+    `value` is the EUR price per share; `rates` maps that currency to its
+    native->EUR spot. Pre-formatted here (not via ticker_table_html's `fmt`)
+    because the symbol varies per row, and a column format string can't.
+    """
+    rate = rates.get(ccy)
+    if not rate or pd.isna(value):
+        return "n/a"
+    prefix = auth.CURRENCY_SYMBOL.get(ccy) or f"{ccy} "
+    return f"{prefix}{value / rate:,.2f}"
+
+
 MOVER_LABELS = {
     "ticker": tr("home.col_ticker"),
     "price": tr("home.col_price"),
@@ -406,25 +425,37 @@ if auth.is_logged_in():
                             box.caption(tr("home.none_today"))
                             return
                         idx = series.index
-                        # Price per share, display currency: value / shares
+                        # Price per share in the currency the ticker trades in
+                        # ($ for a US name, € for a European one) — a share
+                        # price is quoted by its own market, unlike the EUR
+                        # value/weight columns beside it. value_eur / shares
                         # rather than a second quote burst (value_eur is already
-                        # live-priced). Unpriced rows carry NaN -> "n/a".
+                        # live-priced), then divided back by the native->EUR
+                        # rate it was built with. Unpriced rows read "n/a".
                         shares = tbl["shares"].reindex(idx).replace(0, float("nan"))
-                        price = tbl["value_eur"].reindex(idx) / shares * fx
+                        per_share = tbl["value_eur"].reindex(idx) / shares
+                        ccys = [
+                            "EUR" if pd.isna(c) or not c else str(c).upper()
+                            for c in tbl["ccy"].reindex(idx)
+                        ]
+                        rates = native_eur_rates(tuple(sorted(set(ccys))))
+                        price = [
+                            _native_price(v, c, rates)
+                            for v, c in zip(per_share, ccys, strict=True)
+                        ]
                         box.html(
                             ticker_table_html(
                                 pd.DataFrame(
                                     {
                                         "ticker": idx,
-                                        "price": price.values,
+                                        "price": price,
                                         "day_pct": series.values,
                                         "value": tbl["value_eur"].reindex(idx).values
                                         * fx,
                                         "weight": tbl["weight"].reindex(idx).values,
                                     }
                                 ),
-                                fmt={**MOVER_FMT, "price": f"{sym}{{:,.2f}}",
-                                     "value": f"{sym}{{:,.0f}}"},
+                                fmt={**MOVER_FMT, "value": f"{sym}{{:,.0f}}"},
                                 signed=("day_pct",),
                                 # Price + its day move in one cell, the % as a
                                 # tinted chip — same treatment as the Positions
@@ -920,10 +951,15 @@ def _mini_calendar_html(start: date, by_date: dict[date, list],
     return f'<table class="mini-cal">{head}{"".join(rows)}</table>'
 
 
-# Portfolio + favorites + tagged tickers; crypto has no earnings.
+# Portfolio + favorites + tagged tickers; neither coins nor funds report
+# earnings (fund classification is cache-only, see stocks.data.funds).
 _tagged = {t for ts in tag_groups.values() for t in ts}
 _earn_tickers = tuple(
-    sorted(t for t in _held | set(favs) | _tagged if not is_crypto(t))
+    sorted(
+        t
+        for t in _held | set(favs) | _tagged
+        if not is_crypto(t) and not is_fund(t, fetch=False)
+    )
 )
 
 if not _earn_tickers:

@@ -20,6 +20,7 @@ from stocks.analysis.screener import (
 )
 from stocks.config import tickers as watchlist_tickers
 from stocks.data.crypto import is_crypto
+from stocks.data.funds import is_fund
 from stocks.web import auth, skeletons
 from stocks.web.i18n import t as tr
 from stocks.web.kpi_text import kpi_desc, kpi_label
@@ -30,8 +31,12 @@ _MOBILE = is_mobile()
 st.title(tr("screener.title"))
 
 all_tickers = watchlist_tickers(auth.watchlist_path())
-# Crypto has no fundamentals — pairs would only add all-NaN rows here.
-tickers = [t for t in all_tickers if not is_crypto(t)]
+# Neither coins nor funds have fundamentals — a pair or an ETF would only add
+# an all-NaN row to a P/E ranking. Classification is cache-only here (`fetch`
+# off): this runs over the whole watchlist on every rerun, and the fetched
+# frame below records the types it saw, so a fund the cache didn't know is
+# excluded from the next run on.
+tickers = [t for t in all_tickers if not is_crypto(t) and not is_fund(t, fetch=False)]
 if not all_tickers:
     st.warning(tr("screener.watchlist_empty"))
     st.stop()
@@ -46,7 +51,7 @@ if len(tickers) < len(all_tickers):
 def _frame(sig: tuple):
     # `sig` (the ticker tuple) is part of the cache key on purpose: editing
     # the watchlist must invalidate the frame, not wait out the TTL.
-    return metrics_frame(fetch_metrics_many(list(sig)))
+    return metrics_frame(fetch_metrics_many(list(sig), drop_funds=True))
 
 
 # Every control on this page is built from the fetched frame's columns, so

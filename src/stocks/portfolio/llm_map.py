@@ -39,10 +39,12 @@ import csv
 import io
 import json
 import re
+import time
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import TYPE_CHECKING
 
+from stocks.portfolio import instruments
 from stocks.portfolio.ledger import ACTIONS, Transaction
 from stocks.portfolio.revolut import ParseResult
 
@@ -54,6 +56,11 @@ if TYPE_CHECKING:
 SAMPLE_ROWS = 18
 MAX_COLS = 30
 MAX_CELL = 40
+
+# Pause before the single retry of the symbol-resolution call (see
+# _resolve_symbols): long enough to clear a per-minute rate limit, short
+# enough that a real outage does not hold the preview open.
+RESOLVE_RETRY_SECONDS = 8
 
 FIELDS = ("date", "ticker", "action", "quantity", "price", "currency", "fee", "note")
 _REQUIRED = ("date", "ticker", "action")
@@ -262,8 +269,9 @@ Rules:
 - Column indexes are 0-based positions in the " | " list, NOT header names.
 - Required: date, ticker, action. If the file has no column that identifies
   the security, or no column that says what happened, reply {"columns": null}.
-- "ticker": the symbol column. If the file only has an ISIN, map that column —
-  it is imported as-is and mapped to a symbol later.
+- "ticker": the symbol column. Failing that, the ISIN column, failing that
+  the instrument-name column — a name is resolved to its symbol later. Never
+  an id column (position id, transaction id, order reference).
 - "price" is per share. For a dividend row, map the total amount column to
   "price". For a split, "quantity" is the ratio.
 - "action_map" needs one entry per distinct value you can see in the action
@@ -419,17 +427,27 @@ def apply_mapping(grid: list[list[str]], mapping: dict) -> ParseResult:
             })
             continue
 
-        ticker = cell(row, "ticker").strip().upper()
+        # Whatever the sheet used to name the instrument, verbatim: a company
+        # name, an ISIN, a broker code. _resolve_symbols turns it into a
+        # ticker once the whole file has been read.
+        ticker = " ".join(cell(row, "ticker").split())
         if not ticker:
             result.skipped.append({
                 "row": lineno, "type": raw_action, "reason": "no symbol",
             })
             continue
 
+        currency = (cell(row, "currency").strip().upper() or "USD")[:3]
+        if ticker == currency:  # the currency column got mapped as the symbol
+            result.skipped.append({
+                "row": lineno, "type": raw_action,
+                "reason": f"ticker is the currency {currency}",
+            })
+            continue
+
         quantity = _number(cell(row, "quantity"), decimal, thousands) or 0.0
         price = _number(cell(row, "price"), decimal, thousands) or 0.0
         fee = _number(cell(row, "fee"), decimal, thousands) or 0.0
-        currency = (cell(row, "currency").strip().upper() or "USD")[:3]
         try:
             result.transactions.append(Transaction(
                 date=day, ticker=ticker, action=action,
@@ -472,10 +490,15 @@ Rules:
   full rather than guessing at it.
 - "date" is when the trade happened, as YYYY-MM-DD. A row with no date is not
   a transaction — leave it out.
-- "ticker": the symbol if the document shows one, otherwise the ISIN.
+- "ticker": the symbol if the document shows one (keep the exchange code:
+  "ZBRA:xnas"), otherwise the ISIN, otherwise the instrument's full name as
+  printed. Never an account, position or transaction id — those are long
+  digit strings and identify the row, not the instrument.
 - "quantity" and "price" are per share, unsigned; the action carries the
   direction. For a dividend, "price" is the total amount received.
 - "currency" is the instrument's currency, not the account's, when they differ.
+  It is never the answer for "ticker": a dividend row names its instrument in
+  one column and its currency in another, so read the instrument column.
 - An empty "transactions" list is a fine answer.
 """
 
@@ -531,9 +554,16 @@ def _transaction_from(raw: dict) -> tuple[Transaction | None, str]:
     day = _date(str(raw.get("date") or ""), "%Y-%m-%d")
     if day is None:
         return None, f"unreadable date {raw.get('date')!r}"
-    ticker = str(raw.get("ticker") or "").strip().upper()
+    ticker = " ".join(str(raw.get("ticker") or "").split())
     if not ticker:
         return None, "no symbol"
+    currency = (str(raw.get("currency") or "USD").strip().upper() or "USD")[:3]
+    # A dividend line often prints the instrument in one column and the
+    # currency in the next, and a model that grabs the wrong one produces a
+    # perfectly well-formed "EUR dividend" that validation cannot fault. No
+    # holding is its own settlement currency, so this pair is always a misread.
+    if ticker == currency:
+        return None, f"ticker is the currency {currency}"
 
     def number(key: str) -> float:
         try:
@@ -545,7 +575,7 @@ def _transaction_from(raw: dict) -> tuple[Transaction | None, str]:
         return Transaction(
             date=day, ticker=ticker, action=action,
             quantity=number("quantity"), price=number("price"),
-            currency=(str(raw.get("currency") or "USD").strip().upper() or "USD")[:3],
+            currency=currency,
             fee=number("fee"), note=str(raw.get("note") or "").strip()[:120],
         ), ""
     except ValueError as exc:
@@ -627,6 +657,48 @@ def extract_pdf(data: bytes, provider: Provider, api_key: str = "") -> Extractio
                       unavailable=unreachable == attempted)
 
 
+# ------------------------------------------------------------ symbol resolution
+
+
+def _resolve_symbols(result: ParseResult, provider: Provider,
+                     api_key: str) -> None:
+    """Rewrite every row's label into its ticker, in one extra call.
+
+    Runs on the finished ParseResult rather than per row so a nine-page
+    statement asks about its five holdings once. A label the model won't name
+    is left as the document wrote it: validate.py then rejects that row by
+    name, which is what puts it in front of the user.
+    """
+    if not result.transactions:
+        return
+
+    def ask(system: str, content: str) -> str:
+        # One retry, because this call arrives right behind the extraction
+        # calls and the free chain's limits are per-minute: losing it costs
+        # every row in the file, which is far worse than a few seconds' wait.
+        try:
+            return _ask(provider, api_key, system, content)
+        except ProviderUnavailable:
+            time.sleep(RESOLVE_RETRY_SECONDS)
+            return _ask(provider, api_key, system, content)
+
+    try:
+        mapping = instruments.resolve(
+            [tx.ticker for tx in result.transactions], provider, api_key, ask=ask)
+    except ProviderUnavailable as exc:
+        # Nothing is guessed at — but every unresolved row is about to be
+        # rejected as a "malformed ticker", which reads as a broken statement
+        # rather than a dead API. Say which it was.
+        result.skipped.append({
+            "row": 0, "type": "file",
+            "reason": f"symbols could not be looked up: {exc}",
+        })
+        return
+    for tx in result.transactions:
+        if ticker := mapping.get(tx.ticker):
+            tx.ticker = ticker
+
+
 # ------------------------------------------------------------------ entry
 
 
@@ -634,7 +706,9 @@ def extract(filename: str, data: bytes, provider: Provider,
             api_key: str = "") -> Extraction:
     """Read one unrecognised export, by whichever route its format needs."""
     if filename.lower().endswith(".pdf"):
-        return extract_pdf(data, provider, api_key)
+        found = extract_pdf(data, provider, api_key)
+        _resolve_symbols(found.result, provider, api_key)
+        return found
 
     grid = read_grid(filename, data)
     if len(grid) < 2:
@@ -654,6 +728,7 @@ def extract(filename: str, data: bytes, provider: Provider,
             "reason": "the columns could not be matched to date/symbol/action",
         }]))
     result = apply_mapping(grid, mapping)
+    _resolve_symbols(result, provider, api_key)
     return Extraction(result, KIND_TRADES if result.transactions else KIND_NONE)
 
 

@@ -28,6 +28,7 @@ from stocks.data.earnings import (
     group_by_date,
     month_weeks,
 )
+from stocks.data.funds import is_fund
 from stocks.web import auth, skeletons
 from stocks.web.earnings_ui import calendar_component, render_result_body
 from stocks.web.i18n import t as tr
@@ -42,9 +43,12 @@ from stocks.web.widgets import logo as _logo
 
 st.title(tr("earnings.title"))
 
-# Crypto never reports earnings — drop pairs before the calendar fetch.
+# Neither coins nor funds ever report earnings — drop both before the calendar
+# fetch (fund classification stays cache-only, see stocks.data.funds).
 holdings = [
-    h for h in load_watchlist(auth.watchlist_path()) if not is_crypto(h.ticker)
+    h
+    for h in load_watchlist(auth.watchlist_path())
+    if not is_crypto(h.ticker) and not is_fund(h.ticker, fetch=False)
 ]
 if not holdings:
     st.warning(tr("earnings.no_stocks"))

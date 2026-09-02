@@ -46,7 +46,13 @@ case "$ENV" in
         # min 1 keeps one instance warm: Streamlit's cold start (container
         # boot + first session) is seconds, long enough to lose a visitor.
         MIN_INSTANCES="${MIN_INSTANCES:-1}"
-        MAX_INSTANCES=3
+        # One replica, not three: a Streamlit session lives in the instance
+        # that holds its websocket, and the file-upload PUT is a separate HTTP
+        # request. Cloud Run's session affinity is best-effort, so with more
+        # than one instance the upload regularly lands on the wrong replica
+        # and fails with "Invalid session_id" (a red file chip in the chat and
+        # Import pages). Concurrency is 80 — one instance is plenty here.
+        MAX_INSTANCES=1
         ;;
     staging)
         SERVICE="${STOCKS_GCP_SERVICE:-topstocks}-staging"

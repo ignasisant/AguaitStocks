@@ -11,6 +11,8 @@
   "widgets.sort_by": "Sort by",
   "widgets.analyze": "Analyze **{q}**",
   "widgets.no_tickers": "No tickers.",
+  "widgets.searching": "Searching…",
+  "widgets.no_results": "No matches.",
   "widgets.crypto": "Crypto",
   "widgets.recent": "Recent",
   "widgets.from_sec_search": "From SEC ticker search",
@@ -43,5 +45,6 @@
   "widgets.alert_t_rsi_above": "RSI above",
   "widgets.alert_t_sma_cross": "SMA cross",
   "widgets.alert_t_high_52w": "New 52-week high",
-  "widgets.alert_t_low_52w": "New 52-week low"
+  "widgets.alert_t_low_52w": "New 52-week low",
+  "widgets.funds": "ETFs & funds"
 }
