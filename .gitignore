@@ -29,6 +29,11 @@ wheels/
 /data/portfolio.db.bak*
 /data/fx_history.json
 
+# FRED CSV and Eurostat HICP responses (stocks.data.macro) — a six-hour
+# regenerable cache of public data, and the reason a page rerun costs no
+# request; nothing in here is private and nothing in here is source
+/data/macro/
+
 # Learned Yahoo quoteType per symbol (stocks.data.funds) — a regenerable
 # cache; the catalog in funds.py seeds the common funds without it
 /data/quote_types.json

@@ -1083,6 +1083,11 @@ page = st.navigation(
         tr("nav.section_market"): [
             ticker_page,
             st.Page(
+                "app_pages/sentiment.py",
+                title=tr("nav.sentiment"),
+                icon=":material/speed:",
+            ),
+            st.Page(
                 "app_pages/screener.py",
                 title=tr("nav.screener"),
                 icon=":material/filter_alt:",

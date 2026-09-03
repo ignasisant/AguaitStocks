@@ -2,6 +2,7 @@
   "nav.home": "Inicio",
   "nav.ticker": "Ticker",
   "nav.portfolio": "Asignación",
+  "nav.sentiment": "Pulso",
   "nav.screener": "Filtros",
   "nav.earnings": "Calendario",
   "nav.import": "Importar",
