@@ -520,6 +520,7 @@ src/stocks/
   web/landing_static.py  the landing as a standalone HTML document
   web/seo.py           title/description/canonical/hreflang/OG/JSON-LD, robots.txt, sitemap.xml
   web/auth.py          Google OIDC login gate + per-account data paths/prefs
+  web/onboarding.py    guided tour + per-release "what's new" (one step registry)
   web/chat_core.py     portfolio-aware assistant panel: context + BYOK key + conversation
   web/llm.py           multi-provider LLM registry (Claude/ChatGPT/Gemini), streaming + error map
   web/app_pages/       pages: Home, Ticker, Portfolio, Screener, Earnings, Valuation, Import, Profile
@@ -539,6 +540,15 @@ uv run ruff check  # lint
 uv run ruff format # format
 uv run scripts/make_og_card.py   # redraw the share card after a brand change
 ```
+
+### Agent skills
+
+`.claude/skills/` is versioned and shared with everyone who clones the repo —
+procedures a coding agent should follow that the code itself cannot express
+(currently: keeping the in-app tutorial in step with shipped features). See
+[.claude/skills/README.md](.claude/skills/README.md) for the convention and
+how to add one. Only `settings.local.json` and the Streamlit symlink in there
+are per-machine and gitignored.
 
 ## The landing page and the app share one port
 
