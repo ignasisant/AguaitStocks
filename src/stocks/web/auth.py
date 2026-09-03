@@ -302,8 +302,16 @@ def is_logged_in() -> bool:
     otherwise let anyone claim someone else's account. Google always sends
     email_verified=true for its accounts.
     """
+    try:
+        configured = "auth" in st.secrets
+    except Exception:
+        # No secrets file at all — a fresh clone, a CI checkout. Membership on
+        # st.secrets *raises* there rather than answering False, and this
+        # accessor is called by every page, so an unguarded read takes the
+        # whole app down instead of degrading to "nobody is signed in".
+        configured = False
     return (
-        "auth" in st.secrets
+        configured
         and st.user.is_logged_in
         and bool(str(getattr(st.user, "email", "") or "").strip())
         and bool(getattr(st.user, "email_verified", False))
