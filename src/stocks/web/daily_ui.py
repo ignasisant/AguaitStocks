@@ -142,9 +142,10 @@ _CSS = r"""
        phone the pair reads as two stray captions floating in whitespace, not
        as controls. Give them an edge, a fill and the DS 44px target, and pull
        them together so they read as one block. Keyed selectors (Streamlit
-       stamps st-key-<key> on a widget's container) rather than testids, which
-       is the same hook chat_core.py's FAB uses; !important because the
-       theme's own button rules are more specific than a class. */
+       stamps an "st-key-" plus the widget key class on a widget's container)
+       rather than testids, which is the same hook chat_core.py's FAB uses;
+       !important because the theme's own button rules are more specific than
+       a class. */
     .st-key-daily_action_row {gap: 8px !important;}
     .st-key-daily_action_ask button,
     .st-key-daily_action_refresh button {

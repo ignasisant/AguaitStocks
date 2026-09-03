@@ -402,3 +402,12 @@ def test_the_phone_sheet_gives_the_two_actions_a_surface():
     for key in ("daily_action_ask", "daily_action_refresh"):
         assert f".st-key-{key} button" in block
     assert "min-height: 44px" in block  # the DS touch target
+
+
+def test_the_style_block_has_no_left_angle_bracket():
+    """DOMPurify silently drops a whole style block whose text holds one — no
+    error, no console warning. It shipped: a comment in the phone block said
+    "st-key-" plus an angle-bracketed placeholder, and production painted the
+    card with none of its own chrome (badge, tight list, chips, buttons)."""
+    body = daily_ui._CSS.split("<style>")[1].split("</style>")[0]
+    assert "<" not in body
