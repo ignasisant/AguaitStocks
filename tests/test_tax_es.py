@@ -5,14 +5,24 @@ from datetime import date
 import pytest
 
 from stocks.portfolio.positions import RealizedSale
-from stocks.portfolio.tax_es import (
-    _within_two_months,
+from stocks.portfolio.tax.base import month_range
+from stocks.portfolio.tax.es import (
+    WINDOW,
+    EsTaxPeriod,
     fiscal_period,
-    fiscal_year,
-    modelo_720_flag,
-    month_range,
+    reporting_flags,
     tax_on_savings_base,
 )
+
+
+def fiscal_year(realized, year: int, buy_dates, settings=None) -> EsTaxPeriod:
+    """One calendar year as a period — `fiscal_period` takes the "YYYY" form."""
+    return fiscal_period(realized, f"{year:04d}", buy_dates, settings)
+
+
+def modelo_720_flag(total_foreign_value: float):
+    """The >50.000 EUR foreign-asset flag: Spain reports exactly one."""
+    return reporting_flags(total_foreign_value)[0]
 
 
 def sale(ticker, buy_date, sell_date, cost, proceeds) -> RealizedSale:
@@ -49,9 +59,9 @@ def test_tax_top_bracket():
 
 def test_within_two_months_window():
     s = date(2025, 3, 15)
-    assert _within_two_months(s, date(2025, 4, 1))   # after, inside
-    assert _within_two_months(s, date(2025, 1, 20))  # before, inside
-    assert not _within_two_months(s, date(2025, 6, 1))  # too late
+    assert WINDOW(s, date(2025, 4, 1))   # after, inside
+    assert WINDOW(s, date(2025, 1, 20))  # before, inside
+    assert not WINDOW(s, date(2025, 6, 1))  # too late
 
 
 def test_fiscal_year_nets_gains_and_losses():

@@ -18,7 +18,7 @@ from streamlit.testing.v1 import AppTest
 from stocks.data import fx
 from stocks.portfolio import ledger
 from stocks.portfolio.ledger import Transaction
-from stocks.web import auth, portfolio_data
+from stocks.web import auth, portfolio_data, widgets
 
 PAGE = "src/stocks/web/app_pages/portfolio.py"
 
@@ -32,6 +32,28 @@ TXS = [
 ]
 
 
+# Two years of quarterly round-trips: the monthly chart then spans ~25
+# categories, enough that the phone thinning has something to thin.
+LONG_RUN = [
+    t
+    for i, (buy, sell) in enumerate(
+        [
+            ("2024-01-10", "2024-03-11"),
+            ("2024-04-10", "2024-06-11"),
+            ("2024-07-10", "2024-09-11"),
+            ("2024-10-10", "2024-12-11"),
+            ("2025-04-10", "2025-06-11"),
+            ("2025-10-10", "2025-12-11"),
+            ("2026-01-10", "2026-01-20"),
+        ]
+    )
+    for t in (
+        Transaction(buy, "NVDA", "buy", 1, 100.0 + i, "USD", 1.0),
+        Transaction(sell, "NVDA", "sell", 1, 110.0 + i, "USD", 1.0),
+    )
+]
+
+
 @pytest.fixture
 def paths(tmp_path):
     p = auth.UserPaths(
@@ -42,6 +64,7 @@ def paths(tmp_path):
         prefs=tmp_path / "prefs.json",
         chat=tmp_path / "chat.json",
         bank=tmp_path / "bank.json",
+        action=tmp_path / "daily_action.json",
     )
     ledger.add_many(TXS, p.db)
     return p
@@ -165,6 +188,51 @@ def test_the_uk_replay_pools_instead_of_matching_the_oldest_lot(page):
     assert "s.104 pool" in body and "FBAR" not in body
 
 
+def test_a_french_filer_gets_the_pfu_split_and_an_averaged_basis(page):
+    body = _text(page("FR"))
+    assert "Plus-values" in body
+    assert "Income tax (12.8%)" in body and "Social charges (17.2%)" in body
+    assert "Average cost" in body  # the prix moyen pondéré, labelled as such
+    assert "3916" in body
+    assert "€" in body and "FBAR" not in body
+
+
+def test_an_italian_filer_gets_the_flat_rate_and_no_matching_column(page):
+    """LIFO names a real purchase, so there is nothing to disclose there."""
+    body = _text(page("IT"))
+    assert "Plusvalenze" in body and "Quadro RW" in body
+    assert "LIFO" in body
+    assert "Average cost" not in body and "s.104 pool" not in body
+
+
+def test_an_irish_filer_gets_the_exemption_and_the_december_deadline(page):
+    body = _text(page("IE"))
+    assert "Exemption used" in body and "Fund result" in body
+    assert "15 December" in body
+    assert "€" in body and "Modelo 720" not in body
+
+
+def test_a_portuguese_filer_gets_the_365_day_split(page):
+    body = _text(page("PT"))
+    assert "Mais-valias" in body
+    assert "Under 365 days" in body and "365 days or more" in body
+    assert "Anexo J" in body
+
+
+def test_a_canadian_filer_gets_the_taxable_half_in_dollars(page):
+    body = _text(page("CA"))
+    assert "Taxable half" in body and "T1135" in body
+    assert "Average cost" in body  # the ACB is not one lot's cost
+    assert "CA$" in body
+
+
+def test_an_australian_filer_gets_the_discount_and_a_july_year(page):
+    body = _text(page("AU"))
+    assert "2025-26" in body  # the sales are Feb/Mar 2026 -> the 2025-26 year
+    assert "Discount" in body and "Income year" in body
+    assert "A$" in body and "FBAR" not in body
+
+
 # ------------------------------------------------- reporting currency (Profile)
 # The tax tab follows the tax residence; everything else follows the account's
 # reporting currency, and the ledger is replayed in it either way.
@@ -181,3 +249,50 @@ def test_the_reporting_currency_does_not_move_the_tax_figures(page):
     body = _text(page("ES", currency="USD"))
     assert "IRPF savings base" in body
     assert "€898" in body  # the sale at 0.90 EUR/USD, not its dollar figure
+
+
+# ------------------------------------------------------ the period chart, phone
+# The card is the same figure on both screens; what changes is what a ~390px
+# canvas can print. No AppTest accessor exposes a plotly figure, so these read
+# the element's own spec.
+
+
+def _figure(at) -> dict:
+    return json.loads(at.get("plotly_chart")[0].proto.spec)
+
+
+def _monthly(at):
+    """Flip the granularity control to the monthly view and rerun."""
+    at.session_state["tax_granularity"] = "month"
+    at.run()
+    assert not at.exception, at.exception
+    return at
+
+
+def test_the_monthly_chart_thins_its_labels_on_a_phone(page, paths, monkeypatch):
+    """~25 slanted "2025-01" labels overlap into a smear at 390px."""
+    ledger.add_many(LONG_RUN, paths.db)
+    monkeypatch.setattr(widgets, "is_mobile", lambda: True)
+    portfolio_data.ledger_state.clear()
+    axis = _figure(_monthly(page("ES")))["layout"]["xaxis"]
+    assert axis["tickangle"] == -45
+    assert axis["dtick"] >= 4  # ~5 labels, not 25
+    assert axis["automargin"] is True  # margin b=0 would clip the slant
+
+
+def test_the_period_chart_is_taller_on_a_phone(page, paths, monkeypatch):
+    """Four legend entries wrap to three rows there, plus the label band."""
+    ledger.add_many(LONG_RUN, paths.db)
+    monkeypatch.setattr(widgets, "is_mobile", lambda: True)
+    portfolio_data.ledger_state.clear()
+    tall = _figure(_monthly(page("ES")))["layout"]["height"]
+    monkeypatch.setattr(widgets, "is_mobile", lambda: False)
+    portfolio_data.ledger_state.clear()
+    assert tall > _figure(_monthly(page("ES")))["layout"]["height"]
+
+
+def test_the_desktop_chart_keeps_every_other_month(page, paths, monkeypatch):
+    ledger.add_many(LONG_RUN, paths.db)
+    portfolio_data.ledger_state.clear()
+    axis = _figure(_monthly(page("ES")))["layout"]["xaxis"]
+    assert axis["dtick"] == 2

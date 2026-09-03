@@ -194,6 +194,26 @@ with tab_prefs:
             tr(f"profile.tax_other_income_caption_{_active.code.lower()}")
         )
 
+    if "subnational_rate" in _fields:
+        # Canada: the provincial half of the bill. Entered as a percentage
+        # because that is how every rate table prints it, stored as a fraction.
+        try:
+            _sub_now = float(prefs.get(tax_ui.PREF_SUBNATIONAL) or 0.0)
+        except (TypeError, ValueError):
+            _sub_now = 0.0
+        sub = st.number_input(
+            tr("profile.tax_subnational"),
+            min_value=0.0,
+            max_value=30.0,
+            step=0.5,
+            value=round(_sub_now * 100, 2),
+            key="pref_tax_subnational",
+        )
+        if abs(float(sub) / 100 - _sub_now) > 1e-9:
+            prefs[tax_ui.PREF_SUBNATIONAL] = float(sub) / 100
+            auth.save_prefs(prefs)
+        st.caption(tr("profile.tax_subnational_caption"))
+
     if "include_niit" in _fields:
         niit = st.toggle(
             tr("profile.tax_niit"),

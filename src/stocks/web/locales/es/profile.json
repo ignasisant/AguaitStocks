@@ -78,7 +78,7 @@
   "profile.tax_residence_auto": "Automático (región del navegador)",
   "profile.tax_residence_es": "España — IRPF",
   "profile.tax_residence_us": "Estados Unidos — IRS",
-  "profile.tax_residence_caption": "Elige las reglas que aplica la pestaña **Realizado y fiscal** y la moneda en la que se calcula tu base de coste: EUR al tipo del BCE de la fecha de cada operación para España, USD al tipo de esa fecha para EE. UU. El modo automático lee la región de tu navegador y, si no la reconoce, usa España.",
+  "profile.tax_residence_caption": "Elige las reglas que aplica la pestaña **Realizado y fiscalidad**, la moneda en la que se calcula tu coste de adquisición y con qué acciones se empareja cada venta — EUR al tipo del BCE de cada fecha y FIFO en España, un coste medio en CAD en Canadá, LIFO en Italia. Auto lee la región de tu navegador y recurre a España.",
   "profile.tax_set": "Residencia fiscal: {label}",
   "profile.tax_filing_status": "Tipo de declaración",
   "profile.tax_status_single": "Individual",
@@ -99,5 +99,16 @@
   "profile.tax_church_caption": "Se calcula sobre el impuesto, no sobre los rendimientos, así que un 9% convierte el 26,375% nominal en cerca del 27,99%.",
   "profile.tax_residence_uk": "Reino Unido — CGT",
   "profile.tax_other_income_caption_us": "Tus otros ingresos imponibles del año, **después** de deducciones. Las ganancias a corto plazo se apilan encima, y determinan en qué tramo caen las de largo plazo. Déjalo en 0 para ver las ganancias tributando solas.",
-  "profile.tax_other_income_caption_uk": "Tus otros ingresos imponibles del año, **después** de la personal allowance. Las ganancias se apilan encima: lo que quede del tramo básico de 37.700 £ tributa al 18% y el resto al 24%."
+  "profile.tax_other_income_caption_uk": "Tus otros ingresos imponibles del año, **después** de la personal allowance. Las ganancias se apilan encima: lo que quede del tramo básico de 37.700 £ tributa al 18% y el resto al 24%.",
+  "profile.tax_residence_fr": "Francia — PFU",
+  "profile.tax_residence_it": "Italia — imposta sostitutiva",
+  "profile.tax_residence_ie": "Irlanda — CGT",
+  "profile.tax_residence_pt": "Portugal — IRS",
+  "profile.tax_residence_ca": "Canadá — CRA",
+  "profile.tax_residence_au": "Australia — ATO",
+  "profile.tax_other_income_caption_pt": "Tus demás rentas gravables del año. Solo importan arriba: en cuanto alcanzan el último tramo del IRS (83.696 € en 2025), las ganancias de tenencias menores de 365 días deben englobarse a tu tipo marginal en lugar de pagar el 28% plano.",
+  "profile.tax_other_income_caption_ca": "Tus demás rentas gravables del año. La mitad gravable de tus ganancias se apila encima, y eso decide en qué tramo federal cae.",
+  "profile.tax_other_income_caption_au": "Tus demás rentas gravables del año fiscal (1 de julio a 30 de junio). La ganancia de capital neta se apila encima a tu tipo marginal.",
+  "profile.tax_subnational": "Tipo provincial (%)",
+  "profile.tax_subnational_caption": "Tu tipo marginal provincial — aproximadamente la mitad de una factura fiscal canadiense, y va de un 10% en Alberta a un 21% en Quebec en rentas altas. Déjalo en 0 para ver solo la mitad federal."
 }

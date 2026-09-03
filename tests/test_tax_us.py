@@ -228,7 +228,9 @@ def test_reporting_flags_cover_fbar_and_8938():
 # --- registry ---
 
 def test_registry_exposes_every_jurisdiction():
-    assert tax.codes() == ("ES", "US", "UK", "DE")
+    assert tax.codes() == (
+        "ES", "US", "UK", "DE", "FR", "IT", "IE", "PT", "CA", "AU",
+    )
     assert tax.get("US").currency == "USD"
     assert tax.get("es").code == "ES"
 

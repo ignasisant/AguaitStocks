@@ -310,6 +310,13 @@ css.inject(
       [data-testid="stButtonGroup"] button[data-variant="pills"][data-selected="true"] p {
         color: var(--ag-purple-400);
       }
+      /* Chip groups that share a header row with a title sit flush right,
+         against the card edge, instead of hugging the title. The widget key
+         is the only hook Streamlit gives a single control. */
+      [class*="st-key-tax_granularity"] [data-testid="stButtonGroup"]
+        > div[data-orientation] {
+        justify-content: flex-end;
+      }
       /* Tabs — the DS tab spec (Aguait Tabs canvas): quiet underline nav, no
          chip wash. Rest labels in neutral-400 at 500; hover lifts the label
          to primary over a neutral-800 underline (an inset shadow, so the

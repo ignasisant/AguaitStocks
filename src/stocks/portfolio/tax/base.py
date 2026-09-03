@@ -51,6 +51,12 @@ class TaxSettings:
     # DE: Kirchensteuer as a share of the tax itself (0.08 or 0.09), on top of
     # the flat rate and the solidarity surcharge.
     church_tax_rate: float = 0.0
+    # Sub-national income tax as a flat marginal rate on the taxable gain, for
+    # federations where the province/state tax is the larger half of the bill:
+    # Canada reads it as the provincial rate. A flat rate is an approximation
+    # of a progressive provincial scale, and asking for one marginal rate is
+    # one input instead of thirteen tables.
+    subnational_rate: float = 0.0
     # Tickers the caller has classified as funds, for regimes that treat fund
     # income differently (DE Teilfreistellung). None means "nobody checked" —
     # distinct from an empty set, which means "checked, holds none".
@@ -243,6 +249,21 @@ def months_window(months: int) -> Window:
 
     def within(sell: date, buy: date) -> bool:
         return shift_months(sell, -months) <= buy <= shift_months(sell, months)
+
+    return within
+
+
+def days_after_window(days: int) -> Window:
+    """Forward-only window: a buy in the `days` *after* the sale blocks it.
+
+    Ireland's four-week rule (TCA 1997 s.581) looks only at a reacquisition
+    after the disposal — buying more of the same share a fortnight *before*
+    selling at a loss restricts nothing. Spain and the US look both ways, so
+    they use the symmetric windows above.
+    """
+
+    def within(sell: date, buy: date) -> bool:
+        return 0 < (buy - sell).days <= days
 
     return within
 

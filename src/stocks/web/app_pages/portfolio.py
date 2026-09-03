@@ -1075,10 +1075,16 @@ if tab_tax.open:
             if len(year_ty) > 1 or len(sell_months) > 1:
                 with st.container(border=True):
                     YEAR, MONTH = "year", "month"
-                    # Columns let the control sit top-right while the title —
-                    # which depends on it — is written afterwards.
-                    head, ctl = st.columns(
-                        [3, 2], vertical_alignment="bottom")
+                    # A slot for the title lets the control sit beside (or
+                    # above) it while the title — which depends on the
+                    # control — is written afterwards. Phones stack: a 3:2
+                    # split of ~390px leaves the heading two words per line
+                    # and the control clipped.
+                    if _MOBILE:
+                        head, ctl = st.container(), st.container()
+                    else:
+                        head, ctl = st.columns(
+                            [3, 2], vertical_alignment="bottom")
                     with ctl:
                         gran = st.segmented_control(
                             tr("portfolio.realized_granularity"),
@@ -1148,19 +1154,31 @@ if tab_tax.open:
                     # and every component named inside, so a lone "7,699"
                     # can't float ambiguously between bars.
                     fig.update_layout(
-                        **chart_layout(top_legend=True),
+                        # Four legend entries wrap to three rows on a phone and
+                        # the slanted month labels claim a bottom band, so the
+                        # default 260px would leave the bars a ~100px strip.
+                        **chart_layout(
+                            top_legend=True, height=340 if _MOBILE else 260),
                         barmode="relative",
                         hovermode="x unified",
                     )
                     # Category axis: the periods are labels, not a numeric
-                    # scale. A long monthly run gets slanted labels and every
-                    # other tick so "2025-01" stops colliding with its
-                    # neighbour on a narrow screen.
-                    fig.update_xaxes(
-                        type="category",
-                        tickangle=-45 if gran == MONTH else 0,
-                        dtick=2 if gran == MONTH and len(keys) > 14 else None,
-                    )
+                    # scale. A monthly run gets slanted labels, thinned to what
+                    # the width can print without "2025-01" colliding with its
+                    # neighbour — the card fits ~14 on desktop, ~5 on a ~390px
+                    # phone (DS mobile chart spec). automargin because the
+                    # layout margin is b=0: the slant needs its own band or the
+                    # labels clip off the bottom of the shorter mobile canvas.
+                    if gran == MONTH:
+                        _max_ticks = 5 if _MOBILE else 14
+                        fig.update_xaxes(
+                            type="category",
+                            tickangle=-45,
+                            dtick=max(1, math.ceil(len(keys) / _max_ticks)),
+                            automargin=True,
+                        )
+                    else:
+                        fig.update_xaxes(type="category", tickangle=0)
                     show_chart(fig, key="realized_by_period")
                     st.caption(tax_ui.t(_code, "realized_by_year_caption"))
                     if gran == MONTH:

@@ -28,6 +28,7 @@ PREF_FILING_STATUS = "tax_filing_status"
 PREF_OTHER_INCOME = "tax_other_income"
 PREF_NIIT = "tax_niit"
 PREF_CHURCH_TAX = "tax_church_rate"
+PREF_SUBNATIONAL = "tax_subnational_rate"
 
 AUTO = "auto"
 
@@ -68,11 +69,16 @@ def settings(prefs: dict | None = None) -> tax.TaxSettings:
         church = float(p.get(PREF_CHURCH_TAX) or 0.0)
     except (TypeError, ValueError):
         church = 0.0
+    try:
+        subnational = float(p.get(PREF_SUBNATIONAL) or 0.0)
+    except (TypeError, ValueError):
+        subnational = 0.0
     return tax.TaxSettings(
         filing_status=str(p.get(PREF_FILING_STATUS) or "single"),
         other_income=income,
         include_niit=bool(p.get(PREF_NIIT)),
         church_tax_rate=church,
+        subnational_rate=subnational,
     )
 
 
