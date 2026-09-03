@@ -24,13 +24,12 @@ Nothing here writes to the ledger; the Import page previews and commits.
 
 from __future__ import annotations
 
-import csv
-import io
 from pathlib import Path
 
 from stocks.data.crypto import to_pair
+from stocks.portfolio import statement
 from stocks.portfolio.ledger import Transaction
-from stocks.portfolio.revolut import ParseResult, _money, _parse_date
+from stocks.portfolio.statement import CsvFormat, ParseResult, Row, parse_date
 
 # Logical key -> accepted header names (lowercased); exports drift across
 # app versions, so matching is case-insensitive like the stock parser's.
@@ -60,42 +59,11 @@ _CCY_MARKS = (
 
 def parse_csv(text: str) -> ParseResult:
     """Parse Revolut crypto-statement CSV text (no side effects)."""
-    reader = csv.DictReader(io.StringIO(text))
-    if reader.fieldnames is None:
-        return ParseResult()
-    lower = {name.strip().lower(): name for name in reader.fieldnames}
-    col: dict[str, str] = {}
-    for key, aliases in _COLS.items():
-        for alias in aliases:
-            if alias in lower:
-                col[key] = lower[alias]
-                break
-
-    result = ParseResult()
-    for i, raw in enumerate(reader, start=2):  # row 1 is the header
-        rtype = (_get(raw, col, "type") or "").strip()
-        action = _map_action(rtype)
-        if action is None:
-            result.skipped.append(_skip_entry(i, rtype, raw, col))
-            continue
-        try:
-            tx = _build_tx(raw, col, action)
-        except (KeyError, ValueError) as exc:
-            entry = _skip_entry(i, rtype, raw, col)
-            entry["reason"] = str(exc)
-            result.skipped.append(entry)
-            continue
-        result.transactions.append(tx)
-    return result
+    return statement.parse_csv(text, FORMAT)
 
 
 def parse_file(path: str | Path) -> ParseResult:
     return parse_csv(Path(path).read_text())
-
-
-def _get(raw: dict, col: dict[str, str], key: str) -> str | None:
-    name = col.get(key)
-    return raw.get(name) if name else None
 
 
 def _map_action(rtype: str) -> str | None:
@@ -127,26 +95,23 @@ def _skip_reason(rtype: str) -> str:
     return "unrecognised type — not imported"
 
 
-def _skip_entry(row: int, rtype: str, raw: dict, col: dict[str, str]) -> dict:
+def _audit(row: Row) -> dict:
     return {
-        "row": row,
-        "type": rtype,
-        "reason": _skip_reason(rtype),
-        "date": (_get(raw, col, "date") or "").strip(),
-        "ticker": (_get(raw, col, "symbol") or "").strip().upper(),
-        "quantity": _money(_get(raw, col, "quantity")),
-        "amount": _money(_get(raw, col, "value")),
-        "currency": _currency(raw, col),
+        "date": row.text("date"),
+        "ticker": row.upper("symbol"),
+        "quantity": row.money("quantity"),
+        "amount": row.money("value"),
+        "currency": _currency(row),
     }
 
 
-def _currency(raw: dict, col: dict[str, str]) -> str:
+def _currency(row: Row) -> str:
     """Fiat currency: explicit column first, else sniffed from money fields."""
-    explicit = (_get(raw, col, "currency") or "").strip().upper()
+    explicit = row.upper("currency")
     if explicit:
         return explicit
     for key in ("price", "value", "fee"):
-        v = (_get(raw, col, key) or "").upper()
+        v = row.upper(key)
         for mark, ccy in _CCY_MARKS:
             if mark in v:
                 return ccy
@@ -157,7 +122,7 @@ def _parse_any_date(value: str | None) -> str:
     """ISO date from an ISO timestamp, or from the prose formats some crypto
     exports use ("Jan 5, 2025, 2:31:41 PM")."""
     try:
-        return _parse_date(value)
+        return parse_date(value)
     except ValueError:
         import pandas as pd
 
@@ -167,17 +132,17 @@ def _parse_any_date(value: str | None) -> str:
         return ts.date().isoformat()
 
 
-def _build_tx(raw: dict, col: dict[str, str], action: str) -> Transaction:
-    date = _parse_any_date(_get(raw, col, "date"))
-    coin = (_get(raw, col, "symbol") or "").strip().upper()
+def _build_tx(row: Row, action: str) -> Transaction:
+    date = _parse_any_date(row.text("date"))
+    coin = row.upper("symbol")
     if not coin:
         raise ValueError("missing symbol")
-    currency = _currency(raw, col)
+    currency = _currency(row)
 
-    qty = _money(_get(raw, col, "quantity"))
-    price = _money(_get(raw, col, "price"))
-    value = _money(_get(raw, col, "value"))
-    fee = _money(_get(raw, col, "fee"))
+    qty = row.money("quantity")
+    price = row.money("price")
+    value = row.money("value")
+    fee = row.money("fee")
     if qty <= 0:
         raise ValueError(f"{action} row has no quantity")
     if price == 0.0 and value and qty:  # derive when per-coin price is blank
@@ -206,3 +171,13 @@ def _build_tx(raw: dict, col: dict[str, str], action: str) -> Transaction:
         fee=fee,
         note=f"revolut crypto {coin}",
     )
+
+
+FORMAT = CsvFormat(
+    columns=_COLS,
+    type_key="type",
+    action_of=_map_action,
+    skip_reason=_skip_reason,
+    build=_build_tx,
+    audit=_audit,
+)

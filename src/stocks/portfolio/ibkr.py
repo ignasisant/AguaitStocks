@@ -35,7 +35,7 @@ import io
 import re
 
 from stocks.portfolio.ledger import Transaction
-from stocks.portfolio.revolut import ParseResult, _money, _parse_date
+from stocks.portfolio.statement import ParseResult, money, parse_date
 
 _TRADE_COLS = (
     "DataDiscriminator", "Asset Category", "Currency", "Symbol",
@@ -93,14 +93,14 @@ def _trade_row(line: int, cells: dict[str, str], result: ParseResult) -> None:
         return  # ClosedLot / SubTotal / Total — derived lines, not events
     category = (cells.get("Asset Category") or "").strip()
     ticker = (cells.get("Symbol") or "").strip()
-    qty = _money(cells.get("Quantity"))
+    qty = money(cells.get("Quantity"))
     try:
         if category not in ("Stocks", "ETFs"):
             raise ValueError(f"asset category {category or '?'} — not auto-imported")
         if not ticker:
             raise ValueError("missing symbol")
-        date = _parse_date((cells.get("Date/Time") or "").split(",", 1)[0])
-        price = _money(cells.get("T. Price"))
+        date = parse_date((cells.get("Date/Time") or "").split(",", 1)[0])
+        price = money(cells.get("T. Price"))
         if qty == 0:
             raise ValueError("trade row has no quantity")
         if price <= 0:
@@ -113,7 +113,7 @@ def _trade_row(line: int, cells: dict[str, str], result: ParseResult) -> None:
                 quantity=abs(qty),
                 price=price,
                 currency=(cells.get("Currency") or "USD").strip(),
-                fee=abs(_money(cells.get("Comm/Fee"))),
+                fee=abs(money(cells.get("Comm/Fee"))),
                 note="ibkr",
             )
         )
@@ -132,12 +132,12 @@ def _dividend_row(line: int, cells: dict[str, str], result: ParseResult) -> None
         m = _DESC_TICKER.match(desc)
         if not m:
             raise ValueError(f"cannot read ticker from description {desc!r}")
-        amount = _money(cells.get("Amount"))
+        amount = money(cells.get("Amount"))
         if amount <= 0:
             raise ValueError(f"dividend amount {amount:g} is not positive")
         result.transactions.append(
             Transaction(
-                date=_parse_date(cells.get("Date")),
+                date=parse_date(cells.get("Date")),
                 ticker=m.group(1).strip(),
                 action="dividend",
                 price=amount,
@@ -165,7 +165,7 @@ def _withholding_row(line: int, cells: dict[str, str], result: ParseResult) -> N
         "date": (cells.get("Date") or "").strip(),
         "ticker": m.group(1).strip() if m else "",
         "quantity": 0.0,
-        "amount": _money(cells.get("Amount")),
+        "amount": money(cells.get("Amount")),
         "currency": currency,
     })
 
@@ -180,6 +180,6 @@ def _skip(
         "date": (cells.get("Date/Time") or cells.get("Date") or "").split(",", 1)[0],
         "ticker": ticker.upper(),
         "quantity": qty,
-        "amount": _money(cells.get("Amount") or cells.get("Proceeds")),
+        "amount": money(cells.get("Amount") or cells.get("Proceeds")),
         "currency": (cells.get("Currency") or "").strip().upper(),
     }

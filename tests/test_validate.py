@@ -3,7 +3,7 @@
 from datetime import date
 
 from stocks.portfolio.ledger import Transaction
-from stocks.portfolio.revolut import ParseResult
+from stocks.portfolio.statement import ParseResult
 from stocks.portfolio.validate import resolve_splits, validate
 
 TODAY = date(2026, 8, 2)

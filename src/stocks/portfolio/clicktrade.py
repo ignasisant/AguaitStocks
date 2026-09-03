@@ -44,7 +44,7 @@ from datetime import date, datetime
 
 from stocks.portfolio.degiro import _num
 from stocks.portfolio.ledger import Transaction
-from stocks.portfolio.revolut import ParseResult
+from stocks.portfolio.statement import ParseResult
 
 # Logical key -> accepted header names, lowercased and accent-stripped.
 _HEADERS = {

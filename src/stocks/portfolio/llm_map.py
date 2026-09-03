@@ -46,7 +46,7 @@ from typing import TYPE_CHECKING
 
 from stocks.portfolio import instruments
 from stocks.portfolio.ledger import ACTIONS, Transaction
-from stocks.portfolio.revolut import ParseResult
+from stocks.portfolio.statement import ParseResult
 
 if TYPE_CHECKING:
     from stocks.web.llm import Provider
@@ -205,7 +205,8 @@ def _read_pdf(data: bytes) -> list[list[str]]:
     with pdfplumber.open(io.BytesIO(data)) as pdf:
         for page in pdf.pages:
             found = page.extract_tables() or []
-            tables.extend(found)
+            # pdfplumber leaves an empty cell as None; downstream reads strings.
+            tables.extend([[c or "" for c in row] for row in t] for t in found)
             if not found:
                 positioned.extend(_words_grid(page))
     if not tables:

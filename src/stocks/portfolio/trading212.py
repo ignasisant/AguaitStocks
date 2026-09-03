@@ -30,75 +30,29 @@ Nothing here writes to the ledger; the Import page previews and commits.
 
 from __future__ import annotations
 
-import csv
-import io
-
+from stocks.portfolio import statement
 from stocks.portfolio.ledger import Transaction
-from stocks.portfolio.revolut import ParseResult, _money, _parse_date
+from stocks.portfolio.statement import CsvFormat, ParseResult, Row, parse_date
 
-# Logical key -> exact Trading 212 header, lowercased (their export is stable;
-# matching is case-insensitive and whitespace-tolerant only).
+# Logical key -> exact Trading 212 header, lowercased (their export is stable,
+# so each key has a single spelling; matching is case-insensitive and
+# whitespace-tolerant only).
 _COLS = {
-    "action": "action",
-    "time": "time",
-    "isin": "isin",
-    "ticker": "ticker",
-    "shares": "no. of shares",
-    "price": "price / share",
-    "price_ccy": "currency (price / share)",
-    "total": "total",
-    "total_ccy": "currency (total)",
-    "wht": "withholding tax",
-    "wht_ccy": "currency (withholding tax)",
+    "action": ("action",),
+    "time": ("time",),
+    "isin": ("isin",),
+    "ticker": ("ticker",),
+    "shares": ("no. of shares",),
+    "price": ("price / share",),
+    "price_ccy": ("currency (price / share)",),
+    "total": ("total",),
+    "total_ccy": ("currency (total)",),
+    "wht": ("withholding tax",),
+    "wht_ccy": ("currency (withholding tax)",),
 }
 
 # Every one of these must be present or the file is not a Trading 212 export.
 _REQUIRED = ("action", "time", "isin", "ticker", "shares", "price")
-
-
-def parse_csv(text: str) -> ParseResult:
-    """Parse Trading 212 export CSV text into a ParseResult (no side effects)."""
-    reader = csv.DictReader(io.StringIO(text))
-    if reader.fieldnames is None:
-        return ParseResult()
-    lower = {name.strip().lower(): name for name in reader.fieldnames if name}
-    col = {key: lower[h] for key, h in _COLS.items() if h in lower}
-    missing = [_COLS[k] for k in _REQUIRED if k not in col]
-    if missing:
-        return ParseResult(
-            skipped=[{
-                "row": 1,
-                "type": "header",
-                "reason": (
-                    "not a Trading 212 export — missing column(s): "
-                    + ", ".join(missing)
-                ),
-            }]
-        )
-
-    result = ParseResult()
-    for i, raw in enumerate(reader, start=2):  # row 1 is the header
-        rtype = (_cell(raw, col, "action") or "").strip()
-        if not rtype and not _cell(raw, col, "time"):
-            continue  # blank line
-        action = _map_action(rtype)
-        if action is None:
-            result.skipped.append(_skip_entry(i, rtype, raw, col))
-            continue
-        try:
-            tx = _build_tx(raw, col, action)
-        except ValueError as exc:
-            entry = _skip_entry(i, rtype, raw, col)
-            entry["reason"] = str(exc)
-            result.skipped.append(entry)
-            continue
-        result.transactions.append(tx)
-    return result
-
-
-def _cell(raw: dict, col: dict[str, str], key: str) -> str:
-    name = col.get(key)
-    return (raw.get(name) or "").strip() if name else ""
 
 
 def _map_action(rtype: str) -> str | None:
@@ -128,33 +82,30 @@ def _skip_reason(rtype: str) -> str:
     return "unrecognised type — not imported"
 
 
-def _skip_entry(row: int, rtype: str, raw: dict, col: dict[str, str]) -> dict:
+def _audit(row: Row) -> dict:
     """Same shape as revolut's skipped entries — validate.resolve_splits and
     the preview table read these fields."""
     return {
-        "row": row,
-        "type": rtype,
-        "reason": _skip_reason(rtype),
-        "date": _cell(raw, col, "time"),
-        "ticker": _cell(raw, col, "ticker").upper(),
-        "quantity": _money(_cell(raw, col, "shares")),
-        "amount": _money(_cell(raw, col, "total")),
-        "currency": _cell(raw, col, "total_ccy").upper(),
+        "date": row.text("time"),
+        "ticker": row.upper("ticker"),
+        "quantity": row.money("shares"),
+        "amount": row.money("total"),
+        "currency": row.upper("total_ccy"),
     }
 
 
-def _build_tx(raw: dict, col: dict[str, str], action: str) -> Transaction:
-    date = _parse_date(_cell(raw, col, "time"))
-    ticker = _cell(raw, col, "ticker")
+def _build_tx(row: Row, action: str) -> Transaction:
+    date = parse_date(row.text("time"))
+    ticker = row.text("ticker")
     if not ticker:
         raise ValueError("missing ticker")
 
     if action == "dividend":
-        return _build_dividend(raw, col, date, ticker)
+        return _build_dividend(row, date, ticker)
 
-    qty = _money(_cell(raw, col, "shares"))
-    price = _money(_cell(raw, col, "price"))
-    currency = _cell(raw, col, "price_ccy") or _cell(raw, col, "total_ccy") or "USD"
+    qty = row.money("shares")
+    price = row.money("price")
+    currency = row.text("price_ccy") or row.text("total_ccy") or "USD"
     if qty <= 0:
         raise ValueError(f"{action} row has no quantity")
     if price <= 0:
@@ -170,14 +121,12 @@ def _build_tx(raw: dict, col: dict[str, str], action: str) -> Transaction:
     )
 
 
-def _build_dividend(
-    raw: dict, col: dict[str, str], date: str, ticker: str
-) -> Transaction:
-    qty = _money(_cell(raw, col, "shares"))
-    per_share = _money(_cell(raw, col, "price"))
-    inst_ccy = _cell(raw, col, "price_ccy").upper()
-    wht = _money(_cell(raw, col, "wht"))
-    wht_ccy = _cell(raw, col, "wht_ccy").upper()
+def _build_dividend(row: Row, date: str, ticker: str) -> Transaction:
+    qty = row.money("shares")
+    per_share = row.money("price")
+    inst_ccy = row.upper("price_ccy")
+    wht = row.money("wht")
+    wht_ccy = row.upper("wht_ccy")
 
     if qty > 0 and per_share > 0 and inst_ccy:
         # Gross in the instrument currency; withholding as fee when it is
@@ -192,8 +141,8 @@ def _build_dividend(
             note="trading212",
         )
 
-    total = _money(_cell(raw, col, "total"))
-    total_ccy = _cell(raw, col, "total_ccy") or "USD"
+    total = row.money("total")
+    total_ccy = row.text("total_ccy") or "USD"
     if total <= 0:
         raise ValueError(f"dividend amount {total} is not positive")
     return Transaction(
@@ -205,3 +154,21 @@ def _build_dividend(
         fee=wht if wht > 0 and wht_ccy == total_ccy.upper() else 0.0,
         note="trading212",
     )
+
+
+FORMAT = CsvFormat(
+    columns=_COLS,
+    type_key="action",
+    action_of=_map_action,
+    skip_reason=_skip_reason,
+    build=lambda row, action: _build_tx(row, action),
+    audit=_audit,
+    required=_REQUIRED,
+    refusal="not a Trading 212 export — missing column(s): ",
+    blank_when_empty=("action", "time"),
+)
+
+
+def parse_csv(text: str) -> ParseResult:
+    """Parse Trading 212 export CSV text into a ParseResult (no side effects)."""
+    return statement.parse_csv(text, FORMAT)
