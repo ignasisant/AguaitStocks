@@ -80,3 +80,6 @@ wheels/
 .notify_secrets.env
 /data/feedback/
 /data/chat.json
+
+# CodeGraph index (local, rebuildable with `codegraph index`)
+.codegraph/

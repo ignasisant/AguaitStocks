@@ -18,6 +18,7 @@ from datetime import date, timedelta
 
 import pandas as pd
 
+from stocks import obs
 from stocks.config import Holding, load_watchlist
 from stocks.data.fetch import resolve
 
@@ -54,7 +55,11 @@ def _to_date(value) -> date | None:
         ts = pd.Timestamp(value)
     except (ValueError, TypeError):
         return None
-    return None if pd.isna(ts) else ts.date()
+    # NaT is pandas' missing-date singleton, not a Timestamp — this both
+    # screens it and is the narrowing a type checker can follow.
+    if not isinstance(ts, pd.Timestamp):
+        return None
+    return ts.date()
 
 
 def _to_float(value) -> float | None:
@@ -89,8 +94,11 @@ def build_events(
             e for e in events if e.days_until is not None and e.days_until <= within_days
         ]
     else:
-        events = [e for e in events if e.date is not None]
-    return sorted(events, key=lambda e: e.days_until)
+        # Filter on the same field the sort reads: `days_until` is None
+        # exactly when `date` is, and keeping them in step is what makes the
+        # sort key total.
+        events = [e for e in events if e.days_until is not None]
+    return sorted(events, key=lambda e: e.days_until or 0)
 
 
 def add_months(year: int, month: int, delta: int) -> tuple[int, int]:
@@ -150,16 +158,14 @@ def fetch_earnings(ticker: str) -> tuple[list[date], list[EarningsResult]]:
         return [], []
     found: set[date] = set()
     results: dict[date, EarningsResult] = {}
-    try:
+    with obs.swallow("earnings.calendar", ticker=ticker):
         cal = t.calendar
         raw = cal.get("Earnings Date") if isinstance(cal, dict) else None
         if raw is not None:
             for d in raw if isinstance(raw, (list, tuple)) else [raw]:
                 if (dd := _to_date(d)) is not None:
                     found.add(dd)
-    except Exception:
-        pass
-    try:
+    with obs.swallow("earnings.dates", ticker=ticker):
         df = t.get_earnings_dates(limit=12)
         if df is not None and not df.empty:
             for idx, row in df.iterrows():
@@ -175,8 +181,6 @@ def fetch_earnings(ticker: str) -> tuple[list[date], list[EarningsResult]]:
                         reported_eps=reported,
                         surprise_pct=_to_float(row.get("Surprise(%)")),
                     )
-    except Exception:
-        pass
     return sorted(found), sorted(results.values(), key=lambda r: r.date)
 
 
