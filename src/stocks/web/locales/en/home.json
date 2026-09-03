@@ -137,5 +137,10 @@
   "home.daily_fb_no_actions": "Nothing needs a decision today",
   "home.daily_fb_one_action": "One thing to decide today",
   "home.daily_ask_short": "Ask",
-  "home.daily_disclaimer_short": "AI analysis from your own figures — not investment advice."
+  "home.daily_disclaimer_short": "AI analysis from your own figures — not investment advice.",
+  "home.daily_wait_title": "Writing today's action…",
+  "home.daily_wait_body": "The assistant is reading the figures your dashboard just loaded. It takes a few seconds, once a day.",
+  "home.daily_pending": "The assistant is still writing — this card updates on its own.",
+  "home.daily_computed_wait": "Today's figures straight from your book while the assistant writes.",
+  "home.daily_regen_title": "Rewriting today's action…"
 }

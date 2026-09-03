@@ -137,5 +137,10 @@
   "home.daily_fb_no_actions": "Hoy no hay nada que decidir",
   "home.daily_fb_one_action": "Una cosa que decidir hoy",
   "home.daily_ask_short": "Preguntar",
-  "home.daily_disclaimer_short": "Análisis IA con tus cifras — no es asesoramiento."
+  "home.daily_disclaimer_short": "Análisis IA con tus cifras — no es asesoramiento.",
+  "home.daily_wait_title": "Escribiendo la acción de hoy…",
+  "home.daily_wait_body": "El asistente está leyendo las cifras que acaba de cargar el panel. Tarda unos segundos, una vez al día.",
+  "home.daily_pending": "El asistente sigue escribiendo — esta tarjeta se actualizará sola.",
+  "home.daily_computed_wait": "Cifras directas de tu cartera mientras el asistente escribe.",
+  "home.daily_regen_title": "Reescribiendo la acción de hoy…"
 }

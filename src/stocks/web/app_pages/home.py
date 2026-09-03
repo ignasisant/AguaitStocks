@@ -210,14 +210,15 @@ _daily_slot = None  # the daily action card's place, reserved just below
 # numbers. Only the slot is reserved here — the card is filled at the bottom
 # of the script (deferred-slot pattern), because generating one waits on a
 # provider and the figures it talks about (positions, basket history, the
-# earnings pass, the 52-week scan) are not loaded yet. The shimmer holds the
-# card's place meanwhile, so nothing below it jumps when it lands.
+# earnings pass, the 52-week scan) are not loaded yet. The placeholder holds
+# the card's place meanwhile — and on the day's first visit says a briefing is
+# being written — so nothing below it jumps when it lands.
 #
 # Signed-in only: the card is stored per account and guests share a read-only
 # data dir. An account with neither positions nor a watchlist has nothing to
 # brief on — the fill at the bottom clears the slot for it.
 if auth.is_logged_in():
-    _daily_slot = skeletons.reserve("text", border=True, title=True, lines=4)
+    _daily_slot = daily_ui.reserve()
 
 # ---------------------------------------------------------- portfolio glance
 # Daily-glance cut of the Portfolio page: value / today / unrealised P/L plus

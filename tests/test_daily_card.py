@@ -9,6 +9,7 @@ take the page down — only exist end to end.
 from __future__ import annotations
 
 import json
+import threading
 from dataclasses import dataclass, field
 from datetime import datetime
 
@@ -21,9 +22,9 @@ from stocks.web import auth, daily_ui
 SCRIPT = """
 import streamlit as st
 
-from stocks.web import daily_ui, skeletons
+from stocks.web import daily_ui
 
-slot = skeletons.reserve("text", border=True, title=True, lines=4)
+slot = daily_ui.reserve()
 daily_ui.render(
     slot, tbl=None, hist=None, currency="EUR", day_change=(120.0, 0.012),
     holdings=st.session_state.get("holdings", []),
@@ -262,3 +263,142 @@ def test_the_sheet_carries_the_phone_block_last(page, free):
                  and "style" in e.body)
     assert "@media (max-width: 640px)" in sheet
     assert sheet.index("@media (max-width: 640px)") > sheet.index(".ag-daily-chips a")
+
+
+# ------------------------------------------------------- the wait itself
+# Generation happens once a day and used to hold the script run open for as
+# long as a provider took (daily.TIMEOUT_S, 25s): the dashboard was painted but
+# the run was still open, so nothing on it could be clicked. These cover the
+# bounded wait that replaced it.
+
+
+def test_a_slow_provider_does_not_hold_the_page(page, free, stored, monkeypatch):
+    """Past GRACE_S the model goes to a thread, the computed briefing paints
+    with a line saying so, and the real card is picked up on a later run."""
+    monkeypatch.setattr(daily_ui, "GRACE_S", 0.05)
+    gate = threading.Event()
+    answer = free.complete
+
+    def blocking(api_key, model, system, messages):
+        gate.wait(10)
+        return answer(api_key, model, system, messages)
+
+    monkeypatch.setattr(free, "complete", blocking)
+    page.run()
+    assert not page.exception
+    body = _card(page)
+    assert "Nvidia carries the day" not in body     # not written yet
+    assert "Portfolio +1.20% today" in body         # the computed card stands
+    assert "still writing" in body                  # and says it will improve
+    assert page.caption[0].value.startswith("Today's figures straight")
+    assert not stored                               # nothing stored yet either
+
+    gate.set()
+    page.session_state["daily_action_job"]["thread"].join(10)
+    page.run()
+    assert not page.exception
+    assert "Nvidia carries the day" in _card(page)
+    assert stored["headline"] == "Nvidia carries the day"
+    assert len(free.calls) == 1                     # and only one call bought
+
+
+def test_a_slow_regenerate_clears_the_card_it_replaces(page, free, monkeypatch):
+    """The reader asked for a new briefing, so the old one goes on the click:
+    leaving it up — or substituting the computed card for it — has them
+    reading a card they just dismissed. The page must still come back, with
+    the writing placeholder and a refresh button that cannot be clicked
+    again into a second thread."""
+    page.run()
+    monkeypatch.setattr(daily_ui, "GRACE_S", 0.05)
+    gate = threading.Event()
+    answer = free.complete
+    monkeypatch.setattr(
+        free, "complete",
+        lambda *a: (gate.wait(10), answer(*a))[1],
+    )
+    page.button(key="daily_action_refresh").click().run()
+    assert not page.exception
+    body = _card(page)
+    assert "Nvidia carries the day" not in body      # the card it replaces
+    assert "Portfolio +1.20% today" not in body      # nor a stand-in for it
+    assert "Rewriting today" in body and "topstocks-sk" in body
+    assert page.button(key="daily_action_refresh").disabled
+    assert not page.caption                          # nothing yet to disclaim
+
+    free.reply = json.dumps(
+        {"headline": "Second look", "bullets": ["one", "two"], "focus": []}
+    )
+    gate.set()
+    page.session_state["daily_action_job"]["thread"].join(10)
+    page.run()
+    body = _card(page)
+    assert "Second look" in body and "Nvidia carries the day" not in body
+    assert not page.button(key="daily_action_refresh").disabled
+
+
+def test_the_resolved_card_survives_a_rerun_without_the_store(page, free, stored):
+    """The session keeps the card it resolved: a rerun that can no longer read
+    the store (a bucket blip, a fragment rerun holding the parent's stale
+    `stored`) must redraw it, not fall back to the computed one."""
+    page.run()
+    stored.clear()
+    page.run()
+    assert "Nvidia carries the day" in _card(page)
+    assert len(free.calls) == 1
+
+
+# ------------------------------------------------------------ placeholder
+
+RESERVE_SCRIPT = """
+from stocks.web import daily_ui
+
+daily_ui.reserve()
+"""
+
+
+def _reserve_page(monkeypatch, card: dict) -> AppTest:
+    monkeypatch.setattr(auth, "load_action", lambda *a, **k: dict(card))
+    at = AppTest.from_string(RESERVE_SCRIPT, default_timeout=30)
+    at.session_state["active_lang"] = "en"
+    return at
+
+
+def test_the_placeholder_names_the_wait_it_covers(monkeypatch):
+    """With no card for today the slot covers a model call — an anonymous
+    shimmer over a multi-second wait reads as a page that broke."""
+    at = _reserve_page(monkeypatch, {}).run()
+    assert not at.exception
+    body = "".join(el.body for el in at.get("html"))
+    assert "Writing today" in body
+    assert "takes a few seconds" in body
+    assert "topstocks-sk" in body  # the shimmer still holds the card's shape
+
+
+def test_the_placeholder_stays_quiet_when_today_is_already_stored(monkeypatch):
+    """Nothing is being written — the slot is up for one paint, and a line
+    about the assistant would flash on every page load."""
+    at = _reserve_page(monkeypatch, {
+        "day": daily.action_day(datetime.now()).isoformat(),
+        "headline": "Stored", "bullets": ["one"], "lang": "en",
+    }).run()
+    assert not at.exception
+    body = "".join(el.body for el in at.get("html"))
+    assert "Writing today" not in body
+    assert "topstocks-sk" in body
+
+
+def test_the_phone_bullet_marker_is_a_literal_glyph():
+    """A CSS escape written inside a Python string is a Python escape first:
+    "\\25B8" is the octal \\25 plus "B8", which shipped an invisible control
+    character and a purple "B8" as the bullet on every phone."""
+    assert 'content: "▸"' in daily_ui._CSS
+    assert "\x15" not in daily_ui._CSS
+
+
+def test_the_phone_sheet_gives_the_two_actions_a_surface():
+    """A tertiary button is a label with no fill: stacked full-width on a
+    phone the pair reads as two stray captions, not as the card's controls."""
+    block = daily_ui._CSS.split("@media (max-width: 640px)")[1]
+    for key in ("daily_action_ask", "daily_action_refresh"):
+        assert f".st-key-{key} button" in block
+    assert "min-height: 44px" in block  # the DS touch target

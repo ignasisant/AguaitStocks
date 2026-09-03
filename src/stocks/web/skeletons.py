@@ -396,6 +396,20 @@ class _Slot:
         self._placeholder.empty()
 
 
+def reserve_html(markup: str, *, container=None, border: bool = False) -> _Slot:
+    """Reserve a slot holding caller-supplied placeholder markup.
+
+    Same contract as `reserve()` — the caller still owes the slot a
+    `container()` or a `clear()` — for the few sections whose placeholder is
+    not one of the shapes above: a card that names what it is building while
+    it builds it (web/daily_ui.py) rather than shimmering anonymously.
+    """
+    box = _Slot((container or st).empty())
+    target = box._placeholder.container(border=True) if border else box._placeholder
+    target.html(markup)
+    return box
+
+
 def reserve(
     kind: str = "text", *, container=None, border: bool = False, **kw
 ) -> _Slot:
@@ -416,10 +430,7 @@ def reserve(
             there from first paint. Filling or clearing the slot replaces the
             whole card, borders included.
     """
-    box = _Slot((container or st).empty())
-    target = box._placeholder.container(border=True) if border else box._placeholder
-    target.html(html(kind, **kw))
-    return box
+    return reserve_html(html(kind, **kw), container=container, border=border)
 
 
 @contextmanager
