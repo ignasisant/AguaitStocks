@@ -42,9 +42,16 @@ def test_step_ids_are_unique():
 
 
 def test_every_step_page_exists():
-    """A typo'd module path only fails when the user clicks "take me there"."""
+    """A typo'd module path only fails when the user clicks "take me there".
+
+    Checked over `visible_steps()`, not `STEPS`: a step whose feature is not
+    built into this deploy is filtered out before anyone can click it, and its
+    page module is legitimately absent from the tree.
+    """
     missing = [
-        s.id for s in onboarding.STEPS if s.page and not (SRC / s.page).is_file()
+        s.id
+        for s in onboarding.visible_steps()
+        if s.page and not (SRC / s.page).is_file()
     ]
     assert not missing, f"steps pointing at no page module: {missing}"
 
