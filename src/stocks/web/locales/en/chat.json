@@ -48,6 +48,8 @@
   "chat.action_position_shares": "{value} shares",
   "chat.action_position_cost": "avg cost {value}",
   "chat.import_ask": "Import these transactions.",
+  "chat.import_needs_file": "I can't import transactions from a message — I need the statement itself. Attach it to the chat in the app (PDF, CSV or Excel) or use the Import page and pick your broker: I read the file, show you every row, and nothing is saved until you press the import button.",
+  "chat.import_pending_hint": "The rows from **{filename}** are waiting just below — check them and press the import button to save them.",
   "chat.import_found": "📄 **{filename}** — read as {label}: **{n}** transactions ready to import. Check them below.",
   "chat.import_found_deduped": "📄 **{filename}** — read as {label}: **{n}** new transactions ready to import. Another {dupes} are already in your book, so I left them out. Check both below.",
   "chat.import_all_duplicates": "📄 **{filename}** — read as {label}, and all **{dupes}** of its rows are already in your book. There is nothing new to import, so I have added nothing.",
@@ -99,5 +101,12 @@
   "chat.skill.spain-tax": "Spain tax (IRPF)",
   "chat.skill.bear-case": "Bear case & red flags",
   "chat.rate_limited": "Too many messages at once — try again in about {seconds}s.",
-  "chat.skill.etfs": "ETFs & funds"
+  "chat.skill.etfs": "ETFs & funds",
+  "chat.work_thinking": "Thinking",
+  "chat.work_gathering": "Gathering context",
+  "chat.work_searching": "Searching the web",
+  "chat.work_writing": "Writing",
+  "chat.step_results": "{n} results",
+  "chat.step_chars": "{n} chars",
+  "chat.step_quotes": "{n} live quotes"
 }

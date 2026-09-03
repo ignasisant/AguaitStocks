@@ -75,6 +75,31 @@ def account(tmp_path, monkeypatch):
     return paths
 
 
+# --------------------------------------------------------------- import ask
+
+
+def test_import_ask_with_no_file_is_answered_without_a_model(account):
+    """The chat once claimed four imported transactions, with invented
+    tickers and prices, from a message alone. There is no model in this path
+    any more: the ask is answered with what actually imports a statement."""
+    assert chat_core._import_hint("chat", "importa mis transacciones del pdf") \
+        == "chat.import_needs_file"
+    assert chat_core._import_hint("chat", "import my trades") \
+        == "chat.import_needs_file"
+
+
+def test_import_ask_points_at_the_batch_already_staged(account):
+    chat_core.st.session_state[chat_core._pending_key("chat")] = {
+        "filename": "extracto.pdf"}
+    assert chat_core._import_hint("chat", "importa las transacciones") \
+        == "chat.import_pending_hint"
+
+
+def test_a_normal_question_is_left_to_the_model(account):
+    assert chat_core._import_hint("chat", "¿cómo va mi cartera?") is None
+    assert chat_core._import_hint("chat", "no me importa el importe total") is None
+
+
 # ------------------------------------------------------------------ prepare
 
 

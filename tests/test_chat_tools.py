@@ -36,6 +36,33 @@ def test_gate_skips_plain_questions():
     assert not maybe_action("¿qué tal el último informe de resultados?")
 
 
+# ------------------------------------------------------------- import gate
+
+
+def test_import_gate_hits_the_ask_en_and_es():
+    assert tools.wants_import("importa transacciones")
+    assert tools.wants_import("quiero que importes mis compras del pdf")
+    assert tools.wants_import("lista las transacciones para importar")
+    assert tools.wants_import("import my trades from this csv")
+    assert tools.wants_import("sube el extracto de Revolut")
+    assert tools.wants_import("carga mis movimientos del excel")
+
+
+def test_import_gate_skips_the_spanish_homographs():
+    """"me importa" is "I care" and "el importe" is "the amount" — a book full
+    of trades says both, and neither is a request to import anything."""
+    assert not tools.wants_import("no me importa la cartera ahora mismo")
+    assert not tools.wants_import("es importante para mi cartera")
+    assert not tools.wants_import("¿cuál es el importe total de mis compras?")
+    assert not tools.wants_import("los importes de las ventas no cuadran")
+
+
+def test_import_gate_skips_questions_and_other_actions():
+    assert not tools.wants_import("¿qué opinas de mis compras de NVDA?")
+    assert not tools.wants_import("add NVDA to favorites")
+    assert not tools.wants_import("tengo 112 acciones de InMode a 18,16")
+
+
 # ------------------------------------------------------------------ parse
 
 

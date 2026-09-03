@@ -29,9 +29,14 @@ Streamlit-free so it stays trivially testable, like chat_skills/chat_actions.
 from __future__ import annotations
 
 import importlib.util
+import ipaddress
 import re
+import socket
+import urllib.parse
+import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
+from functools import lru_cache
 from typing import TYPE_CHECKING
 
 from pydantic import field_validator
@@ -318,14 +323,77 @@ def _extract(raw: bytes) -> str:
 
 
 
-def read_page(url: str, timeout: float = _PAGE_TIMEOUT) -> str:
-    """The article text at `url`, or '' — a paywall, a 403, a PDF, a timeout
-    and a parse failure are all just "no text", never an exception."""
-    import urllib.request
+def _public_host(host: str) -> bool:
+    """Whether every address `host` resolves to is on the public internet."""
+    try:
+        infos = socket.getaddrinfo(host, None, proto=socket.IPPROTO_TCP)
+    except OSError:
+        return False
+    addrs = {i[4][0] for i in infos}
+    if not addrs:
+        return False
+    for addr in addrs:
+        try:
+            ip = ipaddress.ip_address(addr)
+        except ValueError:
+            return False
+        if not ip.is_global or ip.is_multicast:
+            return False
+    return True
 
+
+def fetchable(url: str) -> bool:
+    """Whether `url` may be opened at all.
+
+    The assistant picks the URLs it reads, and part of what it picks from is
+    text it read on some other page — so a hostile page can propose one.
+    Unchecked, "read this link" reaches the loopback interface, the private
+    network and the cloud metadata endpoint. Hence http(s) only (urllib will
+    happily open file://), and a host that resolves to public addresses only,
+    re-checked on every redirect (_GuardedRedirect) because a public host is
+    free to send us inward.
+
+    Not airtight: the name is resolved here and again by the socket, so a
+    rebinding attacker keeps a narrow window. Closing it means connecting to
+    the address this checked and carrying the hostname through TLS by hand —
+    a lot of machinery for a reader of news pages.
+    """
+    try:
+        parts = urllib.parse.urlsplit(url)
+    except ValueError:
+        return False
+    if parts.scheme not in ("http", "https") or not parts.hostname:
+        return False
+    return _public_host(parts.hostname)
+
+
+class _GuardedRedirect(urllib.request.HTTPRedirectHandler):
+    """Drops a redirect whose target fails `fetchable`. Returning None stops
+    urllib following it; the 3xx then surfaces as an HTTPError, which every
+    caller here already reads as "no text"."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        if not fetchable(newurl):
+            return None
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+@lru_cache(maxsize=1)
+def _opener() -> urllib.request.OpenerDirector:
+    """The shared opener. build_opener swaps our handler in for the default
+    redirect handler, since it subclasses it."""
+    return urllib.request.build_opener(_GuardedRedirect)
+
+
+def read_page(url: str, timeout: float = _PAGE_TIMEOUT) -> str:
+    """The article text at `url`, or '' — a blocked host, a paywall, a 403, a
+    PDF, a timeout and a parse failure are all just "no text", never an
+    exception."""
+    if not fetchable(url):
+        return ""
     try:
         req = urllib.request.Request(url, headers={"User-Agent": _BROWSER_UA})
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        with _opener().open(req, timeout=timeout) as resp:
             ctype = resp.headers.get("Content-Type", "")
             if "html" not in ctype and "xml" not in ctype:
                 return ""

@@ -48,6 +48,8 @@
   "chat.action_position_shares": "{value} acciones",
   "chat.action_position_cost": "precio medio {value}",
   "chat.import_ask": "Importa estas transacciones.",
+  "chat.import_needs_file": "No puedo importar transacciones a partir de un mensaje: necesito el extracto. Adjúntalo al chat en la app (PDF, CSV o Excel) o usa la página Importar y elige tu bróker: leo el fichero, te enseño todas las filas y no se guarda nada hasta que pulses el botón de importar.",
+  "chat.import_pending_hint": "Las filas de **{filename}** están esperando justo aquí abajo — revísalas y pulsa el botón de importar para guardarlas.",
   "chat.import_found": "📄 **{filename}** — leído como {label}: **{n}** transacciones listas para importar. Revísalas abajo.",
   "chat.import_found_deduped": "📄 **{filename}** — leído como {label}: **{n}** transacciones nuevas listas para importar. Otras {dupes} ya están en tu cartera, así que las he dejado fuera. Revisa ambas abajo.",
   "chat.import_all_duplicates": "📄 **{filename}** — leído como {label}, y sus **{dupes}** filas ya están todas en tu cartera. No hay nada nuevo que importar, así que no he añadido nada.",
@@ -99,5 +101,12 @@
   "chat.skill.spain-tax": "Fiscalidad España (IRPF)",
   "chat.skill.bear-case": "Tesis bajista y red flags",
   "chat.rate_limited": "Demasiados mensajes seguidos — vuelve a intentarlo en unos {seconds}s.",
-  "chat.skill.etfs": "ETFs y fondos"
+  "chat.skill.etfs": "ETFs y fondos",
+  "chat.work_thinking": "Pensando",
+  "chat.work_gathering": "Reuniendo contexto",
+  "chat.work_searching": "Buscando en la web",
+  "chat.work_writing": "Escribiendo",
+  "chat.step_results": "{n} resultados",
+  "chat.step_chars": "{n} caracteres",
+  "chat.step_quotes": "{n} cotizaciones en vivo"
 }

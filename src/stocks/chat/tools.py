@@ -61,6 +61,38 @@ def maybe_action(text: str) -> bool:
     return bool(_GATE_RE.search(text))
 
 
+# Importing is not one of the actions below, and never will be: it needs the
+# statement itself, not a sentence about it. This gate catches the ask
+# ("import my trades", "importa las compras del pdf") so each surface can
+# answer it deterministically — a model left to answer is free to describe an
+# import that never happened, and has. The lookbehinds keep two Spanish
+# homographs out of it: "(no) me importa" ("I (don't) care") and the noun
+# "el importe" ("the amount"), which a book full of trades says often.
+_IMPORT_VERB = re.compile(
+    r"(?<!me )(?<!te )(?<!le )(?<!nos )(?<!el )(?<!los )(?<!un )(?<!del )"
+    r"(?<!su )(?<!sus )(?<!estos )"
+    r"\bimport(?:a|ar|arme|ame|as|amos|o|e|es|en|ed|ing|s)?\b|"
+    r"\bcarga(?:r|me)?\b|\bsube\b|\bsubir\b|\bupload\b",
+    re.IGNORECASE,
+)
+_IMPORT_OBJECT = re.compile(
+    r"transacc|transaction|operaci[oó]n|operaciones|movimiento|\btrades?\b|"
+    r"\bcompras?\b|\bventas?\b|extracto|statement|\bpdf\b|\bcsv\b|"
+    r"\bexcel\b|\bxlsx\b|fichero|archivo|\bfile\b|cartera|portfolio",
+    re.IGNORECASE,
+)
+
+
+def wants_import(text: str) -> bool:
+    """Whether the message is asking for a statement to be imported.
+
+    Deliberately not a Tool: there is nothing to execute here. The surfaces
+    use it to answer with the one thing that does work — attach the file —
+    instead of spending a model call on a request the model cannot fulfil.
+    """
+    return bool(_IMPORT_VERB.search(text) and _IMPORT_OBJECT.search(text))
+
+
 @dataclass(frozen=True)
 class Action:
     """One parsed app operation: which tool, on which symbol, with what.
