@@ -13,9 +13,8 @@ in full.
 
 from __future__ import annotations
 
-import html
-
 from stocks.web.i18n import DEFAULT_LANG, LANGUAGES
+from stocks.web.markup import esc
 
 PATH_PRIVACY = "/legal/privacy"
 PATH_TERMS = "/legal/terms"
@@ -234,15 +233,11 @@ a:focus-visible { outline: 2px solid #9AD1FF; outline-offset: 2px; }
 """
 
 
-def _esc(value: str) -> str:
-    return html.escape(value, quote=True)
-
-
 def _linkify(text: str) -> str:
     """Escape a paragraph, then re-link the one URL the copy may contain."""
-    out = _esc(text)
+    out = esc(text)
     if _CONTACT in text:
-        url = _esc(_CONTACT)
+        url = esc(_CONTACT)
         out = out.replace(url, f'<a href="{url}">{url}</a>')
     return out
 
@@ -254,7 +249,7 @@ def document(doc: str, lang: str) -> str:
     ui = _UI[lang]
 
     body = "".join(
-        f"<h2>{_esc(heading)}</h2>"
+        f"<h2>{esc(heading)}</h2>"
         + "".join(f"<p>{_linkify(p)}</p>" for p in paragraphs)
         for heading, paragraphs in sections
     )
@@ -268,15 +263,15 @@ def document(doc: str, lang: str) -> str:
         '<meta charset="utf-8">'
         '<meta name="viewport" content="width=device-width, initial-scale=1">'
         '<meta name="robots" content="noindex">'
-        f"<title>{_esc(title)} — TopStocks</title>"
+        f"<title>{esc(title)} — TopStocks</title>"
         f"<style>{_CSS}</style>"
         "</head><body><main>"
-        f"<h1>{_esc(title)}</h1>"
-        f'<p class="updated">{_esc(ui["updated"])}: {LAST_UPDATED}</p>'
+        f"<h1>{esc(title)}</h1>"
+        f'<p class="updated">{esc(ui["updated"])}: {LAST_UPDATED}</p>'
         f"{body}"
         "<nav>"
-        f'<a href="/">{_esc(ui["home"])}</a>'
-        f'<a href="{other}{lang_q}">{_esc(other_label)}</a>'
+        f'<a href="/">{esc(ui["home"])}</a>'
+        f'<a href="{other}{lang_q}">{esc(other_label)}</a>'
         "</nav>"
         "</main></body></html>"
     )

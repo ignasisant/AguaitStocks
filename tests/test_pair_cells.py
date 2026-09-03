@@ -13,7 +13,7 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
-from stocks.web import widgets
+from stocks.web import tables
 from stocks.web.widgets import (
     DOWN_COLOR,
     LOSS_BAND,
@@ -41,7 +41,7 @@ PAIRS = (("day", "day_pct"), ("pnl", "pnl_pct"))
 def _plain_ticker_cells(monkeypatch):
     """ticker_cell needs a logged-in session (logo cache, watchlist path);
     the pair logic doesn't care what the ticker cell contains."""
-    monkeypatch.setattr(widgets, "ticker_cell", lambda t, **kw: f"<b>{t}</b>")
+    monkeypatch.setattr(tables, "ticker_cell", lambda t, **kw: f"<b>{t}</b>")
 
 
 def _frame():
@@ -173,9 +173,9 @@ def test_positions_and_realized_tables_are_sortable():
 def test_phone_row_puts_the_badge_next_to_the_symbol(monkeypatch):
     """The dim sub line ellipsizes, which cut the P/L number mid-digit; as a
     pill on line 1 it always reads in full."""
-    monkeypatch.setattr(widgets, "is_mobile", lambda: True)
-    monkeypatch.setattr(widgets, "logo", lambda t: None)
-    monkeypatch.setattr(widgets, "company_name", lambda t: "Alphabet")
+    monkeypatch.setattr(tables, "is_mobile", lambda: True)
+    monkeypatch.setattr(tables, "logo", lambda t: None)
+    monkeypatch.setattr(tables, "company_name", lambda t: "Alphabet")
     html = ticker_table_html(
         _frame().assign(weight=[0.077, 0.041, 0.032]),
         fmt={**FMT, "weight": "{:.1%}"},
@@ -227,8 +227,8 @@ def test_realized_sales_render_as_phone_rows(monkeypatch):
     """Seven columns pan off a 390px screen; the tax tab's sales list gets
     the same dense rows as Positions — dates on the wrapping dim line, the
     return as a pill, no horizontal scroll."""
-    monkeypatch.setattr(widgets, "is_mobile", lambda: True)
-    monkeypatch.setattr(widgets, "logo", lambda t: None)
+    monkeypatch.setattr(tables, "is_mobile", lambda: True)
+    monkeypatch.setattr(tables, "logo", lambda t: None)
     html = ticker_table_html(
         _realized_frame(), fmt=REALIZED_FMT, signed=REALIZED_SIGNED,
         names=False,

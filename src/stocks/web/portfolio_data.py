@@ -24,6 +24,7 @@ from pathlib import Path
 import pandas as pd
 import streamlit as st
 
+from stocks import obs
 from stocks.analysis.portfolio import (
     flow_series,
     injected_vs_value,
@@ -242,8 +243,53 @@ def native_base_rates(ccys: tuple[str, ...], base: str = "EUR") -> dict[str, flo
 
     out: dict[str, float] = {}
     for c in ccys:
-        try:
+        with obs.swallow("fx.spot", ccy=c, base=base):
             out[c] = float(spot(c, base)[0])
-        except Exception:
-            pass
     return out
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def recent_closes(tickers: tuple[str, ...]) -> dict[str, list[float]]:
+    """Last two daily closes per ticker (prev, last).
+
+    One bulk download (data.fetch.fetch_many) for the whole watchlist, cached
+    15 min so the ticker list renders without hammering the network on every
+    rerun. The cache key is the ticker tuple, so every page that shows the
+    page shares one download.
+    """
+    from stocks.data.fetch import fetch_many
+
+    out: dict[str, list[float]] = {}
+    for t, df in fetch_many(list(tickers), period="5d").items():
+        close = df["Close"].dropna() if "Close" in df else None
+        if close is not None and len(close):
+            out[t] = [float(v) for v in close.iloc[-2:]]
+    return out
+
+
+def db_mtime(db: str) -> float:
+    """Ledger file mtime — a cache key that changes only when the book does,
+    so ledger-derived caches stay hot until the next import instead of
+    expiring on a timer. 0.0 when the file doesn't exist yet."""
+    try:
+        return Path(db).stat().st_mtime
+    except OSError:
+        return 0.0
+
+
+@st.cache_data(show_spinner=False, max_entries=64)
+def held_tickers(db: str, mtime: float) -> list[str]:
+    """Tickers with an open position in the ledger — reachable in search even
+    when they're not on the watchlist, so imported activity is browsable.
+    `db` is the session user's ledger path; it keys the cache so concurrent
+    users never see each other's positions. `mtime` (db_mtime) invalidates
+    the entry exactly when the ledger file changes."""
+    try:
+        from stocks.portfolio.ledger import all_transactions
+        from stocks.portfolio.positions import build
+
+        # Identity converter: quantities don't need FX, keeps this offline.
+        positions, _ = build(all_transactions(Path(db)), to_base=lambda a, c, d: a)
+        return [p.ticker for p in positions]
+    except Exception:
+        return []  # empty/inconsistent ledger must never break search

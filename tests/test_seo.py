@@ -13,7 +13,7 @@ from xml.etree import ElementTree
 
 import pytest
 
-from stocks.web import landing, seo
+from stocks.web import landing, markup, seo
 from stocks.web.i18n import LANGUAGES, translate
 from stocks.web.landing import (
     ASSET_BASE,
@@ -50,8 +50,8 @@ def test_head_carries_the_page_identity(lang):
     title = translate(landing.jur_key("landing.seo_title", jur), lang)
     description = translate(landing.jur_key("landing.seo_description", jur), lang)
 
-    assert f"<title>{seo._esc(title)}</title>" in head
-    assert f'<meta name="description" content="{seo._esc(description)}">' in head
+    assert f"<title>{markup.esc(title)}</title>" in head
+    assert f'<meta name="description" content="{markup.esc(description)}">' in head
     assert f'<link rel="canonical" href="{BASE}{seo.path_for(lang)}">' in head
     assert '<meta charset="utf-8">' in head
     assert "width=device-width" in head

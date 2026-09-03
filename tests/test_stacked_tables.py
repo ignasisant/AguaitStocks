@@ -15,7 +15,7 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
-from stocks.web import widgets
+from stocks.web import tables, widgets
 from stocks.web.widgets import (
     LOSS_COLOR,
     PROFIT_COLOR,
@@ -126,12 +126,12 @@ def test_data_table_forks_on_the_user_agent(monkeypatch):
         def dataframe(self, frame, **kwargs):
             calls["dataframe"] = (frame, kwargs)
 
-    monkeypatch.setattr(widgets, "is_mobile", lambda: True)
+    monkeypatch.setattr(tables, "is_mobile", lambda: True)
     data_table(_frame(), title="quarter", container=_Target(), hide_index=True)
     assert "ags-card" in calls["html"] and "dataframe" not in calls
 
     calls.clear()
-    monkeypatch.setattr(widgets, "is_mobile", lambda: False)
+    monkeypatch.setattr(tables, "is_mobile", lambda: False)
     data_table(_frame(), title="quarter", container=_Target(), hide_index=True)
     assert calls["dataframe"][1] == {"hide_index": True}
 
@@ -146,7 +146,7 @@ def test_desktop_gets_the_same_numbers_through_a_styler(monkeypatch):
         def dataframe(self, frame, **kwargs):
             seen["frame"] = frame
 
-    monkeypatch.setattr(widgets, "is_mobile", lambda: False)
+    monkeypatch.setattr(tables, "is_mobile", lambda: False)
     data_table(_frame(), fmt={"revenue": "${:,.1f}B"}, container=_Target())
     assert "$94.0B" in seen["frame"].to_html()
 

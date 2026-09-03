@@ -95,6 +95,7 @@ from stocks.web.widgets import (
     chart_layout,
     company_name,
     data_table,
+    db_mtime,
     hover_wrap,
     is_mobile,
     kpi_grid_html,
@@ -210,9 +211,11 @@ def _rangebreaks(df: pd.DataFrame, interval: str) -> list[dict]:
     return breaks
 
 
-@st.cache_data(ttl=60, show_spinner=False)
-def _ledger(db: str):
-    """This user's transactions; `db` keys the cache per account."""
+@st.cache_data(show_spinner=False, max_entries=32)
+def _ledger(db: str, mtime: float):
+    """This user's transactions; `db` keys the cache per account and `mtime`
+    (widgets.db_mtime) invalidates it exactly when the ledger file changes —
+    an import shows up on the next rerun instead of after a timer."""
     from pathlib import Path
 
     return all_transactions(Path(db))
@@ -301,34 +304,37 @@ def _event_markers(
     return events
 
 
-@st.cache_data(ttl=60, show_spinner=False)
-def _held(db: str):
+@st.cache_data(show_spinner=False, max_entries=32)
+def _held(db: str, mtime: float):
     """Open positions with *native-currency* cost (identity FX: no network)."""
     try:
-        positions, _ = build_positions(_ledger(db), to_base=lambda a, c, d: a)
+        positions, _ = build_positions(_ledger(db, mtime), to_base=lambda a, c, d: a)
         return {p.ticker: p for p in positions}
     except Exception:
         return {}
 
 
-@st.cache_data(ttl=60, show_spinner=False)
-def _custody(db: str) -> dict[str, dict[str, Custody]]:
+@st.cache_data(show_spinner=False, max_entries=32)
+def _custody(db: str, mtime: float) -> dict[str, dict[str, Custody]]:
     """Open shares per (ticker, broker): which broker's account holds them.
 
     Identity FX like `_held` — the header only needs the share split, not a
     EUR basis, so this stays off the network."""
     try:
-        return by_position(_ledger(db), to_base=lambda a, c, d: a)
+        return by_position(_ledger(db, mtime), to_base=lambda a, c, d: a)
     except Exception:
         return {}
 
 
 @st.cache_data(ttl=300, show_spinner=False)
-def _position_values(db: str, base: str = "EUR") -> dict[str, float]:
-    """Live market value per open position in `base` (price × spot)."""
+def _position_values(db: str, mtime: float, base: str = "EUR") -> dict[str, float]:
+    """Live market value per open position in `base` (price × spot).
+
+    Keeps a TTL as well as the ledger fingerprint: prices age on a timer even
+    when the book doesn't change."""
     from stocks.analysis.portfolio import market_values
 
-    held = _held(db)
+    held = _held(db, mtime)
     return market_values(list(held.values()), base=base) if held else {}
 
 
@@ -479,7 +485,7 @@ def _mobile_summary_html(
         + "</span></div>"
     ]
     if my_pos:
-        values_base = _position_values(db, REPORT_CCY)
+        values_base = _position_values(db, db_mtime(db), REPORT_CCY)
         total = sum(values_base.values())
         value = values_base.get(my_pos.ticker)
         value_native = my_pos.quantity * last
@@ -525,7 +531,8 @@ def _position_metrics(cols, pos, last: float) -> None:
     value_native = pos.quantity * last
     pnl_native = value_native - pos.cost_native
     pnl_pct = (last / pos.avg_cost_native - 1) * 100 if pos.avg_cost_native else 0.0
-    values_base = _position_values(str(auth.db_path()), REPORT_CCY)
+    db = str(auth.db_path())
+    values_base = _position_values(db, db_mtime(db), REPORT_CCY)
     total = sum(values_base.values())
     value = values_base.get(pos.ticker)
 
@@ -728,11 +735,12 @@ def _price_section(ticker: str) -> None:
         chart_slot.container().info(tr("ticker.history_empty"))
         return
     db = str(auth.db_path())
-    ledger_txs = _ledger(db)
+    db_mt = db_mtime(db)
+    ledger_txs = _ledger(db, db_mt)
     my_trades = [
         t for t in ledger_txs if t.ticker == ticker and t.action in ("buy", "sell")
     ]
-    my_pos = _held(db).get(ticker)
+    my_pos = _held(db, db_mt).get(ticker)
 
     last = float(df["Close"].iloc[-1])
     prev = float(df["Close"].iloc[-2])
@@ -1067,7 +1075,8 @@ def _header_html() -> str:
                 f"{html.escape(label)}</span>"
             )
     db = str(auth.db_path())
-    if ticker in _held(db):
+    db_mt = db_mtime(db)
+    if ticker in _held(db, db_mt):
         # Purple-800 fill / purple-300 text — the DS brand badge pair on dark.
         parts.append(
             f'<span style="background:{PURPLE_800};color:{PURPLE_300};'
@@ -1081,7 +1090,7 @@ def _header_html() -> str:
         # of the position on its tooltip.
         parts.append(
             broker_chips_html(
-                mix(_custody(db).get(ticker, {})), size=20 if _MOBILE else 22
+                mix(_custody(db, db_mt).get(ticker, {})), size=20 if _MOBILE else 22
             )
         )
     return (
