@@ -28,6 +28,7 @@ from urllib.parse import urlparse
 
 import yfinance as yf
 
+from stocks import obs
 from stocks.config import DATA_DIR
 from stocks.data.http import get_bytes_and_type, probe_image
 
@@ -52,18 +53,23 @@ def domain_from_website(website: str | None) -> str | None:
     return host or None
 
 
+# The schema stamp shares the file with the URL entries but is an int, so it
+# is kept out of the in-memory dict rather than widening every value's type.
+_VERSION_KEY = "_v"
+
+
 def _load_cache() -> dict[str, str]:
     """On-disk cache, discarded wholesale if written by an older schema."""
     if LOGO_CACHE.exists():
         data = json.loads(LOGO_CACHE.read_text())
-        if isinstance(data, dict) and data.get("_v") == CACHE_VERSION:
-            return data
-    return {"_v": CACHE_VERSION}
+        if isinstance(data, dict) and data.get(_VERSION_KEY) == CACHE_VERSION:
+            return {k: v for k, v in data.items() if isinstance(v, str)}
+    return {}
 
 
 def _save_cache(cache: dict[str, str]) -> None:
-    cache["_v"] = CACHE_VERSION
-    LOGO_CACHE.write_text(json.dumps(cache, indent=2, sort_keys=True))
+    stamped = {_VERSION_KEY: CACHE_VERSION, **cache}
+    LOGO_CACHE.write_text(json.dumps(stamped, indent=2, sort_keys=True))
 
 
 # Skips 404 placeholders and dead FMP paths; "blocked" = can't tell from here.
@@ -170,23 +176,19 @@ def _restore_dir_quiet(static_dir: Path) -> None:
     """First touch per process pulls previously mirrored logos back from the
     storage bucket (ephemeral hosts boot with an empty static dir). Never
     fatal: a failed pull only means logos re-resolve over the network."""
-    try:
+    with obs.swallow("logo.restore_dir"):
         from stocks import storage
 
         storage.restore_dir(static_dir)
-    except Exception:
-        pass
 
 
 def _persist_quiet(path: Path) -> None:
     """Push one mirrored logo to the bucket. Unlike user data, a lost logo
     re-mirrors itself, so a storage hiccup must never break a render."""
-    try:
+    with obs.swallow("logo.mirror", path=str(path)):
         from stocks import storage
 
         storage.persist(path)
-    except Exception:
-        pass
 
 
 def _mirror(stem: str, resolve_url, static_dir: Path) -> str | None:

@@ -32,7 +32,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from stocks.portfolio import llm_map, platforms
-from stocks.portfolio.revolut import ParseResult
+from stocks.portfolio.statement import ParseResult
 
 if TYPE_CHECKING:
     from stocks.web.llm import Provider

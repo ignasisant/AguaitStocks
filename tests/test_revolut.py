@@ -1,7 +1,9 @@
 """Revolut statement CSV parser tests — pure string parsing, no network."""
 
 from stocks.portfolio import revolut
-from stocks.portfolio.revolut import _map_action, _money, _parse_date
+from stocks.portfolio.revolut import _map_action
+from stocks.portfolio.statement import money as _money
+from stocks.portfolio.statement import parse_date as _parse_date
 
 # A representative Revolut trading account-statement export.
 SAMPLE = (

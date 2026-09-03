@@ -25,7 +25,7 @@ from datetime import datetime
 from pathlib import Path
 
 from stocks.portfolio import revolut
-from stocks.portfolio.revolut import ParseResult
+from stocks.portfolio.statement import ParseResult
 
 # The Type strings Revolut uses, longest-first so "DIVIDEND TAX (CORRECTION)"
 # wins over "DIVIDEND". Matched case-insensitively, tolerant of -/– dashes.
@@ -182,7 +182,7 @@ def _row_from_line(line: str, m: re.Match) -> dict:
 def _to_iso(value: str) -> str:
     """Statement date in any supported rendering -> ISO YYYY-MM-DD.
 
-    Unparseable strings pass through untouched: revolut._parse_date will then
+    Unparseable strings pass through untouched: statement.parse_date will then
     reject the row into `skipped` with the original text in the reason.
     """
     v = value.strip().rstrip(",")
@@ -209,7 +209,7 @@ def _to_iso(value: str) -> str:
 
 
 def _normalize_number(token: str) -> str:
-    """Normalise a number string to US format for revolut._money.
+    """Normalise a number string to US format for statement.money.
 
     Handles both renderings Revolut uses: "1,723.00" (en) and "1.723,00" (es).
     Rule: when both separators appear, the last one is the decimal mark; a

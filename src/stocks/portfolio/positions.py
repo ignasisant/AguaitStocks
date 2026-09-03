@@ -6,6 +6,13 @@ by country, so `build(matching=...)` takes the rule:
 * ``"fifo"`` — oldest lots first. Spain mandates it (art. 37 LIRPF), Germany
   too (§20(4) S.7 EStG), and it is the US broker default when the filer
   identifies no lots. This is the default here.
+* ``"lifo"`` — newest lots first. Italy mandates it (art. 67 TUIR: the shares
+  disposed of are the most recently acquired ones), which in a rising market
+  books a *smaller* gain than FIFO on the same trades.
+* ``"average"`` — one averaged holding per ticker, the cost recomputed on every
+  purchase: Canada's adjusted cost base (ITA s.47) and France's prix moyen
+  pondéré (CGI art. 150-0 D). No lot survives a purchase, so a sale's cost is
+  never a specific lot's own.
 * ``"s104"`` — the UK's three-step identification (TCGA 1992 s.105/106A):
   acquisitions on the *same day* first, then any made in the 30 days *after*
   the disposal, then the Section 104 pool at its average cost. Only the pool
@@ -44,25 +51,29 @@ class Lot:
     currency: str
 
 
-# How a sale's shares were identified. "fifo" covers the oldest-lot rules;
-# the other three are the UK's steps, and "pool" is the only one whose cost is
-# an average rather than a specific purchase.
+# How a sale's shares were identified. "fifo" and "lifo" name a specific
+# purchase; "average" (ACB/PMP) and "pool" (s.104) are averaged holdings, so
+# their cost is nobody's actual purchase price and the UI says so.
 MATCH_FIFO = "fifo"
+MATCH_LIFO = "lifo"
+MATCH_AVERAGE = "average"
 MATCH_SAME_DAY = "same_day"
 MATCH_THIRTY_DAY = "thirty_day"
 MATCH_POOL = "pool"
 
-MATCHING_MODES = ("fifo", "s104")
+MATCHING_MODES = ("fifo", "lifo", "average", "s104")
+# The modes whose cost is an average rather than one purchase's own.
+POOLED_MODES = ("average", "s104")
 
 
 @dataclass
 class RealizedSale:
     """One matched parcel of a sale, each side valued at its own date.
 
-    `buy_date` is the acquisition the shares came from. For a Section 104 pool
-    match there is no single acquisition — the pool is one averaged holding —
-    so it carries the earliest acquisition still in the pool, and `matched`
-    says "pool" so nothing reads that date as the lot's own.
+    `buy_date` is the acquisition the shares came from. For an averaged holding
+    (a Section 104 pool, a Canadian ACB) there is no single acquisition, so it
+    carries the earliest acquisition still in the holding and `matched` says
+    "pool"/"average" so nothing reads that date as one lot's own.
     """
 
     ticker: str
@@ -111,14 +122,19 @@ def build(
     `base` is the reporting currency the lots are valued in — EUR for the app's
     own analytics, the tax jurisdiction's currency for a tax replay (a US filer
     needs a USD basis at each trade date, not a converted EUR one). `matching`
-    picks the share-identification rule (see the module docstring); the open
-    positions come out the same either way, only the realized parcels differ.
+    picks the share-identification rule (see the module docstring). It decides
+    the realized parcels *and* what basis stays behind: after selling half of
+    100 @ 1 plus 100 @ 3, FIFO leaves 100 shares carrying 300 and an averaged
+    holding leaves them carrying 200.
     """
     if to_base is None:
         prefetch(((t.date, t.currency) for t in transactions), quote=base)
         to_base = converter(base)
     if matching == "s104":
         return _build_s104(transactions, to_base)
+    if matching == "average":
+        return _build_average(transactions, to_base, base)
+    newest_first = matching == "lifo"
     lots: dict[str, deque[Lot]] = defaultdict(deque)
     realized: list[RealizedSale] = []
 
@@ -136,7 +152,7 @@ def build(
                 )
             )
         elif tx.action == "sell":
-            realized += _sell(lots[tx.ticker], tx, to_base)
+            realized += _sell(lots[tx.ticker], tx, to_base, newest_first)
         elif tx.action == "split":
             _split(lots[tx.ticker], tx.quantity)
         # dividend / fee: not position-affecting (handled in dividends/cash)
@@ -146,7 +162,13 @@ def build(
     return positions, realized
 
 
-def _sell(queue: deque[Lot], tx: Transaction, to_base: ToBase) -> list[RealizedSale]:
+def _sell(
+    queue: deque[Lot],
+    tx: Transaction,
+    to_base: ToBase,
+    newest_first: bool = False,
+) -> list[RealizedSale]:
+    """Match a sale against the queue's oldest lots, or its newest under LIFO."""
     remaining = tx.quantity
     held = _total_qty(queue)
     if remaining - held > 1e-9:
@@ -160,9 +182,10 @@ def _sell(queue: deque[Lot], tx: Transaction, to_base: ToBase) -> list[RealizedS
     )
     net_per_share = gross - fee_per_share
 
+    rule = MATCH_LIFO if newest_first else MATCH_FIFO
     sales: list[RealizedSale] = []
     while remaining > 1e-9:
-        lot = queue[0]
+        lot = queue[-1] if newest_first else queue[0]
         take = min(lot.quantity, remaining)
         frac = take / lot.quantity
         cost = lot.cost * frac
@@ -175,6 +198,7 @@ def _sell(queue: deque[Lot], tx: Transaction, to_base: ToBase) -> list[RealizedS
                 cost=cost,
                 proceeds=take * net_per_share,
                 currency=tx.currency,
+                matched=rule,
             )
         )
         lot.quantity -= take
@@ -182,7 +206,7 @@ def _sell(queue: deque[Lot], tx: Transaction, to_base: ToBase) -> list[RealizedS
         lot.cost_native -= lot.cost_native * frac
         remaining -= take
         if lot.quantity <= 1e-9:
-            queue.popleft()
+            queue.pop() if newest_first else queue.popleft()
     return sales
 
 
@@ -207,6 +231,120 @@ def _aggregate(ticker: str, queue: deque[Lot]) -> Position:
 
 def _total_qty(queue: deque[Lot]) -> float:
     return sum(lot.quantity for lot in queue)
+
+
+# ---------------------------------------------- averaged holdings (ACB / PMP)
+# Canada's adjusted cost base (ITA s.47) and France's prix moyen pondéré
+# (CGI art. 150-0 D) hold one parcel per ticker: each purchase re-averages it,
+# so no lot survives to be sold on its own. The UK's s.104 pool further down is
+# the same structure with two matching steps in front of it, which is why both
+# rules share `_Pool`.
+
+
+@dataclass
+class _Pool:
+    """One averaged holding: a quantity and a cost, no lots inside."""
+
+    quantity: float = 0.0
+    cost: float = 0.0
+    cost_native: float = 0.0
+    first_date: str = ""  # earliest acquisition still in the holding
+
+    def credit(self, qty: float, cost: float, cost_native: float, day: str) -> None:
+        """Add `qty` shares costing `cost`, re-averaging the holding."""
+        if qty <= 0:
+            return
+        self.quantity += qty
+        self.cost += cost
+        self.cost_native += cost_native
+        if not self.first_date or day < self.first_date:
+            self.first_date = day
+
+    def take(self, qty: float) -> tuple[float, float]:
+        """Consume `qty` shares at the holding's average cost."""
+        if self.quantity <= 0:
+            return 0.0, 0.0
+        qty = min(qty, self.quantity)
+        share = qty / self.quantity
+        cost, native = self.cost * share, self.cost_native * share
+        self.quantity -= qty
+        self.cost -= cost
+        self.cost_native -= native
+        if self.quantity <= 1e-9:
+            # Sold out: a later repurchase starts a new holding, and its date
+            # is the one a parcel from it should carry.
+            self.quantity = self.cost = self.cost_native = 0.0
+            self.first_date = ""
+        return cost, native
+
+
+def _build_average(
+    transactions: list[Transaction], to_base: ToBase, base: str
+) -> tuple[list[Position], list[RealizedSale]]:
+    """`build` for average-cost jurisdictions. One holding per ticker."""
+    pools: dict[str, _Pool] = defaultdict(_Pool)
+    currency: dict[str, str] = {}
+    realized: list[RealizedSale] = []
+
+    for tx in sorted(transactions, key=lambda t: (t.date, t.id or 0)):
+        if tx.action == "buy":
+            cost_native = tx.quantity * tx.price + tx.fee
+            pools[tx.ticker].credit(
+                tx.quantity,
+                to_base(cost_native, tx.currency, tx.date),
+                cost_native,
+                tx.date,
+            )
+            currency[tx.ticker] = tx.currency
+        elif tx.action == "sell":
+            currency[tx.ticker] = tx.currency
+            sale = _dispose_average(tx, pools[tx.ticker], to_base)
+            if sale is not None:
+                realized.append(sale)
+        elif tx.action == "split" and tx.quantity > 0:
+            # Total cost unchanged, more shares behind it (same as FIFO).
+            pools[tx.ticker].quantity *= tx.quantity
+
+    positions = [
+        Position(
+            ticker=ticker,
+            quantity=pool.quantity,
+            cost=pool.cost,
+            cost_native=pool.cost_native,
+            currency=currency.get(ticker, base),
+        )
+        for ticker, pool in pools.items()
+        if pool.quantity > 1e-9
+    ]
+    positions.sort(key=lambda p: p.ticker)
+    return positions, realized
+
+
+def _dispose_average(
+    tx: Transaction, pool: _Pool, to_base: ToBase
+) -> RealizedSale | None:
+    """One disposal at the holding's average cost — a single parcel, always."""
+    if tx.quantity <= 1e-9:
+        return None
+    if tx.quantity - pool.quantity > 1e-9:
+        raise ValueError(
+            f"{tx.ticker}: sell of {tx.quantity} on {tx.date} exceeds held "
+            f"{pool.quantity:.4f}"
+        )
+    gross = to_base(tx.price, tx.currency, tx.date)
+    fee = to_base(tx.fee, tx.currency, tx.date)
+    first = pool.first_date or tx.date
+    cost, _ = pool.take(tx.quantity)
+    return RealizedSale(
+        ticker=tx.ticker,
+        buy_date=first,
+        sell_date=tx.date,
+        quantity=tx.quantity,
+        cost=cost,
+        proceeds=tx.quantity * gross - fee,
+        currency=tx.currency,
+        matched=MATCH_AVERAGE,
+    )
 
 
 # ------------------------------------------------------------ UK: s.104 pool
@@ -248,37 +386,6 @@ class _Acquisition:
         qty = min(qty, self.remaining)
         self.remaining -= qty
         return qty * self.unit_cost, qty * self.unit_cost_native
-
-
-@dataclass
-class _Pool:
-    """A ticker's s.104 holding: one quantity, one averaged cost."""
-
-    quantity: float = 0.0
-    cost: float = 0.0
-    cost_native: float = 0.0
-    first_date: str = ""  # earliest acquisition still in the pool
-
-    def add(self, acq: _Acquisition, qty: float) -> None:
-        if qty <= 0:
-            return
-        self.cost += qty * acq.unit_cost
-        self.cost_native += qty * acq.unit_cost_native
-        self.quantity += qty
-        if not self.first_date or acq.date < self.first_date:
-            self.first_date = acq.date
-
-    def take(self, qty: float) -> tuple[float, float]:
-        """Consume `qty` shares at the pool's average cost."""
-        if self.quantity <= 0:
-            return 0.0, 0.0
-        qty = min(qty, self.quantity)
-        share = qty / self.quantity
-        cost, native = self.cost * share, self.cost_native * share
-        self.quantity -= qty
-        self.cost -= cost
-        self.cost_native -= native
-        return cost, native
 
 
 def _days_between(a: str, b: str) -> int:
@@ -345,7 +452,12 @@ def _replay_s104(
             if acq.pooled or (before is not None and acq.date >= before):
                 continue
             acq.pooled = True
-            pool.add(acq, acq.remaining)
+            pool.credit(
+                acq.remaining,
+                acq.remaining * acq.unit_cost,
+                acq.remaining * acq.unit_cost_native,
+                acq.date,
+            )
             acq.remaining = 0.0
 
     sales: list[RealizedSale] = []

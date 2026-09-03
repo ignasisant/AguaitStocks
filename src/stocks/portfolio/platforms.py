@@ -25,7 +25,7 @@ from stocks.portfolio import (
 )
 from stocks.portfolio.fees import broker_of
 from stocks.portfolio.ledger import Transaction
-from stocks.portfolio.revolut import ParseResult
+from stocks.portfolio.statement import ParseResult
 
 
 @dataclass(frozen=True)

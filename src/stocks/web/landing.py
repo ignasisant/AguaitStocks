@@ -31,7 +31,6 @@ Two things shape how this is written:
 
 from __future__ import annotations
 
-import html
 from contextlib import contextmanager
 from contextvars import ContextVar
 
@@ -40,6 +39,7 @@ import streamlit as st
 from stocks.portfolio import tax
 from stocks.web import auth
 from stocks.web.i18n import DEFAULT_LANG, LANGUAGES, has, translate
+from stocks.web.markup import esc
 
 # Query parameters the in-page anchors set. Read by consume_params().
 PARAM_SIGNIN = "signin"
@@ -194,11 +194,6 @@ _BROKERS = (
     ("ClickTrade / Saxo", "XLSX · CSV", False),
     (None, None, True),  # generic CSV — label comes from the catalog
 )
-
-
-def _esc(value: object) -> str:
-    """HTML-escape anything bound for the markup."""
-    return html.escape(str(value), quote=True)
 
 
 # ------------------------------------------------------------------ numbers
@@ -1139,7 +1134,7 @@ _CSS = (
 
 
 def _mark(width_class: str = "") -> str:
-    src = _esc(f"{ASSET_BASE}topstocks-icon.svg")
+    src = esc(f"{ASSET_BASE}topstocks-icon.svg")
     cls = f' class="{width_class}"' if width_class else ""
     return f'<img src="{src}" alt="TopStocks"{cls}>'
 
@@ -1172,7 +1167,7 @@ def _jur_toggle(*, footer: bool = False) -> str:
     here = active_jurisdiction()
     parts = []
     for code in ("ES", "US"):
-        label = _esc(tr(f"landing.jur_{code.lower()}"))
+        label = esc(tr(f"landing.jur_{code.lower()}"))
         parts.append(
             f'<span class="on">{label}</span>' if code == here
             else f'<a href="{variant_path(lang, code)}">{label}</a>'
@@ -1190,7 +1185,7 @@ def _jur_switch_link() -> str:
     href = variant_path(active_language(), other)
     return (
         f'<a class="ag-l-jurswitch" href="{href}">'
-        f'{_esc(tr(f"landing.jur_switch_{other.lower()}"))}</a>'
+        f'{esc(tr(f"landing.jur_switch_{other.lower()}"))}</a>'
     )
 
 
@@ -1213,13 +1208,13 @@ def _app_href(param: str) -> str:
 
 def _signin_link(cls: str, label: str, *, with_mark: bool = True) -> str:
     mark = _G_MARK if with_mark else ""
-    href = _esc(_app_href(PARAM_SIGNIN))
-    return f'<a class="{cls}" href="{href}">{mark}{_esc(label)}</a>'
+    href = esc(_app_href(PARAM_SIGNIN))
+    return f'<a class="{cls}" href="{href}">{mark}{esc(label)}</a>'
 
 
 def _guest_link(label: str) -> str:
-    href = _esc(_app_href(PARAM_GUEST))
-    return f'<a class="ag-l-cta-text" href="{href}">{_esc(label)} →</a>'
+    href = esc(_app_href(PARAM_GUEST))
+    return f'<a class="ag-l-cta-text" href="{href}">{esc(label)} →</a>'
 
 
 def _top_bar() -> str:
@@ -1228,8 +1223,8 @@ def _top_bar() -> str:
   <div class="ag-l-brand">{_mark()}<span>TopStocks</span></div>
   <div class="ag-l-spacer"></div>
   {_lang_toggle()}
-  <a class="ag-l-ghlink" href="{_esc(_GITHUB_URL)}" target="_blank"
-     rel="noopener noreferrer">{_GITHUB_MARK}{_esc(tr("landing.nav_github"))}</a>
+  <a class="ag-l-ghlink" href="{esc(_GITHUB_URL)}" target="_blank"
+     rel="noopener noreferrer">{_GITHUB_MARK}{esc(tr("landing.nav_github"))}</a>
   {_signin_link("ag-l-cta-ghost", tr("common.sign_in_google"), with_mark=False)}
 </div></header>"""
 
@@ -1246,8 +1241,8 @@ def _hero() -> str:
         ),
     )
     kpi_html = "".join(
-        f'<div class="ag-l-kpi"><span class="ag-l-kpi-l">{_esc(label)}</span>'
-        f'<span class="ag-l-num ag-l-kpi-v {cls}">{_esc(value)}</span></div>'
+        f'<div class="ag-l-kpi"><span class="ag-l-kpi-l">{esc(label)}</span>'
+        f'<span class="ag-l-num ag-l-kpi-v {cls}">{esc(value)}</span></div>'
         for label, value, cls in kpis
     )
 
@@ -1258,43 +1253,43 @@ def _hero() -> str:
         ("PYPL", 4517, -1893, -29.5),
     )
     rows = "".join(
-        f'<div class="ag-l-tr"><span class="ag-l-tk">{_esc(tk)}</span>'
-        f'<span class="ag-l-dim">{_esc(_plain(val))}</span>'
+        f'<div class="ag-l-tr"><span class="ag-l-tk">{esc(tk)}</span>'
+        f'<span class="ag-l-dim">{esc(_plain(val))}</span>'
         f'<span class="ag-l-tk {"ag-l-up" if pl >= 0 else "ag-l-down"}">'
-        f"{_esc(_plain(pl, signed=True))}</span>"
+        f"{esc(_plain(pl, signed=True))}</span>"
         f'<span class="{"ag-l-up" if pl >= 0 else "ag-l-down"}">'
-        f"{_esc(_pct(pct))}</span></div>"
+        f"{esc(_pct(pct))}</span></div>"
         for tk, val, pl, pct in positions
     )
 
-    axis = "".join(f"<span>{_esc(y)}</span>" for y in _CHART_YEARS)
+    axis = "".join(f"<span>{esc(y)}</span>" for y in _CHART_YEARS)
 
     return f"""
 <section class="ag-l-wrap ag-l-hero">
   <div class="ag-l-hero-copy">
-    <h1>{_esc(tr("landing.hero_title"))}</h1>
-    <p class="ag-l-lede">{_esc(tr("landing.hero_sub"))}</p>
+    <h1>{esc(tr("landing.hero_title"))}</h1>
+    <p class="ag-l-lede">{esc(tr("landing.hero_sub"))}</p>
     <div class="ag-l-ctarow">
       {_signin_link("ag-l-cta", tr("common.sign_in_google"))}
       {_guest_link(tr("landing.cta_guest"))}
     </div>
-    <div class="ag-l-trust">{_esc(tr("landing.trust_strip"))}</div>
+    <div class="ag-l-trust">{esc(tr("landing.trust_strip"))}</div>
   </div>
   <div class="ag-l-card">
     <div class="ag-l-kpis">{kpi_html}</div>
     <div class="ag-l-tbl">
       <div class="ag-l-th">
-        <span>{_esc(tr("landing.col_position"))}</span>
-        <span>{_esc(tr("landing.col_value_eur"))}</span>
-        <span>{_esc(tr("landing.col_pl_eur"))}</span>
-        <span>{_esc(tr("landing.col_pl_pct"))}</span>
+        <span>{esc(tr("landing.col_position"))}</span>
+        <span>{esc(tr("landing.col_value_eur"))}</span>
+        <span>{esc(tr("landing.col_pl_eur"))}</span>
+        <span>{esc(tr("landing.col_pl_pct"))}</span>
       </div>{rows}
     </div>
     <div class="ag-l-chart">
       <div class="ag-l-legend">
         <span><span class="ag-l-sw ag-l-sw-twr"></span>
-          {_esc(tr("landing.legend_twr"))}</span>
-        <span><span class="ag-l-sw ag-l-sw-bm"></span>{_esc(_BENCHMARK)}</span>
+          {esc(tr("landing.legend_twr"))}</span>
+        <span><span class="ag-l-sw ag-l-sw-bm"></span>{esc(_BENCHMARK)}</span>
       </div>
       <svg viewBox="0 0 560 130" preserveAspectRatio="none" aria-hidden="true">
         <line x1="0" y1="110" x2="560" y2="110" stroke="var(--ag-surface-card)"
@@ -1326,12 +1321,12 @@ def _brokers() -> str:
             formats = tr("landing.broker_generic_note")
         cls = "ag-l-broker generic" if generic else "ag-l-broker"
         tiles.append(
-            f'<div class="{cls}"><b>{_esc(name)}</b>'
-            f'<i class="ag-l-mono">{_esc(formats)}</i></div>'
+            f'<div class="{cls}"><b>{esc(name)}</b>'
+            f'<i class="ag-l-mono">{esc(formats)}</i></div>'
         )
     return f"""
 <section class="ag-l-wrap ag-l-brokers">
-  <div class="ag-l-brokers-line">{_esc(tr("landing.brokers_line"))}</div>
+  <div class="ag-l-brokers-line">{esc(tr("landing.brokers_line"))}</div>
   <div class="ag-l-brokergrid">{"".join(tiles)}</div>
 </section>"""
 
@@ -1344,41 +1339,41 @@ def _gap() -> str:
     )
     blocks = "".join(
         f'<div class="ag-l-gap">'
-        f'<div><b class="ag-l-down">{_esc(tr(head))}</b>'
-        f"<p>{_esc(tr(body))}</p></div>"
-        f'<div><b class="ag-l-up">{_esc(tr("landing.gap_does"))}</b>'
-        f"<p>{_esc(tr(fix))}</p></div></div>"
+        f'<div><b class="ag-l-down">{esc(tr(head))}</b>'
+        f"<p>{esc(tr(body))}</p></div>"
+        f'<div><b class="ag-l-up">{esc(tr("landing.gap_does"))}</b>'
+        f"<p>{esc(tr(fix))}</p></div></div>"
         for head, body, fix in pairs
     )
 
     fifo = f"""
 <div class="ag-l-diagram">
-  <span class="ag-l-mono ag-l-eyebrow-sm">{_esc(tr("landing.fifo_label"))}</span>
+  <span class="ag-l-mono ag-l-eyebrow-sm">{esc(tr("landing.fifo_label"))}</span>
   <div class="ag-l-lots">
     <div class="ag-l-lot sold" style="flex:10">
-      <b>{_esc(tr("landing.fifo_lot", n=1, year=2022))}</b>
-      <i class="ag-l-mono">{_esc(tr("landing.fifo_sold", n=10))}</i></div>
+      <b>{esc(tr("landing.fifo_lot", n=1, year=2022))}</b>
+      <i class="ag-l-mono">{esc(tr("landing.fifo_sold", n=10))}</i></div>
     <div class="ag-l-lotpair" style="flex:12">
       <div class="ag-l-lot sold" style="flex:5">
-        <b>{_esc(tr("landing.fifo_lot", n=2, year=2023))}</b>
-        <i class="ag-l-mono">{_esc(tr("landing.fifo_sold", n=5))}</i></div>
+        <b>{esc(tr("landing.fifo_lot", n=2, year=2023))}</b>
+        <i class="ag-l-mono">{esc(tr("landing.fifo_sold", n=5))}</i></div>
       <div class="ag-l-lot held" style="flex:7"><b>&nbsp;</b>
-        <i class="ag-l-mono">{_esc(tr("landing.fifo_held", n=7))}</i></div>
+        <i class="ag-l-mono">{esc(tr("landing.fifo_held", n=7))}</i></div>
     </div>
     <div class="ag-l-lot held" style="flex:8">
-      <b>{_esc(tr("landing.fifo_lot", n=3, year=2025))}</b>
-      <i class="ag-l-mono">{_esc(tr("landing.fifo_held", n=8))}</i></div>
+      <b>{esc(tr("landing.fifo_lot", n=3, year=2025))}</b>
+      <i class="ag-l-mono">{esc(tr("landing.fifo_held", n=8))}</i></div>
   </div>
-  <span class="ag-l-note">{_esc(tr("landing.fifo_note"))}</span>
+  <span class="ag-l-note">{esc(tr("landing.fifo_note"))}</span>
 </div>"""
 
-    buy = _esc(tr("landing.fx_buy"))
-    sell = _esc(tr("landing.fx_sell"))
-    rate_lo = _esc(_dec(1.098, 3))
-    rate_hi = _esc(_dec(1.132, 3))
+    buy = esc(tr("landing.fx_buy"))
+    sell = esc(tr("landing.fx_sell"))
+    rate_lo = esc(_dec(1.098, 3))
+    rate_hi = esc(_dec(1.132, 3))
     fx = f"""
 <div class="ag-l-diagram">
-  <span class="ag-l-mono ag-l-eyebrow-sm">{_esc(tr("landing.fx_label"))}</span>
+  <span class="ag-l-mono ag-l-eyebrow-sm">{esc(tr("landing.fx_label"))}</span>
   <div class="ag-l-tl">
     <div class="ag-l-tl-rail"></div>
     <div class="ag-l-tl-tick" style="left:8%"></div>
@@ -1389,22 +1384,22 @@ def _gap() -> str:
       {sell} 05·2025<br>{rate_hi} $/€</div>
     <div class="ag-l-tl-tick faint" style="left:96%"></div>
     <div class="ag-l-tl-lab ag-l-mono faint" style="left:96%">
-      {_esc(tr("landing.fx_today"))}<br>{_esc(tr("landing.fx_spot"))}</div>
+      {esc(tr("landing.fx_today"))}<br>{esc(tr("landing.fx_spot"))}</div>
   </div>
   <div class="ag-l-compare">
-    <div class="broker"><small>{_esc(tr("landing.fx_broker"))}</small>
-      <b class="ag-l-num">{_esc(_money(1412, signed=True))}</b></div>
-    <div class="ours"><small>{_esc(tr("landing.fx_topstocks"))}</small>
-      <b class="ag-l-num">{_esc(_money(1168, signed=True))}</b></div>
+    <div class="broker"><small>{esc(tr("landing.fx_broker"))}</small>
+      <b class="ag-l-num">{esc(_money(1412, signed=True))}</b></div>
+    <div class="ours"><small>{esc(tr("landing.fx_topstocks"))}</small>
+      <b class="ag-l-num">{esc(_money(1168, signed=True))}</b></div>
   </div>
-  <span class="ag-l-note">{_esc(tr("landing.fx_note"))}</span>
+  <span class="ag-l-note">{esc(tr("landing.fx_note"))}</span>
 </div>"""
 
     return f"""
 <section class="ag-l-band"><div class="ag-l-wrap ag-l-sec">
   <div class="ag-l-head">
-    <h2>{_esc(tr("landing.gap_title"))}</h2>
-    <p>{_esc(tr("landing.gap_sub"))}</p>
+    <h2>{esc(tr("landing.gap_title"))}</h2>
+    <p>{esc(tr("landing.gap_sub"))}</p>
   </div>
   <div class="ag-l-gaps">{blocks}</div>
   <div class="ag-l-diagrams">{fifo}{fx}</div>
@@ -1419,15 +1414,15 @@ def _how() -> str:
         ("skip", tr("landing.imp_skip"), 6),
     )
     bucket_html = "".join(
-        f'<div class="ag-l-bucket {cls}"><b>{_esc(label)}</b>'
-        f'<i class="ag-l-mono">{_esc(_rows(n))}</i></div>'
+        f'<div class="ag-l-bucket {cls}"><b>{esc(label)}</b>'
+        f'<i class="ag-l-mono">{esc(_rows(n))}</i></div>'
         for cls, label, n in buckets
     )
 
     mini_rows = "".join(
-        f'<div class="ag-l-mini-r"><span class="ag-l-tk">{_esc(tk)}</span>'
-        f'<span class="ag-l-up">{_esc(_plain(pl, signed=True))}</span>'
-        f'<span class="ag-l-dim">{_esc(_pct(w, signed=False))}</span></div>'
+        f'<div class="ag-l-mini-r"><span class="ag-l-tk">{esc(tk)}</span>'
+        f'<span class="ag-l-up">{esc(_plain(pl, signed=True))}</span>'
+        f'<span class="ag-l-dim">{esc(_pct(w, signed=False))}</span></div>'
         for tk, pl, w in (
             ("MSFT", 6120, 30.8),
             ("ASML", 3485, 20.0),
@@ -1437,29 +1432,29 @@ def _how() -> str:
 
     return f"""
 <section class="ag-l-wrap ag-l-sec">
-  <h2>{_esc(tr("landing.how_title"))}</h2>
+  <h2>{esc(tr("landing.how_title"))}</h2>
   <div class="ag-l-steps">
     <div class="ag-l-step">
-      <h3>{_esc(tr("landing.step1_title"))}</h3>
+      <h3>{esc(tr("landing.step1_title"))}</h3>
       <div class="ag-l-gbtn"><span>{_G_MARK}
-        {_esc(tr("common.sign_in_google"))}</span></div>
-      <p>{_esc(tr("landing.step1_body"))}</p>
+        {esc(tr("common.sign_in_google"))}</span></div>
+      <p>{esc(tr("landing.step1_body"))}</p>
     </div>
     <div class="ag-l-step">
-      <h3>{_esc(tr("landing.step2_title"))}</h3>
+      <h3>{esc(tr("landing.step2_title"))}</h3>
       <div class="ag-l-buckets">{bucket_html}</div>
-      <p>{_esc(tr("landing.step2_body"))}</p>
+      <p>{esc(tr("landing.step2_body"))}</p>
     </div>
     <div class="ag-l-step">
-      <h3>{_esc(tr("landing.step3_title"))}</h3>
+      <h3>{esc(tr("landing.step3_title"))}</h3>
       <div class="ag-l-mini">
         <div class="ag-l-mini-h">
-          <span>{_esc(tr("landing.col_position"))}</span>
-          <span>{_esc(tr("landing.col_eur_pl"))}</span>
-          <span>{_esc(tr("landing.col_weight"))}</span>
+          <span>{esc(tr("landing.col_position"))}</span>
+          <span>{esc(tr("landing.col_eur_pl"))}</span>
+          <span>{esc(tr("landing.col_weight"))}</span>
         </div>{mini_rows}
       </div>
-      <p>{_esc(tr("landing.step3_body"))}</p>
+      <p>{esc(tr("landing.step3_body"))}</p>
     </div>
   </div>
 </section>"""
@@ -1476,30 +1471,30 @@ def _provenance() -> str:
     )
     card_html = "".join(
         f'<div class="ag-l-provcard"><div class="ag-l-provcard-h">'
-        f"<span>{_esc(tr(label, **largs))}</span>"
-        f'<span class="ag-l-tag {cls}">{_esc(tr(tag))}</span></div>'
-        f'<b class="ag-l-num">{_esc(value)}</b>'
-        f"<small>{_esc(tr(src, **sargs))}</small></div>"
+        f"<span>{esc(tr(label, **largs))}</span>"
+        f'<span class="ag-l-tag {cls}">{esc(tr(tag))}</span></div>'
+        f'<b class="ag-l-num">{esc(value)}</b>'
+        f"<small>{esc(tr(src, **sargs))}</small></div>"
         for label, largs, value, cls, tag, src, sargs in cards
     )
     card_html += (
         '<div class="ag-l-provcard"><div class="ag-l-provcard-h">'
-        f'<span>{_esc(tr("landing.prov_k4_label"))}</span></div>'
+        f'<span>{esc(tr("landing.prov_k4_label"))}</span></div>'
         '<b class="ag-l-num ag-l-na">n/a</b>'
-        f'<small>{_esc(tr("landing.prov_k4_src"))}</small></div>'
+        f'<small>{esc(tr("landing.prov_k4_src"))}</small></div>'
     )
 
     # The body names its three tags inline and colours each one, so the template
     # is escaped first and the marked-up words are substituted afterwards.
-    body = _esc(tr("landing.prov_body")).format(
-        fact=f'<b class="fact">{_esc(tr("landing.prov_word_fact"))}</b>',
-        consensus=f'<b class="consensus">{_esc(tr("landing.prov_word_consensus"))}</b>',
-        derived=f'<b class="derived">{_esc(tr("landing.prov_word_derived"))}</b>',
+    body = esc(tr("landing.prov_body")).format(
+        fact=f'<b class="fact">{esc(tr("landing.prov_word_fact"))}</b>',
+        consensus=f'<b class="consensus">{esc(tr("landing.prov_word_consensus"))}</b>',
+        derived=f'<b class="derived">{esc(tr("landing.prov_word_derived"))}</b>',
     )
 
     return f"""
 <section class="ag-l-prov"><div class="ag-l-wrap ag-l-prov-in">
-  <h2>{_esc(tr("landing.prov_title"))}</h2>
+  <h2>{esc(tr("landing.prov_title"))}</h2>
   <div class="ag-l-provrow">{card_html}</div>
   <p>{body}</p>
 </div></section>"""
@@ -1519,7 +1514,7 @@ def _bento() -> str:
     tax_pills = _TAX_PILLS.get(active_jurisdiction(), _TAX_PILLS["ES"])
 
     def pills(items: tuple[str, ...]) -> str:
-        inner = "".join(f'<span class="ag-l-pill">{_esc(p)}</span>' for p in items)
+        inner = "".join(f'<span class="ag-l-pill">{esc(p)}</span>' for p in items)
         return f'<div class="ag-l-pills">{inner}</div>'
 
     small = (
@@ -1531,19 +1526,19 @@ def _bento() -> str:
         ("landing.f_crypto_title", "landing.f_crypto_body"),
     )
     small_html = "".join(
-        f'<div class="ag-l-tile"><h3>{_esc(tr(title))}</h3>'
-        f"<p>{_esc(tr(body))}</p></div>"
+        f'<div class="ag-l-tile"><h3>{esc(tr(title))}</h3>'
+        f"<p>{esc(tr(body))}</p></div>"
         for title, body in small
     )
 
     return f"""
 <section class="ag-l-wrap ag-l-sec">
-  <h2>{_esc(tr("landing.bento_title"))}</h2>
+  <h2>{esc(tr("landing.bento_title"))}</h2>
   <div class="ag-l-bento-lg">
-    <div class="ag-l-tile"><h3>{_esc(tr("landing.f_portfolio_title"))}</h3>
-      <p>{_esc(tr("landing.f_portfolio_body"))}</p>{pills(risk_pills)}</div>
-    <div class="ag-l-tile"><h3>{_esc(tr("landing.f_tax_title"))}</h3>
-      <p>{_esc(tr("landing.f_tax_body"))}</p>{pills(tax_pills)}</div>
+    <div class="ag-l-tile"><h3>{esc(tr("landing.f_portfolio_title"))}</h3>
+      <p>{esc(tr("landing.f_portfolio_body"))}</p>{pills(risk_pills)}</div>
+    <div class="ag-l-tile"><h3>{esc(tr("landing.f_tax_title"))}</h3>
+      <p>{esc(tr("landing.f_tax_body"))}</p>{pills(tax_pills)}</div>
   </div>
   <div class="ag-l-bento-sm">{small_html}</div>
 </section>"""
@@ -1560,27 +1555,27 @@ def _depth_a() -> str:
             leg_html.append('<div class="ag-l-legjoin"></div>')
         leg_html.append(
             f'<div class="ag-l-leg"><span class="ag-l-dot"></span>'
-            f'<span class="ag-l-mono">{_esc(date)} · {_esc(verb)} {qty} @ '
-            f'${_esc(_dec(price, 2))}</span>'
-            f'<b class="ag-l-mono">ECB {_esc(_dec(rate, 4))}</b></div>'
+            f'<span class="ag-l-mono">{esc(date)} · {esc(verb)} {qty} @ '
+            f'${esc(_dec(price, 2))}</span>'
+            f'<b class="ag-l-mono">ECB {esc(_dec(rate, 4))}</b></div>'
         )
 
     return f"""
 <section class="ag-l-rule"><div class="ag-l-wrap ag-l-depth">
   <div class="ag-l-depth-copy">
-    <span class="ag-l-eyebrow">{_esc(tr("landing.depthA_eyebrow"))}</span>
-    <h2>{_esc(tr("landing.depthA_title"))}</h2>
-    <p>{_esc(tr("landing.depthA_body"))}</p>
+    <span class="ag-l-eyebrow">{esc(tr("landing.depthA_eyebrow"))}</span>
+    <h2>{esc(tr("landing.depthA_title"))}</h2>
+    <p>{esc(tr("landing.depthA_body"))}</p>
   </div>
   <div class="ag-l-flat">
     <span class="ag-l-mono ag-l-eyebrow-sm">MSFT ·
-      {_esc(tr("landing.depthA_label"))}</span>
+      {esc(tr("landing.depthA_label"))}</span>
     <div class="ag-l-legs">{"".join(leg_html)}</div>
     <div class="ag-l-split">
-      <div class="broker"><small>{_esc(tr("landing.depthA_broker"))}</small>
-        <b class="ag-l-num">{_esc(_money(1412, signed=True))}</b></div>
-      <div class="ours"><small>{_esc(tr("landing.depthA_topstocks"))}</small>
-        <b class="ag-l-num">{_esc(_money(1168, signed=True))}</b></div>
+      <div class="broker"><small>{esc(tr("landing.depthA_broker"))}</small>
+        <b class="ag-l-num">{esc(_money(1412, signed=True))}</b></div>
+      <div class="ours"><small>{esc(tr("landing.depthA_topstocks"))}</small>
+        <b class="ag-l-num">{esc(_money(1168, signed=True))}</b></div>
     </div>
   </div>
 </div></section>"""
@@ -1600,33 +1595,33 @@ _PANEL_RATE = {"ES": 19.0, "US": 15.0}
 def _depth_b() -> str:
     rate = _pct(_PANEL_RATE.get(active_jurisdiction(), 19.0), signed=False)
     rows = f"""
-<div class="ag-l-irpf-r"><span>{_esc(tr("landing.irpf_gains"))}</span>
-  <b class="ag-l-up">{_esc(_money(2521, signed=True))}</b></div>
-<div class="ag-l-irpf-r"><span>{_esc(tr("landing.irpf_losses"))}</span>
-  <b class="ag-l-down">{_esc(_money(-380, signed=True))}</b></div>
+<div class="ag-l-irpf-r"><span>{esc(tr("landing.irpf_gains"))}</span>
+  <b class="ag-l-up">{esc(_money(2521, signed=True))}</b></div>
+<div class="ag-l-irpf-r"><span>{esc(tr("landing.irpf_losses"))}</span>
+  <b class="ag-l-down">{esc(_money(-380, signed=True))}</b></div>
 <div class="ag-l-irpf-r ag-l-warnrow">
-  <span>{_WARN_MARK}{_esc(tr("landing.irpf_deferred"))}</span>
-  <b class="ag-l-struck">{_esc(_money(-612, signed=True))}</b></div>
-<div class="ag-l-irpf-r total"><span>{_esc(tr("landing.irpf_net"))}</span>
-  <b>{_esc(_money(2141))}</b></div>
+  <span>{_WARN_MARK}{esc(tr("landing.irpf_deferred"))}</span>
+  <b class="ag-l-struck">{esc(_money(-612, signed=True))}</b></div>
+<div class="ag-l-irpf-r total"><span>{esc(tr("landing.irpf_net"))}</span>
+  <b>{esc(_money(2141))}</b></div>
 <div class="ag-l-irpf-r total">
-  <span>{_esc(tr("landing.irpf_tax", rate=rate))}</span>
-  <b>{_esc(_money(407))}</b></div>
-<div class="ag-l-irpf-r"><span>{_esc(tr("landing.irpf_carry"))}</span>
-  <b class="ag-l-down">{_esc(_money(-612, signed=True))}</b></div>"""
+  <span>{esc(tr("landing.irpf_tax", rate=rate))}</span>
+  <b>{esc(_money(407))}</b></div>
+<div class="ag-l-irpf-r"><span>{esc(tr("landing.irpf_carry"))}</span>
+  <b class="ag-l-down">{esc(_money(-612, signed=True))}</b></div>"""
 
     return f"""
 <section class="ag-l-band"><div class="ag-l-wrap ag-l-depth">
   <div class="ag-l-flat sunken">
     <span class="ag-l-mono ag-l-eyebrow-sm">
-      {_esc(tr("landing.irpf_label", year=_FISCAL_YEAR))}</span>
+      {esc(tr("landing.irpf_label", year=_FISCAL_YEAR))}</span>
     <div class="ag-l-irpf">{rows}</div>
   </div>
   <div class="ag-l-depth-copy">
-    <span class="ag-l-eyebrow">{_esc(tr("landing.depthB_eyebrow"))}</span>
-    <h2>{_esc(tr("landing.depthB_title"))}</h2>
-    <p>{_esc(tr("landing.depthB_body"))}</p>
-    <div class="ag-l-disclaimer">{_esc(tr("landing.depthB_disclaimer"))}</div>
+    <span class="ag-l-eyebrow">{esc(tr("landing.depthB_eyebrow"))}</span>
+    <h2>{esc(tr("landing.depthB_title"))}</h2>
+    <p>{esc(tr("landing.depthB_body"))}</p>
+    <div class="ag-l-disclaimer">{esc(tr("landing.depthB_disclaimer"))}</div>
     {_jur_switch_link()}
   </div>
 </div></section>"""
@@ -1634,26 +1629,26 @@ def _depth_b() -> str:
 
 def _trust() -> str:
     items = "".join(
-        f'<div class="ag-l-trustitem"><b>{_esc(tr(f"landing.t{i}_h"))}</b>'
-        f'<span>{_esc(tr(f"landing.t{i}_b"))}</span></div>'
+        f'<div class="ag-l-trustitem"><b>{esc(tr(f"landing.t{i}_h"))}</b>'
+        f'<span>{esc(tr(f"landing.t{i}_b"))}</span></div>'
         for i in range(1, 6)
     )
     return f"""
 <section class="ag-l-wrap ag-l-sec">
-  <h2>{_esc(tr("landing.trust_title"))}</h2>
+  <h2>{esc(tr("landing.trust_title"))}</h2>
   <div class="ag-l-trustgrid">{items}</div>
 </section>"""
 
 
 def _faq() -> str:
     qs = "".join(
-        f'<details class="ag-l-q"><summary>{_esc(tr(f"landing.faq_q{i}"))}</summary>'
-        f'<p>{_esc(tr(f"landing.faq_a{i}"))}</p></details>'
+        f'<details class="ag-l-q"><summary>{esc(tr(f"landing.faq_q{i}"))}</summary>'
+        f'<p>{esc(tr(f"landing.faq_a{i}"))}</p></details>'
         for i in range(1, FAQ_COUNT + 1)
     )
     return f"""
 <section class="ag-l-band"><div class="ag-l-faq">
-  <h2>{_esc(tr("landing.faq_title"))}</h2>
+  <h2>{esc(tr("landing.faq_title"))}</h2>
   <div class="ag-l-qs">{qs}</div>
 </div></section>"""
 
@@ -1661,7 +1656,7 @@ def _faq() -> str:
 def _final() -> str:
     return f"""
 <section class="ag-l-rule"><div class="ag-l-wrap ag-l-final">
-  <h2>{_esc(tr("landing.final_title"))}</h2>
+  <h2>{esc(tr("landing.final_title"))}</h2>
   <div class="ag-l-ctarow">
     {_signin_link("ag-l-cta", tr("common.sign_in_google"))}
     {_guest_link(tr("landing.cta_guest_short"))}
@@ -1674,14 +1669,14 @@ def _footer() -> str:
 <footer class="ag-l-rule"><div class="ag-l-wrap ag-l-foot">
   <div class="ag-l-foot-row">
     <div class="ag-l-brand">{_mark()}<span>TopStocks</span></div>
-    <a href="{_esc(_GITHUB_URL)}" target="_blank"
-       rel="noopener noreferrer">{_esc(tr("landing.nav_github"))}</a>
-    <a href="/legal/privacy{_legal_lang_q()}">{_esc(tr("landing.footer_privacy"))}</a>
-    <a href="/legal/terms{_legal_lang_q()}">{_esc(tr("landing.footer_terms"))}</a>
+    <a href="{esc(_GITHUB_URL)}" target="_blank"
+       rel="noopener noreferrer">{esc(tr("landing.nav_github"))}</a>
+    <a href="/legal/privacy{_legal_lang_q()}">{esc(tr("landing.footer_privacy"))}</a>
+    <a href="/legal/terms{_legal_lang_q()}">{esc(tr("landing.footer_terms"))}</a>
     {_lang_toggle(footer=True)}
     {_jur_toggle(footer=True)}
   </div>
-  <p class="ag-l-fine">{_esc(tr("landing.footer_disclaimer"))}</p>
+  <p class="ag-l-fine">{esc(tr("landing.footer_disclaimer"))}</p>
 </div></footer>"""
 
 

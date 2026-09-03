@@ -21,6 +21,7 @@ from typing import TYPE_CHECKING
 
 import pandas as pd
 
+from stocks import obs
 from stocks.config import Holding, load_watchlist
 from stocks.data.fetch import fetch_many
 from stocks.data.fx import ToBase, converter
@@ -869,7 +870,7 @@ def session_quote(ticker: str) -> dict | None:
 
     from stocks.data.fetch import resolve
 
-    try:
+    with obs.swallow("quote.session", ticker=ticker):
         quote = yf.Ticker(resolve(ticker)).info
         state = str(quote.get("marketState") or "")
         regular = quote.get("regularMarketPrice")
@@ -888,8 +889,6 @@ def session_quote(ticker: str) -> dict | None:
         if regular and prev:
             price = float(regular)
             return {"price": price, "pct": price / float(prev) - 1, "session": None}
-    except Exception:
-        pass
     return None
 
 

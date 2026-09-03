@@ -217,6 +217,7 @@ def run_alerts_fanout(now: datetime | None = None) -> dict[str, str]:
     Returns {label: status} for the job log. Per-user failures are reported,
     never propagated — one broken account must not block the rest.
     """
+    from stocks.notify import narrative  # pulls in the chat engine; keep it lazy
     from stocks.web.i18n import translate
 
     now = now or datetime.now(UTC)
@@ -254,6 +255,13 @@ def run_alerts_fanout(now: datetime | None = None) -> dict[str, str]:
             if to_send:
                 header = translate("notify.alerts_subject", user.lang)
                 lines = [f"{h.ticker}: {h.message}" for h in to_send]
+                # One LLM call per account per run, and only when something is
+                # actually going out — the rising-edge/cooldown state above is
+                # what keeps that rare enough to sit on a free tier. None (no
+                # key, no quota, timeout) just ships the plain rule lines.
+                note = narrative.alerts_line(to_send, user.prefs, user.lang)
+                if note:
+                    lines.append(f"\n💡 {note}")
                 try:
                     telegram.send_message(
                         "\n".join([header, *lines]), user.chat_id, parse_mode=None

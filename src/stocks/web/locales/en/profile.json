@@ -78,7 +78,7 @@
   "profile.tax_residence_auto": "Auto (browser region)",
   "profile.tax_residence_es": "Spain — IRPF",
   "profile.tax_residence_us": "United States — IRS",
-  "profile.tax_residence_caption": "Picks the rules the **Realized & tax** tab applies and the currency your cost basis is computed in — EUR at the ECB rate of each transaction date for Spain, USD at that date's rate for the US. Auto reads the region from your browser and falls back to Spain.",
+  "profile.tax_residence_caption": "Picks the rules the **Realized & tax** tab applies, the currency your cost basis is computed in, and which shares a sale is matched against — EUR at each transaction date's ECB rate and FIFO in Spain, an averaged CAD cost base in Canada, LIFO in Italy. Auto reads the region from your browser and falls back to Spain.",
   "profile.tax_set": "Tax residence set to {label}",
   "profile.tax_filing_status": "Filing status",
   "profile.tax_status_single": "Single",
@@ -99,5 +99,16 @@
   "profile.tax_church_caption": "Charged as a share of the tax itself, not of the income, so 9% turns the 26.375% headline into about 27.99%.",
   "profile.tax_residence_uk": "United Kingdom — CGT",
   "profile.tax_other_income_caption_us": "Your other taxable income for the year, **after** deductions. Short-term gains stack on top of it, and it decides which long-term rate band your gains land in. Leave at 0 to see the gains taxed on their own.",
-  "profile.tax_other_income_caption_uk": "Your other taxable income for the year, **after** the personal allowance. Gains stack on top of it: whatever is left of the £37,700 basic-rate band is taxed at 18%, the rest at 24%."
+  "profile.tax_other_income_caption_uk": "Your other taxable income for the year, **after** the personal allowance. Gains stack on top of it: whatever is left of the £37,700 basic-rate band is taxed at 18%, the rest at 24%.",
+  "profile.tax_residence_fr": "France — PFU",
+  "profile.tax_residence_it": "Italy — imposta sostitutiva",
+  "profile.tax_residence_ie": "Ireland — CGT",
+  "profile.tax_residence_pt": "Portugal — IRS",
+  "profile.tax_residence_ca": "Canada — CRA",
+  "profile.tax_residence_au": "Australia — ATO",
+  "profile.tax_other_income_caption_pt": "Your other taxable income for the year. It only matters at the top: once it reaches the last IRS bracket (€83,696 for 2025), gains on holdings under 365 days must be aggregated at your marginal rate instead of paying the flat 28%.",
+  "profile.tax_other_income_caption_ca": "Your other taxable income for the year. The taxable half of your gains stacks on top of it, which decides the federal bracket it lands in.",
+  "profile.tax_other_income_caption_au": "Your other taxable income for the income year (1 July to 30 June). The net capital gain stacks on top of it at your marginal rate.",
+  "profile.tax_subnational": "Provincial tax rate (%)",
+  "profile.tax_subnational_caption": "Your provincial marginal rate — roughly half a Canadian tax bill, and it varies from about 10% in Alberta to about 21% in Quebec at higher incomes. Leave it at 0 to see the federal half alone."
 }

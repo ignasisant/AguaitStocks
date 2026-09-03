@@ -304,3 +304,79 @@ def test_collect_reads_pasted_links_first_and_shares_the_budget(monkeypatch):
     assert got[0].url == "https://pasted.example/x"
     assert got[0].text == "body"
     assert got[1].url == "https://found.example/1"
+
+
+# ------------------------------------------------------- fetch guard (SSRF)
+
+
+def _resolves_to(*addrs):
+    return lambda host, port, **kw: [(0, 0, 0, "", (a, 0)) for a in addrs]
+
+
+def test_only_http_schemes_are_fetchable():
+    assert not chat_web.fetchable("file:///etc/passwd")
+    assert not chat_web.fetchable("ftp://ftp.example/x")
+    assert not chat_web.fetchable("not a url")
+    assert not chat_web.fetchable("https://")
+
+
+def test_private_and_metadata_addresses_are_refused():
+    for url in ("http://127.0.0.1:8501/",
+                "http://169.254.169.254/computeMetadata/v1/",
+                "http://10.0.0.5/admin",
+                "http://192.168.1.1/",
+                "http://[::1]/"):
+        assert not chat_web.fetchable(url), url
+
+
+def test_a_public_host_is_fetchable(monkeypatch):
+    monkeypatch.setattr(chat_web.socket, "getaddrinfo",
+                        _resolves_to("93.184.216.34"))
+    assert chat_web.fetchable("https://news.example/article")
+
+
+def test_a_host_resolving_partly_inward_is_refused(monkeypatch):
+    # One public answer does not license the connection: the socket is free to
+    # pick either address.
+    monkeypatch.setattr(chat_web.socket, "getaddrinfo",
+                        _resolves_to("93.184.216.34", "127.0.0.1"))
+    assert not chat_web.fetchable("https://rebind.example/")
+
+
+def test_an_unresolvable_host_is_refused(monkeypatch):
+    def boom(*a, **kw):
+        raise OSError("nxdomain")
+    monkeypatch.setattr(chat_web.socket, "getaddrinfo", boom)
+    assert not chat_web.fetchable("https://nope.example/")
+
+
+def test_read_page_refuses_a_blocked_url_without_opening_it(monkeypatch):
+    def opened(*a, **kw):
+        raise AssertionError("must not open a blocked URL")
+    monkeypatch.setattr(chat_web, "_opener", opened)
+    assert chat_web.read_page("http://169.254.169.254/") == ""
+
+
+def test_redirect_inward_is_dropped(monkeypatch):
+    import email.message
+    import urllib.request
+
+    handler = chat_web._GuardedRedirect()
+    req = urllib.request.Request("https://news.example/a")
+    got = handler.redirect_request(req, None, 302, "Found",
+                                   email.message.Message(),
+                                   "http://169.254.169.254/")
+    assert got is None
+
+
+def test_redirect_to_a_public_host_is_followed(monkeypatch):
+    import email.message
+    import urllib.request
+
+    monkeypatch.setattr(chat_web, "_public_host", lambda host: True)
+    handler = chat_web._GuardedRedirect()
+    req = urllib.request.Request("https://news.example/a")
+    got = handler.redirect_request(req, None, 302, "Found",
+                                   email.message.Message(),
+                                   "https://news.example/b")
+    assert got is not None and got.full_url == "https://news.example/b"

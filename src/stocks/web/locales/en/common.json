@@ -2,6 +2,7 @@
   "nav.home": "Home",
   "nav.ticker": "Ticker",
   "nav.portfolio": "Allocation",
+  "nav.sentiment": "Pulse",
   "nav.screener": "Screener",
   "nav.earnings": "Calendar",
   "nav.import": "Import",

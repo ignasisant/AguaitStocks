@@ -98,12 +98,10 @@ def fetch_many(
 def latest_price(ticker: str) -> float:
     """Most recent price — fast_info first, 5d history as fallback."""
     t = yf.Ticker(resolve(ticker))
-    try:
+    with obs.swallow("yahoo.fast_info", ticker=ticker):
         price = t.fast_info["lastPrice"]
         if price:
             return float(price)
-    except Exception:
-        pass
     df = _retry(lambda: t.history(period="5d", interval="1d"))
     if df.empty:
         raise ValueError(f"no data for {ticker}")

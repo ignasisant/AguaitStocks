@@ -107,6 +107,14 @@ def connect(path: Path = DB_PATH) -> sqlite3.Connection:
     return conn
 
 
+def _rowid(cur: sqlite3.Cursor) -> int:
+    """The id sqlite just assigned. Typed `int | None` on the driver because a
+    cursor that never ran an INSERT has none; after one it always does."""
+    if cur.lastrowid is None:  # pragma: no cover — an INSERT always sets it
+        raise RuntimeError("INSERT reported no rowid")
+    return int(cur.lastrowid)
+
+
 def add(tx: Transaction, path: Path = DB_PATH) -> int:
     with closing(connect(path)) as conn, conn:
         cur = conn.execute(
@@ -116,7 +124,7 @@ def add(tx: Transaction, path: Path = DB_PATH) -> int:
             (tx.date, tx.ticker, tx.action, tx.quantity, tx.price,
              tx.currency, tx.fee, tx.note),
         )
-        rowid = int(cur.lastrowid)
+        rowid = _rowid(cur)
     storage.persist(path)
     return rowid
 
@@ -136,7 +144,7 @@ def add_many(txs: list[Transaction], path: Path = DB_PATH) -> list[int]:
                 (t.date, t.ticker, t.action, t.quantity, t.price,
                  t.currency, t.fee, t.note),
             )
-            ids.append(int(cur.lastrowid))
+            ids.append(_rowid(cur))
     storage.persist(path)
     return ids
 

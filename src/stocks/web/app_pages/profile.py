@@ -14,7 +14,7 @@ from stocks import storage
 from stocks.config import load_watchlist
 from stocks.portfolio import tax
 from stocks.portfolio.tax import de as tax_de
-from stocks.web import auth, i18n, tax_ui, widgets
+from stocks.web import auth, i18n, onboarding, tax_ui, widgets
 from stocks.web.i18n import t as tr
 
 # Account identity, prefs and the watchlist editor are all per-account.
@@ -194,6 +194,26 @@ with tab_prefs:
             tr(f"profile.tax_other_income_caption_{_active.code.lower()}")
         )
 
+    if "subnational_rate" in _fields:
+        # Canada: the provincial half of the bill. Entered as a percentage
+        # because that is how every rate table prints it, stored as a fraction.
+        try:
+            _sub_now = float(prefs.get(tax_ui.PREF_SUBNATIONAL) or 0.0)
+        except (TypeError, ValueError):
+            _sub_now = 0.0
+        sub = st.number_input(
+            tr("profile.tax_subnational"),
+            min_value=0.0,
+            max_value=30.0,
+            step=0.5,
+            value=round(_sub_now * 100, 2),
+            key="pref_tax_subnational",
+        )
+        if abs(float(sub) / 100 - _sub_now) > 1e-9:
+            prefs[tax_ui.PREF_SUBNATIONAL] = float(sub) / 100
+            auth.save_prefs(prefs)
+        st.caption(tr("profile.tax_subnational_caption"))
+
     if "include_niit" in _fields:
         niit = st.toggle(
             tr("profile.tax_niit"),
@@ -204,6 +224,16 @@ with tab_prefs:
             prefs[tax_ui.PREF_NIIT] = niit
             auth.save_prefs(prefs)
         st.caption(tr("profile.tax_niit_caption"))
+
+    # ------------------------------------------------------------- the tour
+    # Where a returning user goes looking for the walkthrough, and the only
+    # entry point left once an account has finished it: after that the tour
+    # only ever auto-opens for a release the account hasn't seen yet (see
+    # stocks.web.onboarding.maybe_open).
+    st.space("large")
+    st.subheader(tr("tour.launch"))
+    st.caption(tr("tour.launch_caption"))
+    onboarding.render_launcher("profile_tour")
 
     # ------------------------------------------------------------ danger zone
     # The deletion path the privacy policy promises. Owner account never gets

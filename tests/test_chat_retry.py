@@ -50,6 +50,7 @@ def paths(tmp_path):
         prefs=tmp_path / "prefs.json",
         chat=tmp_path / "chat.json",
         bank=tmp_path / "bank.json",
+        action=tmp_path / "daily_action.json",
     )
 
 
@@ -79,6 +80,17 @@ def _labelled(at, label):
     return [b for b in at.button if b.label == label]
 
 
+def _thread(paths):
+    """The stored turns without their instrumentation.
+
+    Every turn now carries a clock stamp ("ts"), an answer also what it cost
+    ("took") and what it fetched ("steps"); those belong to the timing tests,
+    not to these, which are about which turns survive a failure."""
+    noise = ("ts", "took", "steps")
+    return [{k: v for k, v in turn.items() if k not in noise}
+            for turn in auth.load_chat(paths.chat)]
+
+
 # AppTest keeps the elements a container held before an in-script st.rerun
 # (the browser drops them on script-finished), so what disappeared is asserted
 # on the stored thread rather than on the element tree.
@@ -91,7 +103,7 @@ def test_a_dead_provider_leaves_the_question_and_a_retry(app, paths):
     assert app.chat_message[0].markdown[0].value == "¿cómo va mi cartera?"
     assert _labelled(app, "Retry")
     # The question survives, with the failure pinned to it.
-    assert auth.load_chat(paths.chat) == [{
+    assert _thread(paths) == [{
         "role": "user", "content": "¿cómo va mi cartera?",
         "error": ["chat.provider_busy", "Gemini"],
     }]
@@ -105,11 +117,24 @@ def test_retry_replays_the_same_turn_without_retyping_it(app, paths, provider):
     _labelled(app, "Retry")[0].click().run()
 
     assert not app.exception
-    assert auth.load_chat(paths.chat) == [
+    assert _thread(paths) == [
         {"role": "user", "content": "hola"},
         {"role": "assistant", "content": "the answer"},
     ]
     assert _labelled(app, "Regenerate")  # back to the normal tail
+
+
+def test_the_thread_carries_a_clock_and_the_answer_its_cost(app, paths,
+                                                            provider):
+    """Both stamps are written by the live path, not only by the redraw."""
+    provider.broken = False
+    app.run()
+    app.chat_input[0].set_value("hola").run()
+
+    user, answer = auth.load_chat(paths.chat)
+    assert user["ts"] and answer["ts"] >= user["ts"]
+    assert answer["took"] >= 0
+    assert "took" not in user  # only an answer has a cost
 
 
 def test_discarding_a_failed_turn_drops_it(app, paths):
@@ -119,7 +144,7 @@ def test_discarding_a_failed_turn_drops_it(app, paths):
     _labelled(app, "Discard question")[0].click().run()
 
     assert not app.exception
-    assert auth.load_chat(paths.chat) == []
+    assert _thread(paths) == []
 
 
 def test_a_new_question_supersedes_the_failed_one(app, paths, provider):
@@ -132,7 +157,7 @@ def test_a_new_question_supersedes_the_failed_one(app, paths, provider):
     app.chat_input[0].set_value("segunda").run()
 
     assert not app.exception
-    assert auth.load_chat(paths.chat) == [
+    assert _thread(paths) == [
         {"role": "user", "content": "segunda"},
         {"role": "assistant", "content": "the answer"},
     ]

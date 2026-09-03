@@ -36,7 +36,7 @@ from pathlib import Path
 
 from stocks.config import DATA_DIR, WATCHLIST_FILE, load_watchlist, ticker_aliases
 from stocks.portfolio.ledger import DB_PATH, Transaction
-from stocks.portfolio.revolut import ParseResult
+from stocks.portfolio.statement import ParseResult
 
 EDGAR_TICKER_CACHE = DATA_DIR / "edgar_tickers.json"
 

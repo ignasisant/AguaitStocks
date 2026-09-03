@@ -4,7 +4,7 @@ worldwide row is labelled. Pure functions, no Streamlit runtime, no network.
 
 import pytest
 
-from stocks.web.widgets import _world_first, _world_label
+from stocks.web.search import _world_first, _world_label
 
 # What sec_matches actually returns for each query, real rows from the SEC map.
 MIPS_SEC = [

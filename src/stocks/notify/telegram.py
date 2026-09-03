@@ -19,6 +19,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
+from stocks import obs
 from stocks.secrets_env import secret
 
 API = "https://api.telegram.org/bot{token}/{method}"
@@ -49,10 +50,8 @@ def _call(method: str, params: dict) -> dict:
             body = json.load(resp)
     except urllib.error.HTTPError as exc:
         detail = ""
-        try:
+        with obs.swallow("telegram.error_detail", code=exc.code):
             detail = json.load(exc).get("description", "")
-        except Exception:
-            pass
         if exc.code == 403:
             raise TelegramBlocked(detail or "bot was blocked by the user") from exc
         raise RuntimeError(f"telegram {method} failed: {detail or exc}") from exc

@@ -26,7 +26,6 @@ Three things are worth knowing about the choices below.
 
 from __future__ import annotations
 
-import html
 import json
 from functools import lru_cache
 from pathlib import Path
@@ -40,6 +39,7 @@ from stocks.web.landing import (
     PATH_EN,
     jur_key,
 )
+from stocks.web.markup import esc
 
 SITE_NAME = "TopStocks"
 REPO_URL = "https://github.com/ignasi-sant/stocks"
@@ -119,10 +119,6 @@ def app_page_paths() -> tuple[str, ...]:
     )
 
 
-def _esc(value: object) -> str:
-    return html.escape(str(value), quote=True)
-
-
 def path_for(lang: str, jurisdiction: str | None = None) -> str:
     """The landing path serving `lang` (under `jurisdiction`, or its default)."""
     return landing.variant_path(lang, jurisdiction)
@@ -134,11 +130,11 @@ def _abs(base_url: str, path: str) -> str:
 
 
 def _meta(name: str, content: str) -> str:
-    return f'<meta name="{name}" content="{_esc(content)}">'
+    return f'<meta name="{name}" content="{esc(content)}">'
 
 
 def _prop(prop: str, content: str) -> str:
-    return f'<meta property="{prop}" content="{_esc(content)}">'
+    return f'<meta property="{prop}" content="{esc(content)}">'
 
 
 def json_ld(lang: str, base_url: str, jurisdiction: str | None = None) -> str:
@@ -230,7 +226,7 @@ def _font_links() -> str:
     The `<noscript>` copy is the blocking version, for the (rare, and
     crawler-shaped) client that runs no JavaScript.
     """
-    href = _esc(FONTS_HREF)
+    href = esc(FONTS_HREF)
     return (
         f'<link rel="preload" as="style" href="{href}">'
         f'<link rel="stylesheet" href="{href}" media="print" '
@@ -263,7 +259,7 @@ def head(
 
     alternates = "".join(
         f'<link rel="alternate" hreflang="{code}" '
-        f'href="{_esc(_abs(base_url, path))}">'
+        f'href="{esc(_abs(base_url, path))}">'
         for code, path in _alternates(jur).items()
     )
     other_locales = "".join(
@@ -275,9 +271,9 @@ def head(
     return (
         '<meta charset="utf-8">'
         '<meta name="viewport" content="width=device-width, initial-scale=1">'
-        f"<title>{_esc(title)}</title>"
+        f"<title>{esc(title)}</title>"
         + _meta("description", description)
-        + f'<link rel="canonical" href="{_esc(canonical)}">'
+        + f'<link rel="canonical" href="{esc(canonical)}">'
         + alternates
         # max-image-preview:large is what allows the share card to be used as
         # the thumbnail in search results, not just in social unfurls.
@@ -285,8 +281,8 @@ def head(
         + _meta("theme-color", THEME_COLOR)
         + _meta("color-scheme", "dark")
         + _meta("author", SITE_NAME)
-        + f'<link rel="icon" href="{_esc(ICON_SVG)}" type="image/svg+xml">'
-        + f'<link rel="apple-touch-icon" href="{_esc(APPLE_ICON)}">'
+        + f'<link rel="icon" href="{esc(ICON_SVG)}" type="image/svg+xml">'
+        + f'<link rel="apple-touch-icon" href="{esc(APPLE_ICON)}">'
         + _prop("og:type", "website")
         + _prop("og:site_name", SITE_NAME)
         + _prop("og:locale", _OG_LOCALE.get(lang, "en_US"))
@@ -379,13 +375,13 @@ def sitemap_xml(base_url: str, *, lastmod: str | None = None) -> str:
     pairs above the cross ones — same content, less likely to be what a
     searcher meant.
     """
-    mod = f"<lastmod>{_esc(lastmod)}</lastmod>" if lastmod else ""
+    mod = f"<lastmod>{esc(lastmod)}</lastmod>" if lastmod else ""
     entries = []
     for (code, jur), loc_path in landing.VARIANTS.items():
         loc = _abs(base_url, loc_path)
         links = "".join(
             f'<xhtml:link rel="alternate" hreflang="{alt}" '
-            f'href="{_esc(_abs(base_url, path))}"/>'
+            f'href="{esc(_abs(base_url, path))}"/>'
             for alt, path in _alternates(jur).items()
         )
         if jur != landing.jurisdiction_for(code):
@@ -393,7 +389,7 @@ def sitemap_xml(base_url: str, *, lastmod: str | None = None) -> str:
         else:
             priority = "1.0" if code == DEFAULT_LANG else "0.9"
         entries.append(
-            f"<url><loc>{_esc(loc)}</loc>{mod}"
+            f"<url><loc>{esc(loc)}</loc>{mod}"
             f"<changefreq>weekly</changefreq>"
             f"<priority>{priority}</priority>"
             f"{links}</url>"

@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import time
 from datetime import UTC, datetime
+from html import escape
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -42,7 +43,13 @@ from stocks.web import (
 )
 from stocks.web.i18n import t as tr
 from stocks.web.portfolio_data import enriched_positions
-from stocks.web.widgets import asset_logo, brand_logo, data_table, db_mtime
+from stocks.web.widgets import (
+    asset_logo,
+    brand_logo,
+    data_table,
+    db_mtime,
+    viewer_tz,
+)
 
 _TTL = engine.BYOK_TTL  # 90 days, seconds — the shared sliding "remembered" window
 
@@ -466,11 +473,11 @@ def _try_action(provider: llm.Provider, api_key: str,
     return act
 
 
-def _retire_on_first_chunk(pending, chunks):
-    """Yield `chunks`, dropping `pending`'s skeleton as the first one lands.
+def _retire_on_first_chunk(work, chunks):
+    """Yield `chunks`, retiring the working line as the first one lands.
 
     st.write_stream renders nothing until the provider returns its first
-    token, so the placeholder has to survive *into* the streaming call and be
+    token, so the working line has to survive *into* the streaming call and be
     retired from inside it — clearing beforehand would leave the bubble blank
     for exactly the wait it exists to cover. The finally covers a stream that
     ends without yielding anything at all.
@@ -478,14 +485,13 @@ def _retire_on_first_chunk(pending, chunks):
     try:
         for i, chunk in enumerate(chunks):
             if i == 0:
-                pending.clear()
+                work.clear()
             yield chunk
     finally:
-        if not pending.resolved:
-            pending.clear()
+        work.clear()
 
 
-def _stream_with_fallback(pending, provider: llm.Provider, api_key: str,
+def _stream_with_fallback(work, provider: llm.Provider, api_key: str,
                           model: str, system: str, msgs: list[dict],
                           prefs: dict) -> str:
     """The answer stream, retried down the provider chain when the chosen
@@ -521,7 +527,7 @@ def _stream_with_fallback(pending, provider: llm.Provider, api_key: str,
 
         try:
             answer = st.write_stream(_retire_on_first_chunk(
-                pending, _tap(p.stream(k, m, system, msgs))))
+                work, _tap(p.stream(k, m, system, msgs))))
         except Exception as exc:
             try:
                 exc.chat_provider = p
@@ -707,6 +713,25 @@ def _pending_key(ns: str) -> str:
     return f"{ns}_pending_import"
 
 
+def _import_hint(ns: str, message: str) -> str | None:
+    """The deterministic answer to "import my trades", or None to answer normally.
+
+    An import needs the statement itself, and a model asked to perform one
+    narrates the import it did not do instead — invented tickers, invented
+    prices, a book reported as changed (which is exactly what shipped). So the
+    ask never reaches a model: it is answered here with the step that does
+    work, either attaching the file or pressing the button on the batch
+    already staged. The same ban is stated in the system prompt for every
+    phrasing this gate does not catch.
+    """
+    if not tools.wants_import(message):
+        return None
+    staged = st.session_state.get(_pending_key(ns))
+    if staged:
+        return tr("chat.import_pending_hint", filename=staged["filename"])
+    return tr("chat.import_needs_file")
+
+
 def _failure(history: list[dict]) -> tuple[str, str] | None:
     """The error pinned to a trailing unanswered question, if any.
 
@@ -850,7 +875,8 @@ def _ingest_uploads(ns: str, uploads: list[tuple[str, bytes]],
     if len(uploads) > 1:
         note += "\n\n" + tr("chat.import_one_at_a_time",
                              files=", ".join(u[0] for u in uploads[1:]))
-    history.append({"role": "assistant", "content": note, "action": "import"})
+    history.append(_stamp(
+        {"role": "assistant", "content": note, "action": "import"}))
     auth.save_chat(history)
 
 
@@ -880,13 +906,13 @@ def _commit_import(ns: str, pending: dict, history: list[dict],
         ),
         paths.last_import,
     )
-    history.append({
+    history.append(_stamp({
         "role": "assistant",
         "content": tr("chat.import_done", n=len(ids),
                       total=len(all_transactions(paths.db))) + " " + tr(
                           "chat.import_undo_hint"),
         "action": "import",
-    })
+    }))
     auth.save_chat(history)
     st.session_state.pop(_pending_key(ns), None)
 
@@ -981,6 +1007,236 @@ def _render_pending_import(ns: str, history: list[dict], box) -> bool:
     return True
 
 
+# ------------------------------------------------------- clock and activity
+# What the thread shows about time, and about the work behind an answer.
+#
+# Three pieces, all modelled on Claude Code's terminal: a working line that
+# ticks while the answer is being built, the tool lines it leaves behind
+# ("what was fetched for this"), and a dim clock under every turn. The clock
+# and the elapsed cost are stored on the turn dict, so a reload redraws
+# exactly what was on screen; turns written before this shipped carry neither
+# and simply show nothing.
+
+_STEP_ARG_CHARS = 56  # of a tool's argument kept on its line
+_STEP_ARG_KEYS = ("query", "url", "tickers", "ticker", "symbol")
+
+
+# The reader's zone lives in widgets — the dashboard's daily card needs it too.
+_viewer_tz = viewer_tz
+
+
+def _clock(ts: float | None) -> str:
+    """A turn's stamp as HH:MM in the reader's zone, or '' when unstamped."""
+    if not ts:
+        return ""
+    try:
+        when = datetime.fromtimestamp(float(ts), UTC)
+    except (TypeError, ValueError, OSError, OverflowError):
+        return ""
+    return when.astimezone(_viewer_tz()).strftime("%H:%M")
+
+
+def _took(seconds: float | None) -> str:
+    """How long an answer took: 8.4s inside a minute, then 1m 12s."""
+    if not seconds or seconds < 0:
+        return ""
+    if seconds < 60:
+        return f"{seconds:.1f}s"
+    return f"{int(seconds // 60)}m {int(seconds % 60):02d}s"
+
+
+def _stamp(turn: dict, took: float | None = None) -> dict:
+    """Stamp a turn on its way onto the thread (answers also get their cost).
+
+    setdefault, not assignment: a turn that already carries a stamp is being
+    re-saved, and its clock must keep saying when it was written.
+    """
+    turn.setdefault("ts", time.time())
+    if took is not None:
+        turn["took"] = round(took, 1)
+    return turn
+
+
+def _render_meta(msg: dict) -> None:
+    """The dim footer under a turn: its clock, and for an answer its cost."""
+    bits = [b for b in (_clock(msg.get("ts")), _took(msg.get("took"))) if b]
+    if bits:
+        st.html(f'<div class="ts-chat-meta">{escape(" · ".join(bits))}</div>')
+
+
+def _step_arg(args: dict) -> str:
+    """The argument that identifies a call — the query, the URL, the tickers."""
+    value = next((args[k] for k in _STEP_ARG_KEYS if args.get(k)), None)
+    if value is None:
+        value = next((v for _, v in sorted(args.items()) if v), "")
+    text = ", ".join(str(v) for v in value) if isinstance(value, list) else str(value)
+    return " ".join(text.split())[:_STEP_ARG_CHARS]
+
+
+def _step_out(call) -> str:
+    """The one-line result summary under a tool call.
+
+    A search is counted in hits (the URLs it returned); everything else in
+    characters, which is the honest measure of what reached the prompt — a
+    page read that hit a paywall says so by being tiny.
+    """
+    result = call.result or ""
+    if call.name == "search_web":
+        hits = sum(1 for ln in result.splitlines()
+                   if ln.strip().startswith("http"))
+        if hits:
+            return tr("chat.step_results", n=hits)
+    return tr("chat.step_chars", n=len(result))
+
+
+def _steps(evidence, hits: list, live: list) -> list[dict]:
+    """What ran for this answer, as tool lines.
+
+    Two code paths produce the same shape: the model-directed gather's own
+    calls (chat/agent.py), and the fixed pre-flight's search and quote lookup.
+    Which one ran is plumbing — what the reader wants is the list of things
+    the answer was built on, in the order they happened.
+    """
+    steps = [
+        {"tool": call.name, "arg": _step_arg(call.args), "out": _step_out(call)}
+        for call in getattr(evidence, "calls", [])
+    ]
+    if hits:
+        steps.append({"tool": "search_web", "arg": "",
+                      "out": tr("chat.step_results", n=len(hits))})
+    if live:
+        steps.append({
+            "tool": "get_quotes",
+            "arg": ", ".join(q.ticker for q in live)[:_STEP_ARG_CHARS],
+            "out": tr("chat.step_quotes", n=len(live)),
+        })
+    return steps
+
+
+def _render_steps(steps: list[dict]) -> None:
+    """The tool lines above an answer: dot, call, and its one-line result."""
+    if not steps:
+        return
+    rows = []
+    for s in steps:
+        arg = escape(s.get("arg") or "")
+        rows.append(
+            '<div class="ts-step"><span class="ts-dot">●</span>'
+            f'<span class="ts-tool">{escape(s.get("tool", ""))}</span>'
+            + (f'<span class="ts-arg">{arg}</span>' if arg else "")
+            + "</div>"
+        )
+        if s.get("out"):
+            rows.append(f'<div class="ts-step-out">⎿ {escape(s["out"])}</div>')
+    st.html(f'<div class="ts-steps">{"".join(rows)}</div>')
+
+
+# The elapsed clock has to tick in the browser. Everything the working line
+# covers — routing, the gather's tool loop, the searches and page reads, the
+# wait on the provider's first token — runs on the script thread, which is
+# exactly when the server sends nothing: a server-rendered "12s" would freeze
+# at whatever the last phase change wrote. So the script ships a start moment
+# once and the browser counts from it; a phase change replaces the label and
+# leaves the clock running (window.__tsWork survives the swap), and the
+# element going away is what stops the timer, so a retired line never keeps
+# an interval alive.
+_WORK_JS = """
+<script>
+(function () {
+  const els = document.querySelectorAll(".ts-work");
+  const el = els[els.length - 1];
+  if (!el) return;
+  const S = window.__tsWork || (window.__tsWork = {});
+  if (S.iv) { clearInterval(S.iv); S.iv = null; }
+  if (el.dataset.reset === "1" || !S.t0) S.t0 = Date.now();
+  const still = window.matchMedia
+    && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  const glyphs = ["✻", "✽", "✻", "✢", "·", "✢"];
+  let i = 0;
+  const tick = function () {
+    if (!el.isConnected) { clearInterval(S.iv); S.iv = null; return; }
+    if (!still) {
+      el.querySelector(".ts-work-glyph").textContent = glyphs[i++ % glyphs.length];
+    }
+    el.querySelector(".ts-work-time").textContent =
+      Math.floor((Date.now() - S.t0) / 1000) + "s";
+  };
+  tick();
+  S.iv = setInterval(tick, 220);
+})();
+</script>
+"""
+
+
+class _Working:
+    """The line that says what the assistant is doing right now.
+
+    One slot in the bubble, rewritten per phase: routing and gathering, the
+    web pass, then the wait on the first token. It is cleared by whoever
+    finishes the turn — the streaming tap on its first chunk, or the error and
+    action paths that never stream at all — so it can never outlive the work.
+    """
+
+    def __init__(self, container) -> None:
+        self._slot = container.empty()
+        self._started = False
+
+    def phase(self, key: str) -> None:
+        """Show `key`'s label ("thinking", "gathering", "searching",
+        "writing"), starting the clock on the first call of the turn."""
+        reset = "0" if self._started else "1"
+        self._started = True
+        label = escape(tr(f"chat.work_{key}"))
+        self._slot.html(
+            f'<div class="ts-work" data-reset="{reset}">'
+            '<span class="ts-work-glyph">✻</span>'
+            f'<span class="ts-work-label">{label}</span>'
+            '<span class="ts-work-time">0s</span></div>' + _WORK_JS,
+            unsafe_allow_javascript=True,
+        )
+
+    def clear(self) -> None:
+        self._slot.empty()
+
+
+# Injected by render_conversation, so any surface that draws the conversation
+# gets it. No raw "less-than" anywhere in this block: DOMPurify drops a whole
+# style block whose text holds one (see web/css.py).
+_CONV_CSS = """
+<style>
+/* Terminal-flavoured chrome around each turn: monospace, dim, one step below
+   a caption, so it reads as instrumentation and never competes with the
+   answer itself. */
+.ts-chat-meta {
+  font-family: "Martian Mono", monospace;
+  font-size: var(--ag-fs-2xs); color: var(--ag-text-faint);
+  letter-spacing: -0.02em; margin-top: 0.2rem;
+}
+.ts-steps {
+  font-family: "Martian Mono", monospace;
+  font-size: var(--ag-fs-2xs); line-height: 1.75;
+  letter-spacing: -0.02em; margin-bottom: 0.4rem;
+}
+.ts-step {white-space: nowrap; overflow: hidden; text-overflow: ellipsis;}
+.ts-dot {color: var(--ag-brand-accent); margin-right: 0.5em;}
+.ts-tool {color: var(--ag-text-secondary);}
+.ts-arg {color: var(--ag-text-faint); margin-left: 0.5em;}
+.ts-step-out {
+  color: var(--ag-text-faint); padding-left: 1.3em;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.ts-work {
+  display: flex; align-items: center; gap: 0.55em;
+  font-family: "Martian Mono", monospace;
+  font-size: var(--ag-fs-xs); color: var(--ag-text-muted);
+  letter-spacing: -0.02em; padding: 0.15rem 0;
+}
+.ts-work-glyph {color: var(--ag-brand-accent); width: 1em; text-align: center;}
+.ts-work-time {color: var(--ag-text-faint);}
+</style>
+"""
+
+
 # ------------------------------------------------------------- conversation
 
 # The tail of the conversation actually sent to the model (engine.recent):
@@ -997,6 +1253,7 @@ def render_conversation(ns: str, provider: llm.Provider, model: str,
     (auth.load_chat) and written back after every turn (auth.save_chat), so it
     survives a reload, a new session, or an ephemeral redeploy.
     """
+    css.inject(_CONV_CSS)
     conv = auth.active_conversation()
     _render_thread_bar(ns, conv)
     # Keyed by thread as well as account: switching conversations must not
@@ -1017,11 +1274,14 @@ def render_conversation(ns: str, provider: llm.Provider, model: str,
             with st.chat_message(msg["role"]):
                 if msg.get("skills"):  # which lens produced this answer
                     st.caption(_lens_label(msg["skills"]))
+                if msg.get("steps"):  # what was fetched for it, tool by tool
+                    _render_steps(msg["steps"])
                 st.markdown(msg["content"])
                 for f in msg.get("files", []):  # what was attached to the turn
                     st.caption(f":material/attach_file: {f['name']}")
                 if msg.get("web"):  # which pages grounded this answer
                     st.caption(_sources_label(msg["web"]))
+                _render_meta(msg)  # clock, and for an answer what it cost
 
     text, files = _submitted(st.chat_input(
         tr("chat.placeholder"), key=f"{ns}_input",
@@ -1045,7 +1305,8 @@ def render_conversation(ns: str, provider: llm.Provider, model: str,
         # reach the provider as one malformed exchange.
         if _failure(history):
             history.pop()
-        turn: dict = {"role": "user", "content": text or tr("chat.import_ask")}
+        turn: dict = _stamp(
+            {"role": "user", "content": text or tr("chat.import_ask")})
         if files:
             # Only the names go on the thread; the bytes ride in session state
             # and are consumed by the ingest below on this same run.
@@ -1058,6 +1319,7 @@ def render_conversation(ns: str, provider: llm.Provider, model: str,
             st.markdown(turn["content"])
             for f in turn.get("files", []):
                 st.caption(f":material/attach_file: {f['name']}")
+            _render_meta(turn)
 
     # An attached statement is an import, not a question: it is parsed,
     # validated and previewed here, and never reaches the model as text.
@@ -1066,40 +1328,54 @@ def render_conversation(ns: str, provider: llm.Provider, model: str,
         _ingest_uploads(ns, uploads, provider, api_key, history)
         st.rerun()
 
+    # "Import my trades", with nothing attached. The app answers this one
+    # itself (see _import_hint).
+    if history and history[-1]["role"] == "user" and not _failure(history):
+        note = _import_hint(ns, history[-1]["content"])
+        if note is not None:
+            history.append({"role": "assistant", "content": note,
+                            "action": "import"})
+            auth.save_chat(history)
+            st.rerun()
+
     # Generate whenever the last turn is a user turn still awaiting a reply
     # (covers both a fresh message and a Regenerate through one code path).
     if history and history[-1]["role"] == "user" and not _failure(history):
-        # The reply's bubble opens before any of the work behind it, holding a
-        # shimmer of answer-shaped lines: the action probe, the routing calls,
-        # the searches and the wait on the provider all pass with the bubble
-        # otherwise empty, and the reader can see where the answer will land.
-        pending = skeletons.reserve("text", container=box, lines=3, width="70%")
+        # The working line opens before any of the work behind it: the action
+        # probe, the routing calls, the searches and the wait on the provider
+        # all pass with the bubble otherwise empty, and it names the step the
+        # wait is currently in while counting the seconds it has taken.
+        started = time.time()
+        work = _Working(box)
+        work.phase("thinking")
         # App actions first: an executed action (favorite / alert / group)
         # answers with a deterministic localized confirmation — no main model
         # call, no free-quota spend.
         act = _try_action(provider, api_key, history[-1]["content"])
         if act is not None:
+            work.clear()
             note = _action_reply(act)
-            with pending.container(), st.chat_message("assistant"):
+            answered = _stamp({"role": "assistant", "content": note,
+                               "action": act.kind}, time.time() - started)
+            with box, st.chat_message("assistant"):
                 st.markdown(note)
-            history.append(
-                {"role": "assistant", "content": note, "action": act.kind}
-            )
+                _render_meta(answered)
+            history.append(answered)
             auth.save_chat(history)
             if _maybe_autotitle(conv, history, provider, api_key):
                 st.rerun()
         else:
             if provider.id == "free" and not _spend_free_quota():
-                pending.clear()
+                work.clear()
                 history.pop()  # drop the turn we won't answer
                 auth.save_chat(history)
                 st.error(tr("chat.free_cap", cap=_free_daily_cap()))
                 st.stop()
             with box, st.chat_message("assistant"):
-                # Routing and search run under the shimmer above; it survives
-                # into write_stream and is retired by _retire_on_first_chunk
-                # the moment the model's first token arrives (write_stream
-                # itself shows nothing until then).
+                # Routing and search run under the working line above; it
+                # survives into write_stream and is retired by
+                # _retire_on_first_chunk the moment the model's first token
+                # arrives (write_stream itself shows nothing until then).
                 try:
                     # Session state is read here, on the script thread; the
                     # three lookups then run concurrently off it (routing,
@@ -1117,6 +1393,7 @@ def render_conversation(ns: str, provider: llm.Provider, model: str,
                     # fetches its usual guess. A gather that never ran (no
                     # tools, dead key, timeout) falls through to the fixed one;
                     # a gather that ran and chose nothing is obeyed.
+                    work.phase("gathering")
                     skills, evidence = engine.in_parallel(
                         lambda: _resolve_skills(provider, api_key, history,
                                                 prefs, view),
@@ -1128,6 +1405,7 @@ def render_conversation(ns: str, provider: llm.Provider, model: str,
                     evidence = evidence or agent.Evidence(ok=False)
                     hits, live = [], []
                     if not evidence.ok:
+                        work.phase("searching")
                         hits, live = engine.in_parallel(
                             lambda: _gather_web(provider, api_key, history,
                                                 prefs, view),
@@ -1137,6 +1415,9 @@ def render_conversation(ns: str, provider: llm.Provider, model: str,
                         hits, live = hits or [], live or []
                     if skills:
                         st.caption(_lens_label(skills))
+                    # What the answer was built on, above the answer itself.
+                    steps = _steps(evidence, hits, live)
+                    _render_steps(steps)
                     # Everything fetched rides on the outgoing copy of the user
                     # turn, not the system prompt — the stored history keeps
                     # the user's own text, and prompt caches stay warm.
@@ -1154,13 +1435,17 @@ def render_conversation(ns: str, provider: llm.Provider, model: str,
                     # just appended to the newest turn are the biggest thing
                     # in the request (chat/tokens.py).
                     msgs = tokens.fit(msgs, system=system)
+                    work.phase("writing")
                     answer = _stream_with_fallback(
-                        pending, provider, api_key, model, system, msgs, prefs)
+                        work, provider, api_key, model, system, msgs, prefs)
                     web_sources = chat_web.sources(hits) or evidence.sources()
                     if web_sources:
                         st.caption(_sources_label(web_sources))
+                    answered = _stamp({"role": "assistant", "content": answer},
+                                      time.time() - started)
+                    _render_meta(answered)
                 except Exception as exc:  # classified per provider; unknown -> re-raise
-                    pending.clear()
+                    work.clear()
                     # The chain tags the exception with the provider that
                     # actually raised (the chosen one, or the last fallback).
                     failed = getattr(exc, "chat_provider", provider)
@@ -1173,9 +1458,11 @@ def render_conversation(ns: str, provider: llm.Provider, model: str,
                     history[-1]["error"] = [err, failed.label]
                     auth.save_chat(history)
                     st.rerun()
-            turn: dict = {"role": "assistant", "content": answer}
+            turn: dict = answered
             if skills:
                 turn["skills"] = skills
+            if steps:  # the tool lines, redrawn with the turn on every reload
+                turn["steps"] = steps
             if web_sources:
                 turn["web"] = web_sources
             history.append(turn)

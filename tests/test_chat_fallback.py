@@ -35,11 +35,13 @@ class _Provider:
             raise RuntimeError(f"{self.id} boom")
 
 
-class _Pending:
-    resolved = False
+class _Work:
+    """Stand-in for the working line the stream retires."""
+
+    cleared = False
 
     def clear(self):
-        self.resolved = True
+        self.cleared = True
 
 
 @pytest.fixture
@@ -57,7 +59,7 @@ def _run(monkeypatch, chosen, fallbacks):
     monkeypatch.setattr(chat_core.engine, "attempts",
                         lambda prefs: [(p, "", "") for p in fallbacks])
     return chat_core._stream_with_fallback(
-        _Pending(), chosen, "key", "", "system", [], {})
+        _Work(), chosen, "key", "", "system", [], {})
 
 
 def test_falls_through_when_chosen_dies_before_first_token(panel, monkeypatch):

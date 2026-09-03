@@ -198,8 +198,11 @@ def _fetch_quote(ticker: str) -> Quote | None:
         return None
 
     def num(key: str) -> float | None:
+        raw = fi.get(key)
+        if raw is None:
+            return None
         try:
-            val = float(fi.get(key))
+            val = float(raw)
         except (TypeError, ValueError):
             return None
         return val if val == val else None  # val==val screens NaN

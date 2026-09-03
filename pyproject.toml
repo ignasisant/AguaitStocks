@@ -47,6 +47,18 @@ build-backend = "uv_build"
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 
+# Type checking. Ratcheted, not all-at-once: the packages listed here are
+# clean and CI keeps them that way. The rest of the tree still has ~78
+# diagnostics, most of them pandas frames whose stubs can't express what a
+# column holds — widening `include` one package at a time is the way in, not a
+# blanket suppression. Run `uvx ty check src/stocks` to see the whole picture.
+[tool.ty.src]
+include = [
+    "src/stocks/chat",
+    "src/stocks/data",
+    "src/stocks/portfolio",
+]
+
 [tool.ruff]
 line-length = 90
 target-version = "py312"
@@ -58,5 +70,6 @@ select = ["E", "F", "I", "UP", "B"]
 dev = [
     "pytest>=9.1.1",
     "ruff>=0.16.0",
+    "ty>=0.0.1a21",
     "watchdog>=6.0.0",
 ]

@@ -34,6 +34,7 @@ from stocks.web import (  # noqa: E402
     i18n,
     landing,
     notices,
+    onboarding,
     skeletons,
     telemetry,
 )
@@ -308,6 +309,13 @@ css.inject(
         button[data-variant="segmented_control"][data-selected="true"] p,
       [data-testid="stButtonGroup"] button[data-variant="pills"][data-selected="true"] p {
         color: var(--ag-purple-400);
+      }
+      /* Chip groups that share a header row with a title sit flush right,
+         against the card edge, instead of hugging the title. The widget key
+         is the only hook Streamlit gives a single control. */
+      [class*="st-key-tax_granularity"] [data-testid="stButtonGroup"]
+        > div[data-orientation] {
+        justify-content: flex-end;
       }
       /* Tabs — the DS tab spec (Aguait Tabs canvas): quiet underline nav, no
          chip wash. Rest labels in neutral-400 at 500; hover lifts the label
@@ -1036,10 +1044,16 @@ i18n.set_active_language()
 # redirects and nothing after it runs.
 landing.consume_params()
 
-# Signed-in first load: nudge the user to set up their investor profile so the
-# assistant tailors its analysis. Skippable; nags again next session until set
-# (or filled from the Profile page). No-op for guests.
-auth.maybe_prompt_profile()
+# Signed-in first load: the guided tour for a brand-new account, "what's new"
+# for one that has already taken it and missed a release. Only one modal can be
+# open per run, so the tour claims the run when it fires and the investor-
+# profile nudge stands down — the profile is one of the tour's own steps.
+# Both are no-ops for guests; the tour itself is still reachable by hand.
+if not onboarding.maybe_open():
+    # Nudge the user to set up their investor profile so the assistant tailors
+    # its analysis. Skippable; nags again next session until set (or filled
+    # from the Profile page).
+    auth.maybe_prompt_profile()
 
 ticker_page = st.Page(
     "app_pages/ticker.py",
@@ -1075,6 +1089,11 @@ page = st.navigation(
         tr("nav.section_portfolio"): _portfolio_pages,
         tr("nav.section_market"): [
             ticker_page,
+            st.Page(
+                "app_pages/sentiment.py",
+                title=tr("nav.sentiment"),
+                icon=":material/speed:",
+            ),
             st.Page(
                 "app_pages/screener.py",
                 title=tr("nav.screener"),
@@ -1115,6 +1134,12 @@ if _qp and st.session_state.get("_url_ticker") != _qp:
     st.session_state["_url_ticker"] = _qp
     if page.url_path != ticker_page.url_path:
         st.switch_page(ticker_page)
+
+# The tour's pending navigation, from a "take me there" click on the previous
+# run: it may switch pages (ending this run before anything is drawn) and it
+# seeds the state of in-page targets like the assistant panel, so it has to
+# come before the topbar and the panel below.
+onboarding.consume_goto(page)
 
 # Selection only, no UI: ticker navigation is the top-bar search (plus
 # ?ticker= links), so the drawer carries just the page nav. Seeding runs above
@@ -1167,6 +1192,14 @@ if auth.is_logged_in():
 # of any page that crashes — which used to reach the user as Streamlit's red
 # box and reach us not at all. Fragment reruns never re-enter this file, so the
 # timing covers full runs only.
+# The guided tour's visible half: the modal when it is open, the thin resume
+# strip when the user sent themselves to a page to look at the feature being
+# explained. After the topbar (which has to be the main column's first element
+# to stay sticky) and before page.run(), so the strip sits between the two and
+# every page gets it for free — including pages that st.stop() at their login
+# gate.
+onboarding.render(page)
+
 with obs.timed("page.render", passthrough=telemetry.CONTROL_FLOW, page=page.title):
     try:
         page.run()

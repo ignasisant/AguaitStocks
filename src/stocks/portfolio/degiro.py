@@ -40,7 +40,7 @@ import csv
 import io
 
 from stocks.portfolio.ledger import Transaction
-from stocks.portfolio.revolut import ParseResult
+from stocks.portfolio.statement import ParseResult
 
 # Logical key -> accepted header names (lowercased), English and Spanish.
 _HEADERS = {

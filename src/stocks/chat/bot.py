@@ -26,7 +26,7 @@ from __future__ import annotations
 import json
 import time
 
-from stocks import storage
+from stocks import obs, storage
 from stocks.chat import engine
 from stocks.config import DATA_DIR, PROJECT_ROOT
 from stocks.notify import fanout, telegram
@@ -103,10 +103,8 @@ def _send(text: str, chat_id, dry_run: bool) -> None:
 
 def _typing(chat_id) -> None:
     """Best-effort typing indicator — the Actions cold start is ~30-90s."""
-    try:
+    with obs.swallow("telegram.typing", chat_id=chat_id):
         telegram._call("sendChatAction", {"chat_id": chat_id, "action": "typing"})
-    except Exception:
-        pass
 
 
 # ------------------------------------------------------------------ linking
@@ -248,14 +246,13 @@ def drain(dry_run: bool = False) -> dict[str, str]:
                 status[key] = "blocked"
             except Exception as exc:  # noqa: BLE001 — per-update isolation
                 status[key] = f"error: {exc}"
-                try:  # best-effort: tell the user something went wrong
+                # Best-effort: tell the user something went wrong.
+                with obs.swallow("telegram.error_notice"):
                     chat_id = ((update.get("message") or {})
                                .get("chat") or {}).get("id")
                     if chat_id and not dry_run:
                         _send(translate("notify.chat_error", "en"),
                               chat_id, dry_run)
-                except Exception:
-                    pass
             finally:
                 if not dry_run:
                     _delete_queue_object(key)

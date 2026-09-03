@@ -20,11 +20,21 @@ on:
   workflow_dispatch:
     inputs:
       job:
-        description: "Which job to run (digest | alerts)"
+        description: "Which job to run (digest | alerts | test)"
         required: true
         default: "digest"
         type: choice
-        options: [digest, alerts]
+        options: [digest, alerts, test]
+      user:
+        description: "test only: one account label ('owner' or a slug); blank = all"
+        required: false
+        default: ""
+        type: string
+      dry_run:
+        description: "test only: list recipients, send nothing"
+        required: false
+        default: false
+        type: boolean
 
 concurrency:
   group: notify-${{ github.event.schedule || inputs.job }}
@@ -65,3 +75,19 @@ jobs:
       - uses: astral-sh/setup-uv@v5
       - run: uv sync --frozen --no-dev
       - run: uv run stocks alerts --all-users
+
+  # Manual only: proves the secrets, the bucket roster and the bot are wired,
+  # without waiting for a cron or computing anything. Sends one short message
+  # per Telegram-linked account (or just `user`), so it is cheap to re-run.
+  test:
+    if: inputs.job == 'test'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - run: uv sync --frozen --no-dev
+      - run: >
+          uv run stocks notify-test --all-users
+          ${{ inputs.user && format('--user {0}', inputs.user) || '' }}
+          ${{ inputs.dry_run && '--dry-run' || '' }}

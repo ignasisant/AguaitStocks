@@ -42,8 +42,16 @@ def test_a_supported_region_resolves_to_its_jurisdiction(locale):
 
 def test_unknown_region_falls_back_to_spain(locale):
     """A book has to be taxed under some rules; this app's home is Spain."""
-    locale("fr-FR")
+    locale("ja-JP")
     assert tax_ui.resolve_code({}) == tax.DEFAULT_CODE == "ES"
+
+
+def test_a_language_region_is_read_as_the_region_not_the_language(locale):
+    """"pt-BR" is a Brazilian speaking Portuguese, not a Portuguese filer."""
+    locale("pt-BR")
+    assert tax_ui.resolve_code({}) == "ES"
+    locale("pt-PT")
+    assert tax_ui.resolve_code({}) == "PT"
 
 
 def test_a_language_without_a_region_falls_back(locale):

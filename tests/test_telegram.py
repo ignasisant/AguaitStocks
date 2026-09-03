@@ -163,3 +163,112 @@ def test_deliver_env_path_unchanged(api, monkeypatch):
     assert call["params"]["chat_id"] == "99"
     assert call["params"]["text"] == "Stock alerts\nAAPL: above 200"
     assert "parse_mode" not in call["params"]
+
+
+# ------------------------------------------------------------- notify-test
+
+
+def _ns(**kw):
+    import argparse
+
+    return argparse.Namespace(**{"all_users": False, "user": None,
+                                 "dry_run": False, **kw})
+
+
+def _fake_user(label, chat_id, lang="en", **prefs):
+    from stocks.notify.fanout import NotifyUser
+
+    return NotifyUser(
+        label=label,
+        prefs={"telegram_chat_id": chat_id, "language": lang, **prefs},
+        watchlist=None, db=None, prefs_path=None, state_path=None,
+    )
+
+
+def test_notify_test_env_path_uses_deliver(api, monkeypatch, capsys):
+    from stocks.cli import cmd_notify_test
+
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "99")
+    cmd_notify_test(_ns())
+
+    (call,) = api.calls
+    assert call["params"]["chat_id"] == "99"
+    assert "Test message" in call["params"]["text"]
+    out = capsys.readouterr().out
+    assert "configured channels: console, telegram" in out
+    assert "telegram=sent" in out
+
+
+def test_notify_test_dry_run_sends_nothing(api, monkeypatch, capsys):
+    from stocks.cli import cmd_notify_test
+
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "99")
+    cmd_notify_test(_ns(dry_run=True))
+    assert api.calls == []
+    assert "Test message" in capsys.readouterr().out
+
+
+def test_notify_test_all_users_messages_each_in_its_language(api, monkeypatch, capsys):
+    from stocks.cli import cmd_notify_test
+    from stocks.notify import fanout
+
+    users = [_fake_user("owner", 111), _fake_user("jane_ab12cd34", 222, "es"),
+             _fake_user("carol_11223344", None)]  # never linked → skipped
+    monkeypatch.setattr(fanout, "iter_all_users", lambda: users)
+    cmd_notify_test(_ns(all_users=True))
+
+    assert [c["params"]["chat_id"] for c in api.calls] == ["111", "222"]
+    assert "Test message" in api.calls[0]["params"]["text"]
+    assert "prueba" in api.calls[1]["params"]["text"]  # es catalog
+    out = capsys.readouterr().out
+    assert "owner: sent" in out and "jane_ab12cd34: sent" in out
+    assert "carol" not in out
+
+
+def test_notify_test_reports_blocked_and_keeps_going(api, monkeypatch, capsys):
+    from stocks.cli import cmd_notify_test
+    from stocks.notify import fanout
+
+    monkeypatch.setattr(
+        fanout, "iter_all_users",
+        lambda: [_fake_user("a", 1), _fake_user("b", 2)],
+    )
+    api.responses.append(http_error(403, "bot was blocked by the user"))
+    cmd_notify_test(_ns(all_users=True))
+
+    out = capsys.readouterr().out
+    assert "a: blocked" in out
+    assert "b: sent" in out
+
+
+def test_notify_test_flags_muted_toggles(api, monkeypatch, capsys):
+    from stocks.cli import cmd_notify_test
+    from stocks.notify import fanout
+
+    monkeypatch.setattr(
+        fanout, "iter_all_users",
+        lambda: [_fake_user("a", 1, notify_digest=False)],
+    )
+    cmd_notify_test(_ns(all_users=True, dry_run=True))
+    assert "(notify_digest off)" in capsys.readouterr().out
+
+
+def test_notify_test_unknown_user_lists_labels(api, monkeypatch):
+    from stocks.cli import cmd_notify_test
+    from stocks.notify import fanout
+
+    monkeypatch.setattr(fanout, "iter_all_users", lambda: [_fake_user("owner", 1)])
+    with pytest.raises(SystemExit, match="have: owner"):
+        cmd_notify_test(_ns(user="nope"))
+
+
+def test_notify_test_requires_a_bot_token(monkeypatch):
+    import os
+
+    from stocks.cli import cmd_notify_test
+
+    monkeypatch.setattr(telegram, "secret",
+                        lambda env, *a, **k: os.environ.get(env, ""))
+    monkeypatch.delenv("TELEGRAM_BOT_TOKEN", raising=False)
+    with pytest.raises(SystemExit, match="no bot token"):
+        cmd_notify_test(_ns(all_users=True))
