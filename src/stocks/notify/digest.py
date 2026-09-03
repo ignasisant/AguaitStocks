@@ -14,6 +14,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, date, datetime
 from pathlib import Path
 
+from stocks import obs
 from stocks.config import CURRENCY_SYMBOL, load_watchlist
 from stocks.data.earnings import EarningsEvent, upcoming
 from stocks.portfolio.ledger import all_transactions
@@ -69,31 +70,25 @@ def compute_digest_data(
     data.watchlist_only = not positions
 
     if positions:
-        try:
+        with obs.swallow("digest.position_values", positions=len(positions)):
             values = position_values_history(positions, period="1mo", base=base)
             if not values.empty:
                 last = values.iloc[-1].dropna()
                 data.total = float(last.sum()) if not last.empty else None
                 data.day = basket_change(values, 1)
                 data.week = basket_change(values, 7)
-        except Exception:
-            pass
 
     tickers = (
         [p.ticker for p in positions]
         if positions
         else [h.ticker for h in holdings]
     )
-    try:
+    with obs.swallow("digest.session_moves", tickers=len(tickers)):
         moves = session_moves(tickers)
         data.movers = sorted(moves.items(), key=lambda kv: kv[1], reverse=True)
-    except Exception:
-        pass
 
-    try:
+    with obs.swallow("digest.upcoming_earnings"):
         data.earnings = upcoming(holdings, within_days=7)
-    except Exception:
-        pass
 
     return data
 
@@ -178,7 +173,14 @@ def run_digest_fanout(dry_run: bool = False) -> dict[str, str]:
     """Compute and send every subscriber's digest. Returns {label: status}."""
     from stocks.notify import narrative, telegram
     from stocks.notify.fanout import iter_notify_users
-    from stocks.notify.state import is_blocked, load_state, mark_blocked, save_state
+    from stocks.notify.state import (
+        is_blocked,
+        load_state,
+        mark_blocked,
+        recent_highlights,
+        remember_highlight,
+        save_state,
+    )
 
     now = datetime.now(UTC)
     status: dict[str, str] = {}
@@ -193,7 +195,9 @@ def run_digest_fanout(dry_run: bool = False) -> dict[str, str]:
             if data.total is None and not data.movers and not data.earnings:
                 status[user.label] = "skipped: no data"
                 continue
-            data.highlight = narrative.highlight(data, user.prefs, user.lang)
+            data.highlight = narrative.highlight(
+                data, user.prefs, user.lang, recent=recent_highlights(state)
+            )
             text = render_digest(data, user.lang)
             if dry_run:
                 print(f"── {user.label} ──\n{text}\n")
@@ -202,6 +206,11 @@ def run_digest_fanout(dry_run: bool = False) -> dict[str, str]:
             try:
                 telegram.send_message(text, user.chat_id, parse_mode="HTML")
                 status[user.label] = "sent"
+                # Only what was actually delivered joins the memory, so a send
+                # that failed does not burn the line it never showed.
+                if data.highlight:
+                    remember_highlight(state, data.highlight)
+                    save_state(state, user.state_path)
             except telegram.TelegramBlocked:
                 mark_blocked(state, now)
                 save_state(state, user.state_path)

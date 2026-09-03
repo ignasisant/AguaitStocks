@@ -7,8 +7,20 @@ import json
 import pandas as pd
 import pytest
 
-from stocks.notify import fanout
+from stocks.notify import fanout, narrative
 from stocks.notify import state as state_mod
+
+
+@pytest.fixture(autouse=True)
+def no_llm(monkeypatch):
+    """Silence the optional LLM lines by default.
+
+    Not politeness: a developer with [free_llm] secrets configured otherwise
+    runs the whole fan-out against real backends, which costs minutes per run
+    and spends the shared daily pot. Tests that want a line opt back in.
+    """
+    monkeypatch.setattr(narrative, "alerts_line", lambda *a, **kw: None)
+    monkeypatch.setattr(narrative, "highlight", lambda *a, **kw: None)
 
 
 def _user(tmp_path, slug, prefs, watchlist=None):
@@ -206,3 +218,128 @@ def test_run_alerts_fanout_isolates_user_errors(local, monkeypatch):
     assert status["jane_ab12cd34"] == "sent 1"
     assert status["bob_ef56ab78"].startswith("error:")
     assert calls == [111]
+
+
+def test_alert_note_is_appended_when_the_llm_answers(local, monkeypatch):
+    _user(local, "jane_ab12cd34", LINKED, watchlist=WATCHLIST_WITH_ALERT)
+    monkeypatch.setattr(
+        fanout, "_fetch_frames",
+        lambda tickers, max_workers=4: {"NVDA": _frame([90, 150])},
+    )
+    seen = []
+    monkeypatch.setattr(
+        narrative, "alerts_line",
+        lambda hits, prefs, lang: seen.append((len(hits), lang)) or "Semis running.",
+    )
+    sent = []
+    monkeypatch.setattr(
+        fanout.telegram, "send_message",
+        lambda text, chat_id, parse_mode=None: sent.append(text),
+    )
+
+    assert fanout.run_alerts_fanout() == {"jane_ab12cd34": "sent 1"}
+    assert seen == [(1, "es")]  # one call, the account's language
+    assert "NVDA" in sent[0] and "💡 Semis running." in sent[0]
+
+
+def test_alert_note_absent_never_blocks_the_alert(local, monkeypatch):
+    _user(local, "jane_ab12cd34", LINKED, watchlist=WATCHLIST_WITH_ALERT)
+    monkeypatch.setattr(
+        fanout, "_fetch_frames",
+        lambda tickers, max_workers=4: {"NVDA": _frame([90, 150])},
+    )
+    monkeypatch.setattr(narrative, "alerts_line", lambda *a, **kw: None)
+    sent = []
+    monkeypatch.setattr(
+        fanout.telegram, "send_message",
+        lambda text, chat_id, parse_mode=None: sent.append(text),
+    )
+
+    assert fanout.run_alerts_fanout() == {"jane_ab12cd34": "sent 1"}
+    assert "💡" not in sent[0]
+
+
+def test_no_hits_never_calls_the_llm(local, monkeypatch):
+    _user(local, "jane_ab12cd34", LINKED, watchlist=WATCHLIST_WITH_ALERT)
+    monkeypatch.setattr(
+        fanout, "_fetch_frames",
+        lambda tickers, max_workers=4: {"NVDA": _frame([90, 50])},  # below 100
+    )
+    calls = []
+    monkeypatch.setattr(
+        narrative, "alerts_line", lambda *a, **kw: calls.append(1) or "x"
+    )
+    monkeypatch.setattr(
+        fanout.telegram, "send_message",
+        lambda text, chat_id, parse_mode=None: None,
+    )
+    assert fanout.run_alerts_fanout() == {"jane_ab12cd34": "no hits"}
+    assert calls == []
+
+
+# ------------------------------------------------- digest highlight memory
+
+
+def _digest_env(local, monkeypatch, highlight):
+    """One linked account, a fixed digest, and `highlight` as the LLM."""
+    from datetime import date
+
+    from stocks.notify import digest
+
+    _user(local, "jane_ab12cd34", LINKED)
+    monkeypatch.setattr(
+        digest, "compute_digest_data",
+        lambda watchlist, db, base: digest.DigestData(
+            date=date(2026, 9, 3), total=1000.0, day=(10.0, 0.01)
+        ),
+    )
+    monkeypatch.setattr(narrative, "highlight", highlight)
+    return digest
+
+
+def test_digest_highlight_is_remembered_for_the_next_run(local, monkeypatch):
+    seen = []
+
+    def highlight(data, prefs, lang, recent=None):
+        seen.append(list(recent or []))
+        return f"Line {len(seen)}."
+
+    digest = _digest_env(local, monkeypatch, highlight)
+    monkeypatch.setattr(
+        fanout.telegram, "send_message", lambda text, chat_id, parse_mode=None: None
+    )
+
+    assert digest.run_digest_fanout() == {"jane_ab12cd34": "sent"}
+    assert digest.run_digest_fanout() == {"jane_ab12cd34": "sent"}
+    assert digest.run_digest_fanout() == {"jane_ab12cd34": "sent"}
+    # Each run sees everything delivered before it, oldest first.
+    assert seen == [[], ["Line 1."], ["Line 1.", "Line 2."]]
+
+
+def test_undelivered_highlight_is_not_remembered(local, monkeypatch):
+    """A line the user never saw must not be treated as already said."""
+    seen = []
+
+    def highlight(data, prefs, lang, recent=None):
+        seen.append(list(recent or []))
+        return "Only line."
+
+    digest = _digest_env(local, monkeypatch, highlight)
+
+    def blocked(text, chat_id, parse_mode=None):
+        raise fanout.telegram.TelegramBlocked("blocked")
+
+    monkeypatch.setattr(fanout.telegram, "send_message", blocked)
+    assert digest.run_digest_fanout() == {"jane_ab12cd34": "blocked"}
+    assert state_mod.recent_highlights(
+        state_mod.load_state(local / "users" / "jane_ab12cd34" / "alerts_state.json")
+    ) == []
+
+
+def test_digest_without_a_highlight_writes_no_state(local, monkeypatch):
+    digest = _digest_env(local, monkeypatch, lambda *a, **kw: None)
+    monkeypatch.setattr(
+        fanout.telegram, "send_message", lambda text, chat_id, parse_mode=None: None
+    )
+    assert digest.run_digest_fanout() == {"jane_ab12cd34": "sent"}
+    assert not (local / "users" / "jane_ab12cd34" / "alerts_state.json").exists()

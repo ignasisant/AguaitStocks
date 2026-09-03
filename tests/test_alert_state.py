@@ -101,3 +101,35 @@ def test_blocked_flag_roundtrip(tmp_path, monkeypatch):
     st_mod.mark_blocked(state, NOW)
     st_mod.save_state(state, path)
     assert st_mod.is_blocked(st_mod.load_state(path))
+
+
+def test_highlight_memory_keeps_the_last_few(tmp_path, monkeypatch):
+    monkeypatch.setattr(st_mod.storage, "persist", lambda p: None)
+    path = tmp_path / "alerts_state.json"
+    state = st_mod.load_state(path)
+    assert st_mod.recent_highlights(state) == []
+    for i in range(st_mod.HIGHLIGHTS_KEPT + 2):
+        st_mod.remember_highlight(state, f"line {i}")
+    st_mod.save_state(state, path)
+    kept = st_mod.recent_highlights(st_mod.load_state(path))
+    assert kept == [f"line {i}" for i in range(2, st_mod.HIGHLIGHTS_KEPT + 2)]
+
+
+def test_highlight_memory_ignores_blanks_and_junk():
+    state = {"alerts": {}, "highlights": ["real", "", 7]}
+    assert st_mod.recent_highlights(state) == ["real", "7"]
+    st_mod.remember_highlight(state, "   ")
+    assert st_mod.recent_highlights(state) == ["real", "7"]  # nothing appended
+
+
+def test_highlight_memory_survives_fingerprint_pruning(tmp_path, monkeypatch):
+    """save_state prunes stale alert rules; the highlight history is not one."""
+    monkeypatch.setattr(st_mod.storage, "persist", lambda p: None)
+    path = tmp_path / "alerts_state.json"
+    state = st_mod.load_state(path)
+    st_mod.should_send(state, "GONE|above|price=1|w=", fired=True, now=NOW)
+    st_mod.remember_highlight(state, "kept line")
+    st_mod.save_state(state, path, active_fingerprints=set())
+    reloaded = st_mod.load_state(path)
+    assert reloaded["alerts"] == {}
+    assert st_mod.recent_highlights(reloaded) == ["kept line"]

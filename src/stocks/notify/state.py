@@ -20,6 +20,10 @@ from stocks.config import Alert
 
 VERSION = 1
 COOLDOWN_HOURS = 24
+# Digest highlights kept for the repetition guard (notify/narrative.py). Long
+# enough that "the same sentence again" is caught across a working week, short
+# enough that the prompt it is pasted into stays small.
+HIGHLIGHTS_KEPT = 5
 
 
 def fingerprint(ticker: str, alert: Alert) -> str:
@@ -89,6 +93,21 @@ def should_send(
             return False
     state["alerts"][fp] = {"active": True, "last_sent": now.isoformat()}
     return True
+
+
+def recent_highlights(state: dict) -> list[str]:
+    """The last few digest highlight lines, oldest first."""
+    got = state.get("highlights")
+    if not isinstance(got, list):
+        return []
+    return [str(x) for x in got if str(x).strip()][-HIGHLIGHTS_KEPT:]
+
+
+def remember_highlight(state: dict, line: str, keep: int = HIGHLIGHTS_KEPT) -> None:
+    """Record a sent highlight so tomorrow's prompt can avoid repeating it."""
+    if not line.strip():
+        return
+    state["highlights"] = [*recent_highlights(state), line][-keep:]
 
 
 def mark_blocked(state: dict, now: datetime) -> None:

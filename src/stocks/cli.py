@@ -92,6 +92,73 @@ def cmd_digest(args: argparse.Namespace) -> None:
     print("digest sent")
 
 
+def cmd_notify_test(args: argparse.Namespace) -> None:
+    """Send a test message down the real notification paths.
+
+    Two paths, because they read different config and fail differently:
+
+      no flags        the env-configured channels — exactly what
+                      `alerts --deliver` uses (TELEGRAM_CHAT_ID, SMTP_*).
+      --all-users     the per-account fan-out the digest/alerts crons use:
+      / --user LABEL  every account that linked Telegram on the Profile page,
+                      messaged at its own chat id in its own language.
+
+    Nothing is computed and no state is written, so it is safe to run against
+    production data (that is the point — it proves the deploy's secrets and
+    the bucket roster, not the analytics).
+    """
+    from stocks.web.i18n import DEFAULT_LANG, translate
+
+    if args.all_users or args.user:
+        from stocks.notify import telegram
+        from stocks.notify.fanout import iter_all_users
+
+        if not telegram.configured():
+            raise SystemExit(
+                "no bot token: set TELEGRAM_BOT_TOKEN (env) or [telegram] "
+                "bot_token (secrets.toml)"
+            )
+        users = iter_all_users()
+        if args.user:
+            users = [u for u in users if u.label == args.user]
+            if not users:
+                have = ", ".join(sorted(u.label for u in iter_all_users()))
+                raise SystemExit(f"unknown user {args.user!r}; have: {have}")
+        linked = [u for u in users if u.prefs.get("telegram_chat_id")]
+        if not linked:
+            print("no Telegram-linked accounts (Profile → Notifications → Connect)")
+            return
+        for user in linked:
+            text = translate("notify.test_message", user.lang)
+            muted = [
+                kind
+                for kind in ("digest", "alerts")
+                if not user.prefs.get(f"notify_{kind}", True)
+            ]
+            note = f" (notify_{'/'.join(muted)} off)" if muted else ""
+            if args.dry_run:
+                print(f"{user.label} -> chat {user.chat_id} [{user.lang}]{note}: {text}")
+                continue
+            try:
+                telegram.send_message(text, user.chat_id, parse_mode=None)
+                print(f"{user.label}: sent{note}")
+            except telegram.TelegramBlocked:
+                print(f"{user.label}: blocked — the user blocked the bot")
+            except Exception as exc:  # noqa: BLE001 — one bad account, not the run
+                print(f"{user.label}: error: {exc}")
+        return
+
+    from stocks.notify.deliver import configured_channels, deliver
+
+    text = translate("notify.test_message", DEFAULT_LANG)
+    print("configured channels: " + ", ".join(configured_channels()))
+    if args.dry_run:
+        print(text)
+        return
+    status = deliver([text], subject="TopStocks test")
+    print("\ndelivery: " + ", ".join(f"{k}={v}" for k, v in status.items()))
+
+
 def cmd_telegram_chat(args: argparse.Namespace) -> None:
     import os
 
@@ -628,8 +695,10 @@ def cmd_tax(args: argparse.Namespace) -> None:
     """Realized-gains summary under one jurisdiction's rules.
 
     The ledger is replayed in the jurisdiction's own currency (EUR for Spain,
-    USD for the US) because the cost basis is a per-transaction conversion,
-    not something you can convert once at the end.
+    USD for the US, CAD for Canada) because the cost basis is a per-transaction
+    conversion, not something you can convert once at the end — and under its
+    own matching rule, since FIFO, LIFO and an averaged cost base give
+    different gains on identical trades.
     """
     from collections import defaultdict
     from datetime import date
@@ -649,6 +718,7 @@ def cmd_tax(args: argparse.Namespace) -> None:
         other_income=args.other_income,
         include_niit=args.niit,
         church_tax_rate=args.church_tax,
+        subnational_rate=args.subnational_rate,
         # Classified from the learned quoteType cache, never a live fetch: the
         # German partial exemption needs to know which holdings are funds.
         fund_tickers=frozenset(
@@ -968,6 +1038,25 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_digest.set_defaults(func=cmd_digest)
 
+    p_ntest = sub.add_parser(
+        "notify-test",
+        help="send a test notification through the real delivery paths",
+    )
+    p_ntest.add_argument(
+        "--all-users", action="store_true",
+        help="cron path: message every Telegram-linked account, in its language",
+    )
+    p_ntest.add_argument(
+        "--user", metavar="LABEL",
+        help="only this account: 'owner' or a data/users/ slug (implies the "
+             "per-account path)",
+    )
+    p_ntest.add_argument(
+        "--dry-run", action="store_true",
+        help="print what would be sent and to whom; send nothing",
+    )
+    p_ntest.set_defaults(func=cmd_notify_test)
+
     p_tg = sub.add_parser(
         "telegram-chat",
         help="answer queued Telegram chat messages (webhook → R2 queue → here)",
@@ -1110,7 +1199,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_tax.add_argument("--year", type=int, required=True, help="fiscal year, e.g. 2025")
     p_tax.add_argument(
         "-j", "--jurisdiction", default=None,
-        help="tax residence: ES, US, UK or DE (see stocks.portfolio.tax)",
+        help="tax residence: ES, US, UK, DE, FR, IT, IE, PT, CA or AU "
+             "(see stocks.portfolio.tax)",
     )
     p_tax.add_argument(
         "--filing-status", default="single",
@@ -1118,7 +1208,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_tax.add_argument(
         "--other-income", type=float, default=0.0,
-        help="US only: other taxable income the gains stack on (after deductions)",
+        help="US/UK/PT/CA/AU: other taxable income the gains stack on "
+             "(after deductions)",
     )
     p_tax.add_argument(
         "--niit", action="store_true",
@@ -1127,6 +1218,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_tax.add_argument(
         "--church-tax", type=float, default=0.0, choices=[0.0, 0.08, 0.09],
         help="DE only: Kirchensteuer as a share of the tax (0.08 or 0.09)",
+    )
+    p_tax.add_argument(
+        "--subnational-rate", type=float, default=0.0,
+        help="CA only: provincial marginal rate as a fraction, e.g. 0.12",
     )
     p_tax.set_defaults(func=cmd_tax)
 
