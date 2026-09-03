@@ -353,3 +353,19 @@ def test_delete_account_refuses_owner_and_guest(monkeypatch, tmp_path):
     stray = type(guest)(**{**guest.__dict__, "root": tmp_path / "elsewhere"})
     with pytest.raises(ValueError):
         auth.delete_account(stray)
+
+
+def test_a_checkout_with_no_secrets_reads_as_signed_out(monkeypatch):
+    """Membership on st.secrets *raises* when there is no secrets file at all
+    — a fresh clone, a CI checkout. is_logged_in is called by every page, so
+    an unguarded read takes the whole app down instead of degrading to the one
+    answer that is true without an IdP configured: nobody is signed in."""
+    import streamlit as st
+    from streamlit.errors import StreamlitSecretNotFoundError
+
+    class NoSecrets:
+        def __contains__(self, key):
+            raise StreamlitSecretNotFoundError("No secrets found.")
+
+    monkeypatch.setattr(st, "secrets", NoSecrets())
+    assert auth.is_logged_in() is False
