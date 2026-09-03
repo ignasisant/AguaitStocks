@@ -75,6 +75,7 @@ DEFAULT_PREFS = {  # language None = auto (browser)
     "tax_filing_status": "single",
     "tax_other_income": 0.0,
     "tax_niit": False,
+    "tax_subnational_rate": 0.0,
 }
 
 STARTER_WATCHLIST = """\
@@ -103,6 +104,7 @@ class UserPaths:
     prefs: Path
     chat: Path
     bank: Path
+    action: Path  # the dashboard's daily AI card (chat/daily.py)
 
 
 def slug(email: str) -> str:
@@ -142,6 +144,7 @@ def paths_for(
             prefs=DATA_DIR / "prefs.json",
             chat=DATA_DIR / "chat.json",
             bank=DATA_DIR / "bank.json",
+            action=DATA_DIR / "daily_action.json",
         )
     d = users_dir / slug(email)
     return UserPaths(
@@ -152,6 +155,7 @@ def paths_for(
         prefs=d / "prefs.json",
         chat=d / "chat.json",
         bank=d / "bank.json",
+        action=d / "daily_action.json",
     )
 
 
@@ -170,12 +174,13 @@ def guest_paths() -> UserPaths:
         prefs=GUEST_DIR / "prefs.json",
         chat=GUEST_DIR / "chat.json",
         bank=GUEST_DIR / "bank.json",
+        action=GUEST_DIR / "daily_action.json",
     )
 
 
 _USER_FILES = (
     "watchlist.yaml", "portfolio.db", "last_import.json", "prefs.json", "chat.json",
-    "bank.json", memory.FILE,
+    "bank.json", "daily_action.json", memory.FILE,
 )
 
 
@@ -244,6 +249,7 @@ def ensure_user_data(paths: UserPaths, legacy_root: Path | None = None) -> bool:
                 paths.prefs,
                 paths.chat,
                 paths.bank,
+                paths.action,
                 memory.path_for(paths.root),
             ),
         )
@@ -540,6 +546,10 @@ def chat_path() -> Path:
     return user_paths().chat
 
 
+def action_path() -> Path:
+    return user_paths().action
+
+
 # ------------------------------------------------------------- preferences
 
 
@@ -554,6 +564,36 @@ def load_prefs(path: Path | None = None) -> dict:
 def save_prefs(prefs: dict, path: Path | None = None) -> None:
     p = path or user_paths().prefs
     p.write_text(json.dumps(prefs, indent=2))
+    _persist(p)
+
+
+# ------------------------------------------------------ daily action card
+
+
+def load_action(path: Path | None = None) -> dict:
+    """The stored daily-action card as a raw dict ({} when there is none).
+
+    Shaped like load_prefs: unreadable or corrupt reads as "nothing stored",
+    which sends the dashboard down the regenerate path instead of an error.
+    """
+    p = path or user_paths().action
+    try:
+        out = json.loads(p.read_text())
+    except (OSError, ValueError, TypeError):
+        return {}
+    return out if isinstance(out, dict) else {}
+
+
+def save_action(card: dict, path: Path | None = None) -> None:
+    """Store today's card, mirrored to the bucket like every other user file.
+
+    Worth the round trip for one small JSON: the card costs an LLM call, and
+    Cloud Run recycles the container on idle — without the mirror every cold
+    start would spend another unit of the free allowance on a card the account
+    already has.
+    """
+    p = path or user_paths().action
+    p.write_text(json.dumps(card, indent=2))
     _persist(p)
 
 

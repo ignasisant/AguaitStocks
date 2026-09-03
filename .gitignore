@@ -49,6 +49,7 @@ wheels/
 /data/users/
 /data/prefs.json
 /data/chat.json
+/data/daily_action.json
 /data/chat_memory.db
 /data/tg_updates/
 

@@ -1,12 +1,13 @@
 """Home page — the daily glance: what's new plus the key portfolio metrics.
 
-The Portfolio page's headline metrics (cost basis, market value, unrealised &
-realised P/L, then today / 1 week / 1 month deltas) with a range-selectable
-value-vs-injected sparkline and
-today's movers, then "What's new" cards (watchlist big moves, earnings,
-recent transactions, 52-week extremes), then the watchlist groups collapsed
-into expanders. Every ticker cell links to the Ticker page; the full ledger
-analytics stay on Portfolio.
+The AI "Daily action" card opens the page — one briefing a day on what to look
+at, see web/daily_ui.py. Then the Portfolio page's headline metrics (cost
+basis, market value, unrealised & realised P/L, then today / 1 week / 1 month
+deltas) with a range-selectable value-vs-injected sparkline and today's movers,
+then "What's new" cards (watchlist big moves, earnings, recent transactions,
+52-week extremes), then the watchlist groups collapsed into expanders. Every
+ticker cell links to the Ticker page; the full ledger analytics stay on
+Portfolio.
 """
 
 from __future__ import annotations
@@ -32,7 +33,7 @@ from stocks.data.crypto import is_crypto
 from stocks.data.earnings import calendar_events
 from stocks.data.funds import is_fund
 from stocks.portfolio.ledger import all_transactions
-from stocks.web import auth, notices, onboarding, skeletons
+from stocks.web import auth, daily_ui, notices, onboarding, skeletons
 from stocks.web.earnings_ui import calendar_component, render_result_body
 from stocks.web.i18n import t as tr
 from stocks.web.portfolio_data import (
@@ -201,6 +202,23 @@ def _setup_card() -> None:
 _first_run_banner()
 _setup_card()
 
+_daily_slot = None  # the daily action card's place, reserved just below
+
+# --------------------------------------------------------------- daily action
+# The assistant's one-a-day briefing, first thing on the page: it is the
+# "what should I look at today" the rest of the dashboard then backs up with
+# numbers. Only the slot is reserved here — the card is filled at the bottom
+# of the script (deferred-slot pattern), because generating one waits on a
+# provider and the figures it talks about (positions, basket history, the
+# earnings pass, the 52-week scan) are not loaded yet. The shimmer holds the
+# card's place meanwhile, so nothing below it jumps when it lands.
+#
+# Signed-in only: the card is stored per account and guests share a read-only
+# data dir. An account with neither positions nor a watchlist has nothing to
+# brief on — the fill at the bottom clears the slot for it.
+if auth.is_logged_in():
+    _daily_slot = skeletons.reserve("text", border=True, title=True, lines=4)
+
 # ---------------------------------------------------------- portfolio glance
 # Daily-glance cut of the Portfolio page: value / today / unrealised P/L plus
 # a range-selectable sparkline, then today's top movers. The full table, risk,
@@ -238,15 +256,20 @@ MOVER_LABELS = {
 
 txs: list = []
 positions: list = []  # guests hold nothing; the refresh button below checks it
+realized: list = []  # matched sales; the daily card's harvest action reads them
 held_moves: dict[str, float] = {}  # {ticker: day_pct}, feeds the Big-moves card
 _spark_slot = None  # reserved in the glance row, filled at the bottom
+# What the daily action card reads: the same frames and the same "today"
+# figure the KPI tiles show, so the briefing can never quote a different
+# number from the tiles above it. Filled in the glance below; the card's slot
+# itself was reserved before this section, at the top of the page.
+_daily_tbl = _daily_hist = _daily_day = None
 if auth.is_logged_in():
     DB = str(auth.db_path())
     # The account's reporting currency: the ledger is replayed in it, so it
     # keys every cached loader below (see web/portfolio_data.py).
     REPORT_CCY = auth.reporting_currency()
     REPORT_SYM = auth.CURRENCY_SYMBOL[REPORT_CCY]
-    realized: list = []
     try:
         txs, positions, realized = ledger_state(DB, db_mtime(DB), REPORT_CCY)
     except (YFRateLimitError, URLError) as exc:
@@ -292,6 +315,7 @@ if auth.is_logged_in():
                 # basket_change(empty, …) is None, so the 1w/1m deltas below
                 # degrade to their "n/a" cells instead of crashing the card.
                 hist = pd.DataFrame()
+            _daily_tbl, _daily_hist = tbl, hist
             gain_pct = (value / cost - 1) if cost else None
             realized_gain = sum(s.gain for s in realized)
             realized_cost = sum(s.cost for s in realized)
@@ -363,6 +387,9 @@ if auth.is_logged_in():
                     d_base = tbl["day"].dropna().sum()
                     base = value - d_base
                     today_closed = (d_base, d_base / base if base else 0.0)
+                # Same resolution as the "Today" tile below (live basket, or
+                # the off-session override) — the daily card quotes this one.
+                _daily_day = today_closed or basket_change(hist, 1)
                 delta_tiles = []
                 for label, days in (
                     (tr("home.today"), 1),
@@ -973,6 +1000,7 @@ _earn_tickers = tuple(
     )
 )
 
+_events = _results = None  # also read by the daily action fill at the bottom
 if not _earn_tickers:
     # Nothing to fetch (no stocks held or starred) — the card never comes,
     # so retire its placeholder instead of shimmering forever.
@@ -1042,6 +1070,7 @@ else:
 # no meaningful 52-week narrative here and are skipped.
 _xt_tickers = tuple(sorted(t for t in _held | set(favs) if not is_crypto(t)))
 
+_extremes = None  # also read by the daily action fill at the bottom
 if not _xt_tickers:
     _xt_slot.clear()  # nothing to scan — retire the placeholder
 else:
@@ -1093,3 +1122,30 @@ else:
             )
         else:
             st.caption(tr("home.no_extremes"))
+
+
+# --------------------------------------------- daily action card (slot fill)
+# Last block on the page: everything above is painted, and the card's inputs
+# (positions, basket history, the earnings pass, the 52-week scan) are all
+# resolved. A stored card for today renders straight from disk; only the
+# first visit after 09:00 pays for a generation, and a failed one still
+# fills the slot with the computed briefing.
+if _daily_slot is not None and not (positions or holdings):
+    _daily_slot.clear()  # brand-new account: nothing to brief on yet
+elif _daily_slot is not None:
+    daily_ui.render(
+        _daily_slot,
+        tbl=_daily_tbl,
+        hist=_daily_hist,
+        currency=REPORT_CCY,
+        day_change=_daily_day,
+        earnings=_events or (),
+        extremes=_extremes or (),
+        # The user's own alerts live on the watchlist entries, and `closes`
+        # (native, already fetched for the watchlist tables) is what a price
+        # threshold gets compared against. `realized` carries this tax year's
+        # booked gains, which is what turns an open loss into a harvest action.
+        holdings=holdings,
+        closes=closes,
+        realized=realized,
+    )
