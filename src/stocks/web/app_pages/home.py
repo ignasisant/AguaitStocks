@@ -32,7 +32,7 @@ from stocks.data.crypto import is_crypto
 from stocks.data.earnings import calendar_events
 from stocks.data.funds import is_fund
 from stocks.portfolio.ledger import all_transactions
-from stocks.web import auth, notices, skeletons
+from stocks.web import auth, notices, onboarding, skeletons
 from stocks.web.earnings_ui import calendar_component, render_result_body
 from stocks.web.i18n import t as tr
 from stocks.web.portfolio_data import (
@@ -118,20 +118,13 @@ def _setup_card() -> None:
     activation entry point; once everything is active the card offers a
     one-time dismiss persisted in prefs.json.
     """
-    signed_in = auth.is_logged_in()
     prefs = auth.load_prefs()
-    imported = False
-    if signed_in:
-        try:
-            imported = bool(all_transactions(auth.db_path()))
-        except Exception:
-            pass  # unreadable/missing ledger reads as "not imported yet"
-    # "Connected" = a provider key saved to prefs (encrypted, chat_core) or
-    # entered this session; the keyless TopStocks free chain doesn't count.
-    has_ai_key = any(k.endswith("_key_enc") for k in prefs) or any(
-        k.startswith("llm_key::") and st.session_state[k] for k in st.session_state
-    )
-    tg_linked = bool(prefs.get("telegram_chat_id"))
+    # One detector for the whole app: the guided tour badges the same four
+    # capabilities on its own steps, and the two used to work them out
+    # separately and could disagree. See stocks.web.onboarding.setup_state.
+    state = onboarding.setup_state(prefs)
+    signed_in, imported = state["login"], state["import"]
+    has_ai_key, tg_linked = state["ai"], state["telegram"]
 
     states = (signed_in, imported, has_ai_key, tg_linked)
     done = sum(states)
@@ -189,6 +182,13 @@ def _setup_card() -> None:
             # Land on the Notifications tab, where the linking flow lives.
             st.session_state["profile_tab"] = "notify"
             st.switch_page("app_pages/profile.py")
+
+        # The tour explains all four of these plus every other feature, so the
+        # card that lists them is the obvious way into it.
+        onboarding.render_launcher(
+            "setup_card_tour", row, button_type="tertiary",
+            label=f":material/menu_book: {tr('tour.launch')}",
+        )
 
         if done == len(states):
             if row.button(f":material/close: {tr('home.dismiss')}",

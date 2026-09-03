@@ -65,8 +65,11 @@ wheels/
 /deploy/.env
 /deploy/secrets.toml
 
-# Agent tooling: local symlinks into .venv (per-machine, not for the repo)
-/.claude/
+# Agent tooling. Only the per-machine bits: the streamlit skill under
+# .claude/skills/ is a symlink into .venv and settings.local.json is personal,
+# but the project's own skills there are versioned like any other repo tooling.
+/.claude/settings.local.json
+/.claude/skills/developing-with-streamlit
 /.agents/
 .notify_secrets.env
 /data/feedback/

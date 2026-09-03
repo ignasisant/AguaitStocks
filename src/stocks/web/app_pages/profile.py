@@ -14,7 +14,7 @@ from stocks import storage
 from stocks.config import load_watchlist
 from stocks.portfolio import tax
 from stocks.portfolio.tax import de as tax_de
-from stocks.web import auth, i18n, tax_ui, widgets
+from stocks.web import auth, i18n, onboarding, tax_ui, widgets
 from stocks.web.i18n import t as tr
 
 # Account identity, prefs and the watchlist editor are all per-account.
@@ -204,6 +204,16 @@ with tab_prefs:
             prefs[tax_ui.PREF_NIIT] = niit
             auth.save_prefs(prefs)
         st.caption(tr("profile.tax_niit_caption"))
+
+    # ------------------------------------------------------------- the tour
+    # Where a returning user goes looking for the walkthrough, and the only
+    # entry point left once an account has finished it: after that the tour
+    # only ever auto-opens for a release the account hasn't seen yet (see
+    # stocks.web.onboarding.maybe_open).
+    st.space("large")
+    st.subheader(tr("tour.launch"))
+    st.caption(tr("tour.launch_caption"))
+    onboarding.render_launcher("profile_tour")
 
     # ------------------------------------------------------------ danger zone
     # The deletion path the privacy policy promises. Owner account never gets
