@@ -200,7 +200,12 @@ def _positions_section() -> None:
             # Home glance): value and its chip on one line, help as a "?" pill.
             st.html(kpi_grid_html([
                 (tr("portfolio.cost_basis"), f"{sym}{cost:,.0f}", None, None),
-                (tr("portfolio.market_value"), f"{sym}{value:,.0f}", None, None),
+                (
+                    tr("portfolio.market_value"),
+                    f"{sym}{value:,.0f}",
+                    kpi_delta_chip(value / cost - 1 if cost else None),
+                    None,
+                ),
                 (
                     tr("portfolio.unrealised_pl"),
                     f"{sym}{value - cost:+,.0f}",

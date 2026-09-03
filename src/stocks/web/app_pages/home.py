@@ -347,14 +347,14 @@ if auth.is_logged_in():
                 # Balance row — the same four headline figures as the Portfolio
                 # page, as kpi_grid_html tiles so the glance reads like the
                 # Ticker fundamentals card: value and its chip on one line.
-                # Market value stays chip-free (its % return already shows on
-                # Unrealised P/L; printing it twice reads as two numbers).
+                # Market value carries the same total-return chip as Unrealised
+                # P/L: the % belongs beside the figure it is measured against.
                 kcol.html(kpi_grid_html([
                     (tr("home.cost_basis"), f"{sym}{cost:,.0f}", None, None),
                     (
                         tr("home.market_value"),
                         f"{sym}{value:,.0f}",
-                        None,
+                        kpi_delta_chip(gain_pct),
                         None,
                     ),
                     (
