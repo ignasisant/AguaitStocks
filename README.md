@@ -205,6 +205,42 @@ What the model sees on each turn (assembled in
 Only the signed-in account's own data is read (`auth.db_path` /
 `auth.watchlist_path`); nothing crosses between users.
 
+### Daily action card (dashboard)
+
+The dashboard opens with **Daily action** — two or three things to *decide or
+check today*, each with the trigger that raised it. Not a summary of the day:
+the figures are already on the tiles below it.
+
+The triggers are computed, never invented
+([`chat/signals.py`](src/stocks/chat/signals.py)); the model only chooses which
+matter most and phrases them:
+
+| Trigger | Raised when |
+| --- | --- |
+| `alert_hit` / `alert_near` | a price alert **you** set on a watchlist entry fired, or sits within 3% of firing — the closest thing to a stated exit/entry rule |
+| `harvest` | an open loss ≥150 against gains **already realised this tax year**, with the jurisdiction's repurchase window (ES two months, US/CA 30 days, IE 28) attached |
+| `earnings` | a held name reports inside 5 days — a date to decide before |
+| `drawdown` | a position 25%+ under its cost: re-read the thesis, not a sell call |
+| `concentration` | one name past 30% of the book |
+| `low_52w` | a watchlist name (not held) within 3% of its 52-week low |
+
+- **One briefing a day.** It turns over at 09:00 in your own timezone
+  ([`chat/daily.py`](src/stocks/chat/daily.py) `action_day`); before that the
+  previous day's card stands, stamped with its date. The card is stored per
+  account (`daily_action.json`, mirrored to the bucket like every other user
+  file), so reruns, reloads and container restarts re-read it instead of
+  spending another model call.
+- **Free-tier friendly.** Generation goes through the same BYOK → free chain as
+  the chat and spends one unit of the account's daily allowance, at most once a
+  day. It costs no fetch of its own — every input is a frame the dashboard had
+  already loaded.
+- **Never a blank card.** No key, allowance spent, provider down — the same
+  triggers are rendered without a model, so what degrades is the ordering and
+  the phrasing, not the substance. Nothing triggered says exactly that.
+- **Analysis, not directives.** The prompt forbids invented triggers and
+  buy/sell/hold calls; a harvest line states the tax arithmetic and its
+  repurchase rule, it does not tell you to sell.
+
 ### Bring your own key (multi-provider)
 
 The assistant is **BYOK** — you supply your own API key and pay your own
@@ -390,20 +426,31 @@ computed in it rather than converted at the end (`positions.build(base=…)`,
 takes `-c/--currency` on the money commands. The **Realized & tax** tab is the
 exception — it follows the tax residence, which is a legal fact, not a taste.
 
-Tax is per **jurisdiction** (`src/stocks/portfolio/tax/`): Spain (IRPF), the
-United States (federal capital gains), the United Kingdom (CGT) and Germany
-(Abgeltungsteuer) ship today. A jurisdiction also owns two things beyond its
-rates: the **share-matching rule** the replay uses (`positions.build(matching=…)`
-— FIFO, or the UK's s.104 pool) and the **tax-year boundary** (6 April in the
-UK, 1 January elsewhere), so the year selector and the period filter follow the
-country rather than the calendar. Pick yours on the Profile
-page — *Tax residence*, defaulting to your browser's region and falling back to
-Spain — or pass `-j ES|US` to `stocks tax`. The choice sets the rules, the
-reporting currency and the wording: the ledger is replayed **at** that currency
-(EUR at the ECB rate of each transaction date for Spain, USD at that date's
-rate for the US), because a cost basis is a per-transaction conversion and not
-something you can convert once at the end. Adding a country means one module
-plus its `portfolio.<code>_*` catalog keys — no page edits.
+Tax is per **jurisdiction** (`src/stocks/portfolio/tax/`). Ten ship today:
+Spain (IRPF), the United States (federal capital gains), the United Kingdom
+(CGT), Germany (Abgeltungsteuer), France (PFU), Italy (imposta sostitutiva),
+Ireland (CGT + fund exit tax), Portugal (IRS), Canada (CRA) and Australia
+(ATO). A jurisdiction also owns two things beyond its rates:
+
+- the **share-matching rule** the replay uses (`positions.build(matching=…)`) —
+  `fifo` (ES, US, DE, IE, PT, AU), `lifo` (IT), `average` for a moving
+  weighted-average cost base (FR's prix moyen pondéré, CA's ACB), or `s104` for
+  the UK's same-day → 30-day → pool identification. The same trades give
+  different gains under each, which is why this is not a display choice;
+- the **tax-year boundary** — 6 April in the UK, 1 July in Australia, 1 January
+  elsewhere — so the year selector, the period filter and the year label
+  ("2025", "2025/26", "2025-26") follow the country rather than the calendar.
+
+Pick yours on the Profile page — *Tax residence*, defaulting to your browser's
+region and falling back to Spain — or pass `-j ES|US|UK|DE|FR|IT|IE|PT|CA|AU`
+to `stocks tax`. The choice sets the rules, the reporting currency and the
+wording: the ledger is replayed **at** that currency (EUR at the ECB rate of
+each transaction date for Spain, USD at that date's rate for the US, CAD for
+Canada), because a cost basis is a per-transaction conversion and not something
+you can convert once at the end. Jurisdictions that read your other income or a
+sub-national rate ask for it on the Profile page, and only there — an ES
+account never sees a bracket input. Adding a country means one module plus its
+`portfolio.<code>_*` catalog keys — no page edits.
 
 The marketing landing argues one country's case per page, so it ships four
 URLs: `/` (English, US rules), `/es/` (Spanish, Spain), `/en-es/` (English,
@@ -478,6 +525,90 @@ in-page toggles switch one axis at a time.
   statistical reporting. No Vorabpauschale and no Günstigerprüfung — both are
   stated in the tab rather than silently skipped.
 
+### France (PFU)
+
+- **Prix moyen pondéré** (CGI art. 150-0 D, 3): identical securities are one
+  holding at one weighted-average cost, recomputed on every purchase — so no
+  parcel carries an individual purchase price, and the Realized table says
+  "Average cost" rather than implying a lot.
+- **Flat 30%**, shown as its two halves because they are assessed separately:
+  12.8% income tax and 17.2% prélèvements sociaux (CSG/CRDS/solidarité).
+- **No allowance**; losses carry forward 10 years against gains of the same
+  nature only.
+- **Formulaire 3916 flag**: a foreign account is declarable whatever it holds,
+  so this one has no threshold to cross. No barème option, no CEHR, no PEA —
+  all stated in the tab.
+
+### Italy (imposta sostitutiva)
+
+- **LIFO** (art. 67 c. 1-bis TUIR): the shares sold are the most recently
+  bought ones, which in a rising market books a *smaller* gain than FIFO on
+  identical trades.
+- **Flat 26%** on the year's saldo; losses carry forward four years and then
+  expire.
+- **Quadro RW / IVAFE flag**: securities abroad go in RW at any value (the
+  €15,000 exemption is for bank accounts), and IVAFE takes 0.2% of that value
+  a year on top of the tax on gains.
+- The figures are the *regime dichiarativo* view; in regime amministrato the
+  broker withholds and nets your losses, which the tab says.
+
+### Ireland (CGT + fund exit tax)
+
+- **33% CGT** after the **€1,270 personal exemption** — which cannot be carried
+  forward or transferred, so the tab reports how much of it a loss-making year
+  wasted.
+- **Four-week rule** (s.581 TCA 1997): a loss on shares reacquired in the four
+  weeks *after* the disposal is restricted until those shares are themselves
+  sold. Forward-only, unlike Spain's two months or the US 30 days either side.
+- **Funds are another regime**: Irish/EU-domiciled UCITS pay **41% exit tax**,
+  outside the exemption, and a loss on them relieves nothing at all. Applied to
+  the holdings classified as funds; the eight-year deemed disposal and the
+  domicile test are not modelled and the tab says so.
+- **15 December**: CGT on disposals from 1 January to 30 November is payable in
+  the same year — a period note, since it is the rule people miss.
+
+### Portugal (IRS)
+
+- **Flat 28%** on the year's saldo between mais-valias and menos-valias, FIFO
+  matching, no allowance.
+- **Mandatory aggregation** of gains on securities held **under 365 days** once
+  your taxable income reaches the top IRS bracket (€83,696 for 2025): that part
+  is englobado at the marginal rate instead. Below the line it stays at 28%,
+  and the tab says where the line is.
+- **Losses** carry forward five years — but only if you opt for englobamento in
+  the year of the loss, which the tab states rather than assuming.
+- **Anexo J flag**: gains at a foreign broker are declarable operation by
+  operation, at any amount. No solidarity surcharge, no NHR regime.
+
+### Canada (CRA)
+
+- **Adjusted cost base** (ITA s.47): one average per security, so a Canadian
+  basis is never a specific lot's price.
+- **50% inclusion rate** — half the net gain is taxable income (the 2024
+  two-thirds proposal was cancelled in March 2025) — taxed at the federal
+  brackets stacked on your other income, plus a flat **provincial rate** you
+  set in Profile. Provincial tax is roughly half the bill, so a federal-only
+  estimate says so instead of pretending to be the answer.
+- **Superficial loss** (s.40(2)(g)(i)): denied when the same security is bought
+  within 30 days either side, and restored as the replacement shares are sold
+  (the ACB bump, arrived at the same way the US wash sale is).
+- **T1135 flag** at CAD 100,000 — measured on *cost* in the real rule, on
+  market value here, and a foreign share in a Canadian account still counts.
+
+### Australia (ATO)
+
+- **Income year 1 July – 30 June**: a March disposal belongs to the year that
+  opened the previous July, and the selector reads "2025-26".
+- **50% CGT discount** past 12 months of holding — and the 12 months excludes
+  both the acquisition and the disposal day, so selling on the anniversary
+  loses all of it.
+- **Order of operations**: capital losses come off the *gross* gains before the
+  discount, and are applied to the non-discounted gains first, which is the
+  taxpayer's choice and always the better one.
+- **Marginal rates** plus the 2% Medicare levy; losses carry forward
+  indefinitely against capital gains only. No parcel selection (FIFO), no levy
+  surcharge, nothing about super.
+
 - **Custody per broker**: each row's import note says where the shares are, so
   the Positions table names the broker behind every holding (a split holding as
   "Revolut 67% · ClickTrade 33%"), the Ticker header shows each custodian's
@@ -485,10 +616,11 @@ in-page toggles switch one axis at a time.
   broker donut whenever the book spans more than one. Tax stays FIFO across
   brokers.
 
-Planning aid, not tax advice. All tax/FIFO logic is pure and unit-tested
-(`tests/test_ledger.py`, `tests/test_positions_s104.py`, `tests/test_tax_es.py`,
-`tests/test_tax_us.py`, `tests/test_tax_uk.py`, `tests/test_tax_de.py`,
-`tests/test_portfolio_tax_tab.py`); FX is injectable so tests run offline.
+Planning aid, not tax advice. All tax and matching logic is pure and
+unit-tested (`tests/test_ledger.py`, `tests/test_positions_s104.py`,
+`tests/test_positions_average.py`, then `test_tax_es | us | uk | de | fr | it |
+ie | pt | ca | au.py`, plus `tests/test_portfolio_tax_tab.py` rendering the tab
+once per jurisdiction); FX is injectable so tests run offline.
 
 ## Layout
 
@@ -501,18 +633,25 @@ src/stocks/
   data/fx.py           ECB FX (frankfurter.dev): spot + cached historical
   data/earnings.py     upcoming earnings dates (yfinance) + look-ahead window
   portfolio/ledger.py       SQLite transaction ledger (+ CSV import)
-  portfolio/positions.py    share matching (FIFO / UK s.104 pool) -> positions
+  portfolio/positions.py    share matching (fifo/lifo/average/s104) -> positions
   portfolio/tax/base.py     jurisdiction scaffolding (brackets, repurchase rules)
   portfolio/tax/es.py       Spanish IRPF savings base, 2-month rule, 720 flag
   portfolio/tax/us.py       US federal capital gains, wash sale, FBAR/8938 flags
   portfolio/tax/uk.py       UK CGT, 6 April year, AEA, 18/24% band stacking
   portfolio/tax/de.py       German Abgeltungsteuer, loss circles, Teilfreistellung
+  portfolio/tax/fr.py       French PFU 12.8+17.2%, prix moyen pondéré, 3916 flag
+  portfolio/tax/it.py       Italian 26% substitute tax, LIFO, quadro RW/IVAFE
+  portfolio/tax/ie.py       Irish CGT 33%, four-week rule, 41% fund exit tax
+  portfolio/tax/pt.py       Portuguese 28%, under-365-day aggregation, anexo J
+  portfolio/tax/ca.py       Canadian ACB, 50% inclusion, superficial loss, T1135
+  portfolio/tax/au.py       Australian CGT discount, 1 July year, Medicare levy
   portfolio/dividends.py    dividend income + foreign withholding (EUR)
   analysis/indicators  SMA, EMA, RSI, returns
   analysis/fundamentals.py  KPI computation + KPI_SOURCES source-of-truth map
   analysis/portfolio.py     allocation, concentration, vol/beta/drawdown, corr
   analysis/screener.py      cross-sectional KPI rank/filter over the watchlist
   notify/alerts.py     evaluate alerts vs price history (price/RSI/drawdown/cross/52w)
+  notify/narrative.py  optional LLM lines for the crons (digest highlight, alert note)
   notify/deliver.py    push alerts to Telegram / email (env-gated, console fallback)
   web/server.py        ASGI entry point: static landing at / + the app behind it
   web/app.py           Streamlit app (st.navigation + page config/CSS + global ticker picker)
@@ -765,12 +904,24 @@ chat with the app's AI assistant — delivered by one shared Telegram bot
 - **Daily digest** (weekday evenings, after the US close): portfolio value,
   day/week change, top movers, earnings in the next 7 days, and an optional
   1-2 sentence LLM highlight — written with the user's own saved (BYOK) chat
-  key when present, falling back to the `[free_llm]` chain, else omitted.
+  key when present, falling back to the `[free_llm]` chain, else omitted. The
+  last few delivered highlights are kept in `alerts_state.json` and shown to
+  the model so it doesn't rewrite yesterday's sentence; a reply that echoes
+  one anyway is dropped rather than re-rolled.
 - **Price alerts** (hourly on market days): the per-holding rules from the
   watchlist (`above`/`below`/`pct_move`/`drawdown`/RSI/SMA/52w), editable in
   the app from the ticker page's *Alerts* popover. A rule messages once when
   it fires, then stays quiet until it clears or 24h pass
-  (`data/.../alerts_state.json`).
+  (`data/.../alerts_state.json`). When something is actually going out, one
+  LLM call adds a 1-2 sentence note on what the fired rules have in common —
+  same provider resolution as the digest, and never advice to buy or sell.
+
+Both lines are optional by construction: no key, an empty free pot, an error
+or a 45 s timeout just ships the computed message. Free-chain calls made by
+these crons are charged to the process-wide daily pot
+(`FREE_LLM_GLOBAL_DAILY_CAP`), never to the account's own counter — the jobs
+never write `prefs.json`, and the shared keys are the operator's cost to bound.
+BYOK calls are the user's own billing and are not charged at all.
 
 - **Assistant chat**: message the bot and the app's chat assistant answers —
   same persona (investor profile), live portfolio snapshot, analysis skills,
@@ -806,9 +957,26 @@ Setup (one-time):
    `uv run stocks telegram-chat --delete-webhook` (restores `getUpdates`
    polling).
 5. Reboot the Streamlit app, link your account on the Profile page, then
-   Actions → notifications → Run workflow → digest to confirm delivery.
-   (Local smoke tests: `uv run stocks digest --dry-run`,
-   `uv run stocks telegram-chat --ask "how is my book?" --user owner`.)
+   Actions → notifications → Run workflow → **test** to confirm delivery
+   (see below).
+
+Testing delivery, cheapest first:
+
+- **In the app**: Profile → Notifications → *Send test message* — one message
+  to the logged-in account, straight from the Streamlit deploy's
+  `[telegram] bot_token`.
+- **Locally**: `uv run stocks notify-test` sends through the env-configured
+  channels (`TELEGRAM_CHAT_ID`, `SMTP_*`) — the same path as
+  `alerts --deliver`; `uv run stocks notify-test --all-users` walks the
+  per-account fan-out the crons use (add `--user owner` for one account,
+  `--dry-run` to list recipients without sending).
+- **On the real runner**: Actions → notifications → Run workflow → job
+  `test`, optionally with `user` and `dry_run`. This is the only check that
+  exercises the Actions secrets and the bucket roster together, so run it
+  after any secret rotation.
+
+Other local smoke tests: `uv run stocks digest --dry-run`,
+`uv run stocks telegram-chat --ask "how is my book?" --user owner`.
 
 ## Roadmap
 
