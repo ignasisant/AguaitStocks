@@ -113,7 +113,9 @@ def _has_ai_key(prefs: dict) -> bool:
 
 def _has_bank(_prefs: dict) -> bool:
     try:
-        from stocks.bank import store
+        # stocks.bank ships separately from the tour (see _bank_available),
+        # so a checkout without the feature has no module to resolve.
+        from stocks.bank import store  # ty: ignore[unresolved-import]
 
         return bool(store.connections(auth.user_paths().bank))
     except Exception:
@@ -126,10 +128,11 @@ def _bank_available() -> bool:
     Imported lazily and defensively: bank_ui reaches into st.secrets and the
     Enable Banking client, this module is imported by app.py before either is
     needed, and a deploy built without the bank feature must still get a tour
-    rather than an ImportError.
+    rather than an ImportError. A checkout without the feature is the normal
+    case — hence the suppression, not a missing dependency.
     """
     try:
-        from stocks.web import bank_ui
+        from stocks.web import bank_ui  # ty: ignore[unresolved-import]
     except ImportError:
         return False
     return bank_ui.available()
