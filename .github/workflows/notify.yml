@@ -61,8 +61,8 @@ jobs:
       FREE_LLM_CEREBRAS: ${{ secrets.FREE_LLM_CEREBRAS }}
       FREE_LLM_OPENROUTER: ${{ secrets.FREE_LLM_OPENROUTER }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v5
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v7
       - run: uv sync --frozen --no-dev
       - run: uv run stocks digest --all-users
 
@@ -71,8 +71,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v5
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v7
       - run: uv sync --frozen --no-dev
       - run: uv run stocks alerts --all-users
 
@@ -84,8 +84,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v5
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v7
       - run: uv sync --frozen --no-dev
       - run: >
           uv run stocks notify-test --all-users
