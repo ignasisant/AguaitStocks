@@ -40,12 +40,13 @@ from stocks.portfolio.tax.base import (
     ReportingFlag,
     TaxPeriod,
     TaxSettings,
-    covers,
     days_window,
     flag,
+    open_period,
     progressive_tax,
     recovered_losses,
     replacement_dates,
+    sales_in,
 )
 
 CODE = "CA"
@@ -166,16 +167,8 @@ def fiscal_period(
     taxable base — the losses net over the whole year.
     """
     cfg = settings or TaxSettings()
-    out = CaTaxPeriod(
-        jurisdiction=CODE,
-        currency=CURRENCY,
-        year=int(period[:4]),
-        period=period,
-        settings=cfg,
-    )
-    for s in realized:
-        if not covers(period, s.sell_date, YEAR_START):
-            continue
+    out = open_period(CaTaxPeriod, CODE, CURRENCY, period, settings=cfg)
+    for s in sales_in(period, realized, YEAR_START):
         out.sales.append(s)
         if s.gain >= 0:
             out.realized_gain += s.gain

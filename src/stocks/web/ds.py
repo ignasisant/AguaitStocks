@@ -57,6 +57,10 @@ SURFACE_PAGE = "#18161C"    # neutral-950 — page and sidebar background
 SURFACE_CARD = "#28262D"    # neutral-900 — elevated surface (cards, inputs)
 SURFACE_HOVER = "#333139"   # DS hover step — nav rows, table rows, list buttons
 BORDER = "#3B3942"          # neutral-800 — borders, dividers, table rules
+RULE_PANEL = "#232128"      # hairline one step under BORDER — the assistant
+                            # drawer's internal dividers (header rows, the
+                            # onboarding list's rules, the composer's edge),
+                            # where a full BORDER reads as a box seam
 BORDER_FOCUS = "#48454F"    # DS focus/hover border — outlined controls on hover
 TEXT_PRIMARY = "#F9F9FA"    # neutral-50 — primary text (also the logo plate)
 TEXT_SECONDARY = "#B3AFBD"  # neutral-400 — widget labels, secondary body
@@ -233,6 +237,7 @@ def ds_vars_css() -> str:
         "surface-page": SURFACE_PAGE, "surface-card": SURFACE_CARD,
         "surface-hover": SURFACE_HOVER,
         "border": BORDER, "border-focus": BORDER_FOCUS,
+        "rule-panel": RULE_PANEL,
         "text-primary": TEXT_PRIMARY,
         "text-secondary": TEXT_SECONDARY, "text-muted": TEXT_MUTED,
         "text-faint": TEXT_FAINT,
@@ -285,14 +290,17 @@ HOVER_FONT_MOBILE = 11
 # Axis tick labels shrink too: at Plotly's default 12px the y-axis gutter eats
 # ~40px of a ~390px screen; the DS mobile chart spec reads axes at 9px.
 TICK_FONT_MOBILE = 9
+# Split out so the mobile override below can respread it: inside HOVERLABEL
+# the nested dict is just one more value of a mixed-type mapping.
+HOVER_FONT = dict(
+    family="'Instrument Sans', sans-serif",
+    size=HOVER_FONT_DESKTOP,
+    color=TEXT_PRIMARY,             # neutral-50 — primary text
+)
 HOVERLABEL = dict(
     bgcolor=SURFACE_PAGE,           # neutral-950 — DS chart-tooltip surface
     bordercolor=BORDER,             # neutral-800 — DS border
-    font=dict(
-        family="'Instrument Sans', sans-serif",
-        size=HOVER_FONT_DESKTOP,
-        color=TEXT_PRIMARY,         # neutral-50 — primary text
-    ),
+    font=HOVER_FONT,
     namelength=-1,
     align="left",
 )
@@ -353,7 +361,7 @@ def show_chart(fig, *, key: str | None = None, container=None) -> None:
     # Shrink the type on mobile so the box fits; desktop keeps the roomier 15px.
     # (Composite lines are also stacked via hover_wrap at the trace level.)
     hoverlabel = (
-        {**HOVERLABEL, "font": {**HOVERLABEL["font"], "size": HOVER_FONT_MOBILE}}
+        {**HOVERLABEL, "font": {**HOVER_FONT, "size": HOVER_FONT_MOBILE}}
         if mobile
         else HOVERLABEL
     )

@@ -39,7 +39,8 @@ from stocks.portfolio.tax.base import (
     ReportingFlag,
     TaxPeriod,
     TaxSettings,
-    covers,
+    open_period,
+    sales_in,
 )
 
 CODE = "UK"
@@ -190,16 +191,8 @@ def fiscal_period(
     cost already reflects it.
     """
     cfg = settings or TaxSettings()
-    out = UkTaxPeriod(
-        jurisdiction=CODE,
-        currency=CURRENCY,
-        year=int(period[:4]),
-        period=period,
-        settings=cfg,
-    )
-    for s in realized:
-        if not covers(period, s.sell_date, YEAR_START):
-            continue
+    out = open_period(UkTaxPeriod, CODE, CURRENCY, period, settings=cfg)
+    for s in sales_in(period, realized, YEAR_START):
         out.sales.append(s)
         out.proceeds_total += s.proceeds
         if s.gain >= 0:

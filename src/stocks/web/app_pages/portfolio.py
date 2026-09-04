@@ -16,6 +16,7 @@ from __future__ import annotations
 import math
 from collections import defaultdict
 from datetime import date
+from typing import cast
 from urllib.error import URLError
 
 import pandas as pd
@@ -42,9 +43,10 @@ from stocks.analysis.portfolio import (
     us_extended_session,
     us_market_open,
 )
-from stocks.portfolio import custody, dividends, fees
+from stocks.config import currency_symbol
+from stocks.portfolio import custody, demo, dividends, fees
 from stocks.portfolio.tax import month_range
-from stocks.web import auth, notices, skeletons, tax_ui
+from stocks.web import auth, empty, notices, skeletons, tax_ui, yfit_slot
 from stocks.web.i18n import t as tr
 from stocks.web.portfolio_data import (
     basket_history,
@@ -106,12 +108,54 @@ DB = str(auth.db_path())
 # rather than converting their output afterwards. REPORT_SYM prefixes the
 # figures that are rendered as strings.
 REPORT_CCY = auth.reporting_currency()
-REPORT_SYM = auth.CURRENCY_SYMBOL[REPORT_CCY]
+REPORT_SYM = currency_symbol(REPORT_CCY)
+
+
+def _demo_offer() -> None:
+    """The quieter second answer under the empty card: fill the ledger with a
+    fabricated book so every tab on this page can be looked at before anything
+    real is handed over. Marked as demo in the ledger, wiped by the first real
+    import (stocks.portfolio.demo)."""
+    st.caption(tr("portfolio.demo_offer_caption"))
+    if st.button(
+        tr("portfolio.demo_offer_button"),
+        key="portfolio_demo_seed",
+        icon=":material/science:",
+    ):
+        demo.seed(auth.db_path())
+        st.session_state["portfolio_demo_seeded"] = True
+        st.rerun()
+
 
 txs, positions, realized = ledger_state(DB, db_mtime(DB), REPORT_CCY)
 if not txs:
-    st.warning(tr("portfolio.no_transactions"))
+    empty.state(
+        tr("portfolio.empty_ledger_title"),
+        tr("portfolio.empty_ledger_body"),
+        event="portfolio.ledger",
+        page="app_pages/import_transactions.py",
+        label=tr("common.cta_import"),
+        cta_icon="upload_file",
+        extra=_demo_offer,
+        preview="chart",
+        preview_kw={"height": 240, "legend": True},
+    )
     st.stop()
+if st.session_state.pop("portfolio_demo_seeded", False):
+    st.toast(tr("portfolio.demo_seeded_toast"), icon=":material/science:")
+# Figures below are only worth reading if it is clear whose they are. Loud on
+# purpose: this app also files tax reports, and a fabricated cost basis read
+# as a real one is the one mistake here that costs money.
+if demo.active(auth.db_path()):
+    with st.container(horizontal=True, vertical_alignment="center"):
+        st.warning(tr("portfolio.demo_banner"), icon=":material/science:")
+        if st.button(
+            tr("portfolio.demo_remove"),
+            key="portfolio_demo_clear",
+            icon=":material/delete:",
+        ):
+            demo.clear(auth.db_path())
+            st.rerun()
 if not positions and not realized:
     st.warning(tr("portfolio.ledger_no_positions"))
     st.stop()
@@ -182,14 +226,25 @@ def _positions_section() -> None:
     with card.container(border=True):
         st.subheader(tr("portfolio.open_positions_pl", ccy=REPORT_CCY))
         if tbl.empty:
-            st.caption(tr("portfolio.no_open_positions"))
-            # Empty book = the next step is importing one; say so in place
-            # instead of leaving a dead end.
-            st.page_link(
-                "app_pages/import_transactions.py",
-                label=tr("nav.import"),
-                icon=":material/upload_file:",
+            # The page already stopped on an empty ledger, so this is a book
+            # whose every position is closed. Newer trades not yet imported
+            # are the common reason, so the card still points at Import.
+            empty.state(
+                tr("portfolio.empty_positions_title"),
+                tr("portfolio.empty_positions_body"),
+                event="portfolio.positions",
+                icon="account_balance_wallet",
+                page="app_pages/import_transactions.py",
+                label=tr("common.cta_import"),
+                cta_icon="upload_file",
+                border=False,
             )
+        elif not tbl["value"].notna().any():
+            # Open positions, not one of them priced. Their ledger cost is
+            # still there, so the tiles below would sum an all-NaN value column
+            # to a confident 0 and chip it at -100% — a throttled quote burst
+            # reading as a wiped-out book. Say what's actually missing.
+            st.caption(tr("portfolio.prices_unavailable"))
         else:
             cost = tbl["cost"].sum()
             value = tbl["value"].dropna().sum()
@@ -466,111 +521,6 @@ def _geography_cell(alloc: pd.Series, title: str) -> None:
     )
 
 
-# Drag-zooming the history chart narrows x only (y stays pinned, so a drag
-# never squashes the money scale) and Plotly leaves the y range where the full
-# span put it: a 2022 window worth 4k draws as a flat line on the floor of a
-# 120k axis. Streamlit surfaces no relayout event (only box/lasso selections,
-# which would cost the drag-to-zoom gesture and a server round trip per drag),
-# so the refit runs in the browser: the plotted band extents ride along in a
-# hidden slot's data attributes — Plotly serializes numeric arrays as base64
-# ({"dtype", "bdata"}), so gd.data is not readable from JS — and the picked
-# window is read off the chart's own layout once the drag ends. Desktop only:
-# phones pin both axes, so there is no zoom to follow.
-_YFIT_JS = r"""
-<script>
-(function () {
-  if (window.__topstocksYFit) return;  /* wire once per session */
-  window.__topstocksYFit = true;
-  /* Axis endpoints come back as "2026-06-28 15:07:03.5225" (space, and a
-     sub-millisecond fraction outside the ISO grammar Safari holds to); the
-     shipped stamps are ISO dates. Normalise both before parsing. */
-  const ms = (v) => {
-    if (typeof v === "number") return v;
-    return Date.parse(String(v).replace(" ", "T").replace(/(\.\d{3})\d+/, "$1"));
-  };
-  /* The history chart is the one carrying a meta="history" trace; every other
-     chart on the page keeps its own axes to itself. */
-  const chart = () =>
-    Array.prototype.find.call(
-      document.querySelectorAll(".js-plotly-plot"),
-      (gd) => (gd.data || []).some((t) => t.meta === "history")
-    );
-  const fit = () => {
-    /* Both nodes are looked up per event, never captured: Streamlit replaces
-       them whenever the range buttons rerun the fragment. */
-    const gd = chart();
-    const b = document.querySelector(".ts-yfit");
-    if (!gd || !b || !window.Plotly) return;
-    const ax = (gd.layout || {}).xaxis || {};
-    const ya = (gd.layout || {}).yaxis || {};
-    if (ax.autorange || !ax.range) {  /* zoom reset: back to the whole span */
-      gd.__tsYFit = "";
-      if (!ya.autorange) window.Plotly.relayout(gd, {"yaxis.autorange": true});
-      return;
-    }
-    const xs = (b.dataset.x || "").split(",");
-    const los = (b.dataset.lo || "").split(",");
-    const his = (b.dataset.hi || "").split(",");
-    const x0 = Math.min(ms(ax.range[0]), ms(ax.range[1]));
-    const x1 = Math.max(ms(ax.range[0]), ms(ax.range[1]));
-    let i0 = -1, i1 = -1;
-    for (let i = 0; i < xs.length; i++) {
-      const t = ms(xs[i]);
-      if (t < x0 || t > x1) continue;
-      if (i0 < 0) i0 = i;
-      i1 = i;
-    }
-    if (i0 < 0) return;  /* the window fell between two daily points */
-    /* The line enters and leaves the window mid-segment: the points just
-       outside each edge are drawn too, so they count towards the extents. */
-    i0 = Math.max(0, i0 - 1);
-    i1 = Math.min(xs.length - 1, i1 + 1);
-    let lo = Infinity, hi = -Infinity;
-    for (let i = i0; i <= i1; i++) {
-      const a = parseFloat(los[i]), z = parseFloat(his[i]);
-      if (a < lo) lo = a;
-      if (z > hi) hi = z;
-    }
-    if (!isFinite(lo) || !isFinite(hi)) return;
-    const pad = (hi - lo) * 0.06 || Math.abs(hi) * 0.06 || 1;
-    /* A book is never worth less than nothing: pad down to zero, not past it. */
-    lo = lo >= 0 && lo - pad < 0 ? 0 : lo - pad;
-    hi = hi + pad;
-    const key = lo.toFixed(2) + ":" + hi.toFixed(2);
-    if (gd.__tsYFit === key) return;  /* same window as the last drag */
-    gd.__tsYFit = key;
-    window.Plotly.relayout(gd, {"yaxis.range": [lo, hi]});
-  };
-  /* Deliberately not gd.on("plotly_relayout"): Streamlit re-plots the same
-     div on a fragment rerun, and Plotly.newPlot purges the handlers off it
-     while the element (so any "already wired" mark on it) survives — the
-     refit would go dead for the rest of the session. Document-level listeners
-     outlive every remount. The drag ends on mouseup, the reset on dblclick,
-     and the modebar buttons on their own click; the timeout lets Plotly land
-     its own relayout before the layout is read.
-     The listeners take no target filter: Plotly covers the whole document
-     with a .dragcover while a drag is live, so the mouseup that ends a zoom
-     lands outside the chart. fit() is a no-op whenever the axis is not
-     zoomed, which is every other click on the page. */
-  const after = () => setTimeout(fit, 80);
-  document.addEventListener("mouseup", after, true);
-  document.addEventListener("dblclick", after, true);
-})();
-</script>
-"""
-
-
-def _yfit_slot(box, hist: pd.DataFrame) -> None:
-    """Hidden slot carrying the plotted band extents, read by `_YFIT_JS`."""
-    pair = hist[["value", "injected"]]
-    xs = ",".join(hist.index.strftime("%Y-%m-%d"))
-    los = ",".join(f"{v:.2f}" for v in pair.min(axis=1))
-    his = ",".join(f"{v:.2f}" for v in pair.max(axis=1))
-    box.html(
-        '<div class="ts-yfit" style="display:none"'
-        f' data-x="{xs}" data-lo="{los}" data-hi="{his}"></div>' + _YFIT_JS,
-        unsafe_allow_javascript=True,
-    )
 
 
 @st.fragment(parallel=True)
@@ -722,7 +672,7 @@ def _history_section() -> None:
                 fig.update_xaxes(nticks=3)
             show_chart(fig)
             if not _MOBILE:
-                _yfit_slot(st, hist)
+                yfit_slot.render(st, hist)
             notes = [tr("portfolio.hist_note_injected")]
             if missing:
                 notes.append(
@@ -740,7 +690,16 @@ if tab_pos.open:
 if tab_risk.open:
     with tab_risk:
         if not positions:
-            st.caption(tr("portfolio.no_positions_analyse"))
+            empty.state(
+                tr("portfolio.empty_risk_title"),
+                tr("portfolio.empty_risk_body"),
+                event="portfolio.risk",
+                page="app_pages/import_transactions.py",
+                label=tr("common.cta_import"),
+                cta_icon="upload_file",
+                preview="chart",
+                preview_kw={"shape": "pie"},
+            )
         else:
             FROM_START = tr("portfolio.from_start")
             choice = st.selectbox(
@@ -750,11 +709,14 @@ if tab_risk.open:
             tickers = tuple(p.ticker for p in positions)
             first_tx = min(t.date for t in txs)
             _WINDOW_DAYS = {"6mo": 182, "1y": 365, "2y": 730, "5y": 1826}
-            win_start = (
+            # Both arms are built from a real date, so neither can be NaT —
+            # which is the only reason pd.Timestamp's type is a union here.
+            win_start = cast(
+                pd.Timestamp,
                 pd.Timestamp(first_tx)
                 if choice == FROM_START
                 else pd.Timestamp(date.today())
-                - pd.Timedelta(days=_WINDOW_DAYS[choice])
+                - pd.Timedelta(days=_WINDOW_DAYS[choice]),
             )
             if choice == FROM_START:
                 # Fetch enough history to cover the ledger, then clip below so
@@ -1058,7 +1020,14 @@ if tab_tax.open:
         sell_years = sorted(
             {_jur.tax_year_of(s.sell_date) for s in tax_realized}, reverse=True)
         if not sell_years:
-            st.caption(tr("portfolio.no_realized_sales"))
+            # No CTA: nothing to configure — the user simply has not sold yet.
+            empty.state(
+                tr("portfolio.empty_realized_title"),
+                tr("portfolio.empty_realized_body"),
+                event="portfolio.realized",
+                preview="table",
+                preview_kw={"rows": 4, "cols": 5},
+            )
         else:
             buy_dates: dict[str, list[str]] = defaultdict(list)
             for t in txs:
@@ -1118,7 +1087,11 @@ if tab_tax.open:
                             for m in month_range(
                                 sell_months[0], sell_months[-1])
                         }
+                    # Year keys are ints and month keys are strings, so the
+                    # bars read the values straight off rather than indexing
+                    # back in by key (insertion order pairs them).
                     keys = list(period_ty)
+                    vals = list(period_ty.values())
                     fig = go.Figure()
                     def _hover(name: str) -> str:
                         # Unified hover drops the trace name unless it is baked
@@ -1131,26 +1104,26 @@ if tab_tax.open:
                     net_lbl = tax_ui.t(_code, "chart_net")
                     fig.add_bar(
                         name=gains_lbl, x=keys,
-                        y=[period_ty[k].realized_gain for k in keys],
+                        y=[t.realized_gain for t in vals],
                         marker_color=CANDLE_UP,
                         hovertemplate=_hover(gains_lbl),
                     )
                     fig.add_bar(
                         name=losses_lbl, x=keys,
-                        y=[-period_ty[k].deductible_loss for k in keys],
+                        y=[-t.deductible_loss for t in vals],
                         marker_color=CANDLE_DOWN,
                         hovertemplate=_hover(losses_lbl),
                     )
                     if any(t.recovered_loss for t in period_ty.values()):
                         fig.add_bar(
                             name=recovered_lbl, x=keys,
-                            y=[-period_ty[k].recovered_loss for k in keys],
+                            y=[-t.recovered_loss for t in vals],
                             marker_color=WARN_ORANGE,
                             hovertemplate=_hover(recovered_lbl),
                         )
                     fig.add_scatter(
                         name=net_lbl, x=keys,
-                        y=[period_ty[k].net_taxable for k in keys],
+                        y=[t.net_taxable for t in vals],
                         mode="markers",
                         marker=dict(symbol="diamond", size=10, color=INFO_COLOR),
                         hovertemplate=_hover(net_lbl),
@@ -1354,7 +1327,13 @@ if tab_div.open:
     with tab_div:
         years = dividends.by_year(txs)
         if not years:
-            st.caption(tr("portfolio.no_dividends"))
+            empty.state(
+                tr("portfolio.empty_dividends_title"),
+                tr("portfolio.empty_dividends_body"),
+                event="portfolio.dividends",
+                preview="table",
+                preview_kw={"rows": 3, "cols": 5},
+            )
         else:
             with st.container(border=True):
                 rows = [
@@ -1392,7 +1371,16 @@ if tab_fees.open:
     with tab_fees:
         brokers = fees.by_broker(txs)
         if not brokers:
-            st.caption(tr("portfolio.no_fees"))
+            empty.state(
+                tr("portfolio.empty_fees_title"),
+                tr("portfolio.empty_fees_body"),
+                event="portfolio.fees",
+                page="app_pages/import_transactions.py",
+                label=tr("common.cta_import"),
+                cta_icon="upload_file",
+                preview="chart",
+                preview_kw={"shape": "bars", "bars": 12},
+            )
         else:
             # Spread needs the trade-day bars; explicit commissions don't —
             # if Yahoo is down the tab degrades to the ledger-only columns.

@@ -144,6 +144,27 @@ def test_stored_card_is_fresh_only_for_its_day_and_language():
     assert not daily.is_fresh(None, DAY, "es")
 
 
+def test_a_newer_session_retires_the_card_before_the_date_rolls():
+    """The bug this guards: a card written at 10:00 from Wednesday's close is
+    still "today's" card on Thursday at 07:00, so it went on quoting a move two
+    sessions old under a KPI row that had moved on."""
+    card = daily.DailyAction(
+        day=DAY.isoformat(), headline="h", bullets=["a"], lang="es",
+        as_of="2026-09-02",
+    )
+    assert daily.is_fresh(card, DAY, "es", "2026-09-02")
+    assert not daily.is_fresh(card, DAY, "es", "2026-09-03")
+    # An older session (a lagging quote) is not a reason to rewrite.
+    assert daily.is_fresh(card, DAY, "es", "2026-09-01")
+    # A card from before the field existed cannot be shown to be current, so
+    # it is rewritten once — the stale card on screen is the whole bug.
+    undated = daily.DailyAction(
+        day=DAY.isoformat(), headline="h", bullets=["a"], lang="es"
+    )
+    assert not daily.is_fresh(undated, DAY, "es", "2026-09-03")
+    assert daily.is_fresh(undated, DAY, "es")  # no session known -> day rule
+
+
 # ------------------------------------------------------------------ facts
 
 
@@ -154,13 +175,37 @@ def test_facts_carry_the_book_the_page_is_showing():
     assert [w["ticker"] for w in f["top_weights"]] == ["ASML", "NVDA"]
     # Movers rank by absolute move, so the day's story is first whichever way
     # it went.
-    assert f["movers_today"][0] == {"ticker": "NVDA", "pct": 3.2, "weight_pct": 30.0}
+    assert f["movers"][0] == {
+        "ticker": "NVDA", "pct": 3.2, "weight_pct": 30.0, "as_of": None
+    }
     assert f["earnings_soon"] == [
         {"ticker": "ASML", "date": "2026-09-07", "in_days": 4}
     ]
     assert f["at_52w"] == [{"ticker": "NVDA", "kind": "high", "distance_pct": None}]
     assert f["week"]["pct"] is not None and f["month"]["pct"] is not None
     json.dumps(f)  # no NaN, no numpy scalars — this goes into a prompt
+
+
+def test_each_mover_carries_the_session_it_came_from():
+    """Off-hours the day move is the last *completed* session, which is not
+    today — the card is written from these facts and must be able to say so."""
+    tbl = frame()
+    tbl["day_asof"] = ["2026-09-02", "2026-09-02"]
+    f = daily.build_facts(tbl, history(), today=DAY)
+    assert [m["as_of"] for m in f["movers"]] == ["2026-09-02", "2026-09-02"]
+    assert f["session"] == {"date": "2026-09-02", "is_today": False}
+    assert f["day"]["as_of"] == "2026-09-02"
+
+
+def test_a_live_session_reads_as_today():
+    tbl = frame()
+    tbl["day_asof"] = [DAY.isoformat(), DAY.isoformat()]
+    f = daily.build_facts(tbl, history(), today=DAY)
+    assert f["session"] == {"date": DAY.isoformat(), "is_today": True}
+
+
+def test_facts_without_the_session_column_carry_no_session():
+    assert "session" not in daily.build_facts(frame(), history(), today=DAY)
 
 
 def test_day_override_wins_over_the_basket():
@@ -214,6 +259,122 @@ def test_parse_strips_bullet_glyphs_and_clips_long_lines():
 )
 def test_unusable_replies_are_rejected(raw):
     assert daily.parse(raw, day=DAY, lang="en") is None
+
+
+# ------------------------------------------------------- the number audit
+
+
+def _reply(*bullets) -> str:
+    return json.dumps({"headline": bullets[0], "bullets": list(bullets)})
+
+
+def test_the_figures_it_was_given_pass():
+    f = facts()
+    card = daily.parse(
+        _reply(
+            "NVDA +3.2% today, 30.0% of the book",
+            "ASML: a 2,400 loss against 900 realised this year",
+        ),
+        day=DAY, lang="en", facts=f,
+    )
+    assert card is not None and len(card.bullets) == 2
+
+
+def test_a_percentage_the_facts_do_not_have_is_rejected():
+    """The card's whole claim is that its numbers are the reader's own. A
+    provider that rounds one into a new figure is a miss, not a card."""
+    assert daily.parse(
+        _reply("NVDA +7.9% today, 30% of the book", "ASML reports in 4 days"),
+        day=DAY, lang="en", facts=facts(),
+    ) is None
+
+
+def test_a_figure_from_another_holding_is_rejected():
+    """3.2% is NVDA's move and it is in the facts — under ASML's name it is
+    still a false statement, so a line naming one holding is audited against
+    that holding's own numbers."""
+    assert daily.parse(
+        _reply("ASML +3.2% today", "NVDA is 30% of the book"),
+        day=DAY, lang="en", facts=facts(),
+    ) is None
+
+
+def test_a_line_comparing_two_holdings_may_quote_both():
+    card = daily.parse(
+        _reply(
+            "NVDA +3.2% leads, ASML -0.4% behind it",
+            "ASML is 70.0% of the book",
+        ),
+        day=DAY, lang="en", facts=facts(),
+    )
+    assert card is not None
+
+
+def test_a_spanish_card_is_read_with_spanish_decimals():
+    card = daily.parse(
+        _reply("NVDA sube un +3,2% hoy", "ASML pesa un 70,0% de la cartera"),
+        day=DAY, lang="es", facts=facts(),
+    )
+    assert card is not None
+
+
+def test_an_invented_earnings_date_is_rejected():
+    assert daily.parse(
+        _reply("ASML reports on 11/09/2026", "NVDA is 30% of the book"),
+        day=DAY, lang="en", facts=facts(),
+    ) is None
+    good = daily.parse(
+        _reply("ASML reports on 07/09/2026", "NVDA is 30% of the book"),
+        day=DAY, lang="en", facts=facts(),
+    )
+    assert good is not None
+
+
+def test_the_card_that_started_this_passes_unchanged():
+    """The 3 Sep card, verbatim. Its numbers were all real — only their date
+    was wrong — so the audit must not reject prose like this: a gate that
+    fires on good cards would leave the dashboard on the computed fallback
+    every day."""
+    f = {
+        "date": "2026-09-03",
+        "currency": "EUR",
+        "session": {"date": "2026-09-02", "is_today": False},
+        "day": {"amount": 186.0, "pct": 0.19, "as_of": "2026-09-02"},
+        "movers": [
+            {"ticker": "NOW", "pct": -4.32, "weight_pct": 5.04},
+            {"ticker": "RDDT", "pct": 9.31, "weight_pct": 0.58},
+            {"ticker": "SEZL", "pct": 6.1, "weight_pct": 2.12},
+        ],
+        "top_weights": [{"ticker": "NOW", "weight_pct": 5.04, "pl_pct": 45.99}],
+        "at_52w": [{"ticker": "HMI", "kind": "low", "distance_pct": 0.0}],
+        "earnings_soon": [
+            {"ticker": t, "date": "2026-09-10", "in_days": 7}
+            for t in ("ADBE", "DSGX", "ORCL")
+        ],
+    }
+    lines = [
+        "Jornada plana (+0,19%): caída en NOW (-4,32%) y avances en RDDT (+9,31%)",
+        "NOW retrocede un -4,32% en el día; tiene un peso relevante del 5,04% en "
+        "la cartera y mantiene una plusvalía del 45,99%.",
+        "RDDT lidera las subidas con un +9,31% (0,58% de peso), seguida por SEZL "
+        "que repunta un +6,1% (2,12% de peso).",
+        "HMI marca hoy su mínimo de 52 semanas; en 7 días (10/09/2026) reportan "
+        "resultados ADBE, DSGX y ORCL.",
+    ]
+    assert daily.audit(lines, f) is None
+    assert daily.audit(["NOW retrocede un -5,10% en el día"], f) == "-5,10%"
+
+
+def test_the_card_is_stamped_with_the_session_it_quotes():
+    tbl = frame()
+    tbl["day_asof"] = ["2026-09-02", "2026-09-02"]
+    f = daily.build_facts(tbl, history(), today=DAY)
+    card = daily.parse(
+        _reply("NVDA +3.2% in the last session", "ASML is 70.0% of the book"),
+        day=DAY, lang="en", facts=f,
+    )
+    assert card.as_of == "2026-09-02"
+    assert daily.DailyAction.from_dict(card.to_dict()).as_of == "2026-09-02"
 
 
 def test_headline_falls_back_to_the_first_bullet():

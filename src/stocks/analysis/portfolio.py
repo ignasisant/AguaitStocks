@@ -22,8 +22,8 @@ from typing import TYPE_CHECKING
 import pandas as pd
 
 from stocks import obs
+from stocks.analysis import naive_dates
 from stocks.config import Holding, load_watchlist
-from stocks.data.fetch import fetch_many
 from stocks.data.fx import ToBase, converter
 
 if TYPE_CHECKING:
@@ -180,7 +180,7 @@ def position_table(holdings: list[Holding], prices: dict[str, float]) -> pd.Data
         price = prices.get(h.ticker)
         value = h.shares * price if price else None
         pnl = pnl_pct = None
-        if price and h.cost:
+        if price and h.cost and value is not None:
             basis = h.shares * h.cost
             pnl = value - basis
             pnl_pct = value / basis - 1 if basis else None
@@ -306,9 +306,7 @@ def injected_vs_value(
         px = closes.get(ticker)
         if px is not None and not px.empty:
             px = px.copy()
-            px.index = pd.to_datetime(px.index)
-            if px.index.tz is not None:
-                px.index = px.index.tz_localize(None)
+            px.index = naive_dates(px.index)
             px = px.reindex(idx).ffill()
             ccy = (ccy_of.get(ticker) or "EUR").upper()
             if ccy == "EUR":
@@ -483,6 +481,11 @@ class PortfolioReport:
 
 def load_closes(tickers: list[str], period: str = "1y") -> dict[str, pd.Series]:
     """Close series per ticker from ONE bulk download; no-data tickers drop out."""
+    # Imported here, not at module scope: this module is on the import chain of
+    # every page (via web.portfolio_data), and pulling yfinance in costs ~150 ms
+    # of a cold start for a dependency only the network functions below need.
+    from stocks.data.fetch import fetch_many
+
     out: dict[str, pd.Series] = {}
     for t, df in fetch_many(tickers, period=period).items():
         s = df["Close"].dropna() if "Close" in df else pd.Series(dtype=float)
@@ -492,10 +495,8 @@ def load_closes(tickers: list[str], period: str = "1y") -> dict[str, pd.Series]:
 
 
 def _profile(ticker: str) -> dict:
-    import yfinance as yf
-
     from stocks.data.crypto import split_pair
-    from stocks.data.fetch import resolve
+    from stocks.data.fetch import info as quote_info
     from stocks.data.funds import fetch_profile, remember, sector_split
 
     # Crypto pairs: yfinance has no sector/country for coins — label the
@@ -503,7 +504,7 @@ def _profile(ticker: str) -> dict:
     if pair := split_pair(ticker):
         return {"sector": "Crypto", "country": None, "currency": pair[1]}
     try:
-        info = yf.Ticker(resolve(ticker)).info or {}
+        info = quote_info(ticker)
     except Exception:
         info = {}
     remember(ticker, info.get("quoteType"))
@@ -535,16 +536,6 @@ def load_meta(tickers: list[str], max_workers: int = 8) -> dict[str, dict]:
     return dict(profiles)
 
 
-# ----------------------------------------------------------------- ledger bridge
-def ledger_positions():
-    """Open positions (FIFO) from the transaction ledger. Empty if no ledger."""
-    from stocks.portfolio.ledger import all_transactions
-    from stocks.portfolio.positions import build
-
-    positions, _ = build(all_transactions())
-    return positions
-
-
 def holdings_from_positions(positions) -> list[Holding]:
     """Ledger positions as watchlist Holdings (shares + native avg cost)."""
     return [
@@ -571,29 +562,87 @@ def market_value(
 def market_values(
     positions, max_workers: int = 8, base: str = "EUR"
 ) -> dict[str, float]:
-    """Live market value per open position in `base`, fetched concurrently.
+    """Live market value per open position in `base`, off the bulk price path.
 
-    Shared by the CLI (positions/tax) and the dashboard so neither loops the
-    network serially. Positions whose price/FX lookup fails are absent.
+    Shared by the CLI (positions/tax) and the dashboard. Prices come from
+    `load_closes` — the same `data.fetch.fetch_many` download the basket chart
+    and the watchlist rows read — whose last value is the current price during
+    a session (yfinance hands back today's in-progress daily bar) and the last
+    close outside one. So a tile can no longer disagree with the chart beside
+    it.
+
+    It used to fan out one `latest_price` per position instead: a quote request
+    per name, 44 of them for a 44-name book, which is what trips Yahoo's rate
+    limiter from a datacenter IP. Worse, every failure was swallowed into "no
+    price", so a throttled burst rendered a whole book as €0 at -100% while the
+    chart — on the history endpoint, which survived — still drew €120k beside
+    it. Only names the bulk download has no column for fall back to a
+    per-ticker lookup, concurrently.
+
+    Positions whose price or FX is unavailable are absent from the result. A
+    wholesale throttle is not silent: if nothing could be priced and Yahoo
+    refused us, the `YFRateLimitError` propagates so the caller degrades in
+    place (and `st.cache_data` doesn't memoize the empty answer).
     """
+    from yfinance.exceptions import YFRateLimitError
+
     from stocks.data.fx import spot
 
-    # Warm the spot memo once per currency so the pool doesn't race N
-    # identical FX fetches for the same pair.
+    if not positions:
+        return {}
+
+    # Warm the spot memo once per currency so nothing races N identical FX
+    # fetches for the same pair.
+    rates: dict[str, float] = {}
     for ccy in {p.currency for p in positions}:
         try:
-            spot(ccy, base)
-        except Exception:
-            pass  # workers fall back to per-position lookups / None
-    with ThreadPoolExecutor(max_workers=max_workers) as pool:
-        pairs = pool.map(
-            lambda p: (
-                p.ticker,
-                market_value(p.ticker, p.quantity, p.currency, base),
-            ),
-            positions,
-        )
-    return {t: v for t, v in pairs if v is not None}
+            rates[ccy] = float(spot(ccy, base)[0])
+        except Exception as exc:
+            obs.warn("portfolio.fx_warmup_failed", ccy=ccy, base=base,
+                     error_type=type(exc).__name__, error=str(exc)[:300])
+            # left out of `rates`; the per-position fallback re-tries the pair
+
+    throttled: YFRateLimitError | None = None
+    try:
+        closes = load_closes([p.ticker for p in positions], period="5d")
+    except YFRateLimitError as exc:
+        throttled, closes = exc, {}
+
+    out: dict[str, float] = {}
+    stragglers = []
+    for p in positions:
+        series = closes.get(p.ticker)
+        rate = rates.get(p.currency)
+        if series is None or series.empty or rate is None:
+            stragglers.append(p)
+            continue
+        out[p.ticker] = p.quantity * float(series.iloc[-1]) * rate
+
+    # A handful of names Yahoo won't bulk-quote (a delisting, a symbol the
+    # download drops) are still worth one request each. A *majority* missing
+    # means the bulk download or FX is down rather than those symbols being
+    # odd — fanning out a request per position there would rebuild the very
+    # burst this function exists to avoid, on the one occasion Yahoo is
+    # already refusing us.
+    budget = max(3, len(positions) // 4)
+    if len(stragglers) > budget:
+        obs.warn("portfolio.bulk_prices_missing", missing=len(stragglers),
+                 positions=len(positions), priced=len(out))
+        stragglers = []
+    if stragglers:
+        with ThreadPoolExecutor(max_workers=max_workers) as pool:
+            pairs = pool.map(
+                lambda p: (
+                    p.ticker,
+                    market_value(p.ticker, p.quantity, p.currency, base),
+                ),
+                stragglers,
+            )
+        out.update({t: v for t, v in pairs if v is not None})
+
+    if not out and throttled is not None:
+        raise throttled
+    return out
 
 
 def market_value_weights_base(
@@ -627,15 +676,23 @@ def market_value_weights_base(
     return {t: v / total for t, v in values.items()} if total else {}
 
 
-def positions_frame(positions, base: str = "EUR") -> pd.DataFrame:
+def positions_frame(
+    positions, base: str = "EUR", values: dict[str, float] | None = None
+) -> pd.DataFrame:
     """Per-position table in `base`: qty, cost, live value, unrealised P/L.
 
-    Live prices come from market_values (thread pool), so a 20-name book costs
-    one concurrent burst, not 20 serial price+FX round-trips. `cost` comes from
-    the lots, valued at each trade date's rate — so it only lines up with
-    `value` when the ledger was replayed in this same base.
+    `values` lets a caller hand in base-currency values it already holds. The
+    dashboard passes the basket history's last row (`web.portfolio_data`),
+    which it downloads anyway for the day/week/month chips — so the page makes
+    one price download instead of two, and a tile can't disagree with the
+    chart beside it. Left out (the CLI, the chat tools), the frame prices
+    itself through `market_values`.
+
+    `cost` comes from the lots, valued at each trade date's rate — so it only
+    lines up with `value` when the ledger was replayed in this same base.
     """
-    values = market_values(positions, base=base)
+    if values is None:
+        values = market_values(positions, base=base)
     rows = []
     for p in positions:
         value = values.get(p.ticker)
@@ -674,9 +731,7 @@ def position_values_history(
     if not closes:
         return pd.DataFrame()
     px = pd.DataFrame(closes).sort_index()
-    px.index = pd.to_datetime(px.index)
-    if px.index.tz is not None:
-        px.index = px.index.tz_localize(None)
+    px.index = naive_dates(px.index)
     px = px.ffill()
 
     fx: dict[str, pd.Series] = {}
@@ -726,6 +781,30 @@ def basket_change(values: pd.DataFrame, days: int) -> tuple[float, float] | None
     if not v0:
         return None
     return v1 - v0, v1 / v0 - 1
+
+
+def ticker_changes(values: pd.DataFrame, days: int) -> pd.Series:
+    """Per-ticker % change over the last ~`days` calendar days.
+
+    The per-name counterpart of `basket_change`, read off the same frame with
+    the same anchoring: `days<=1` compares the last two rows, longer windows
+    anchor on the last row at or before `end - days`. A ticker priced at only
+    one endpoint (or starting from zero) is dropped rather than reported as an
+    infinite move. Empty Series when the frame doesn't cover the window.
+    """
+    if len(values) < 2:
+        return pd.Series(dtype=float)
+    end = values.index[-1]
+    if days <= 1:
+        start = values.index[-2]
+    else:
+        prior = values.index[values.index <= end - pd.Timedelta(days=days)]
+        if prior.empty:
+            return pd.Series(dtype=float)
+        start = prior[-1]
+    first, last = values.loc[start], values.loc[end]
+    both = first.notna() & last.notna() & (first != 0)
+    return last[both] / first[both] - 1
 
 
 # --------------------------------------------------------------- market clock
@@ -848,6 +927,34 @@ def market_active(ticker: str, now_utc: datetime | None = None) -> bool:
     return suffix not in _EXCHANGE_HOURS and us_extended_session(now_utc) is not None
 
 
+def _quote_date(quote: dict, *, today: bool = False) -> str | None:
+    """The exchange-local trading date behind a quote, ISO, or None.
+
+    `today` asks for the exchange's current date instead of the last regular
+    trade's — what a premarket move belongs to, since `regularMarketTime` is
+    still yesterday's close while the premarket quotes.
+    """
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    try:
+        zone = ZoneInfo(str(quote.get("exchangeTimezoneName") or "America/New_York"))
+    except Exception:
+        zone = ZoneInfo("America/New_York")
+    if today:
+        return datetime.now(UTC).astimezone(zone).date().isoformat()
+    stamp = quote.get("regularMarketTime")
+    if hasattr(stamp, "astimezone"):
+        return stamp.astimezone(zone).date().isoformat()
+    if stamp is None:
+        return None  # no trade stamp in the quote — the caller prints no date
+    try:
+        moment = datetime.fromtimestamp(float(stamp), UTC)
+    except (TypeError, ValueError, OSError, OverflowError):
+        return None
+    return moment.astimezone(zone).date().isoformat()
+
+
 def session_quote(ticker: str) -> dict | None:
     """Yahoo quote snapshot: `{"price", "pct", "session"}`, or None if missing.
 
@@ -865,30 +972,45 @@ def session_quote(ticker: str) -> dict | None:
     one is trading, else the last regular price. `session` is "pre"/"post" only
     while that window is actually open per `marketState`, so a fully closed
     market reads None even though its last after-hours price is still used.
-    """
-    import yfinance as yf
 
-    from stocks.data.fetch import resolve
+    `as_of` is the exchange-local trading date `pct` belongs to, which is the
+    part a caller cannot infer: outside the session the move is the *last
+    completed* session, so a card that calls it "today" is off by a day (or by
+    a weekend). Premarket stamps today; every other branch stamps the regular
+    session the quote closed. None when the quote carries no timestamp.
+    """
+    from stocks.data.fetch import info as quote_info
 
     with obs.swallow("quote.session", ticker=ticker):
-        quote = yf.Ticker(resolve(ticker)).info
+        quote = quote_info(ticker)
         state = str(quote.get("marketState") or "")
         regular = quote.get("regularMarketPrice")
         prev = quote.get("regularMarketPreviousClose")
         pre, post = quote.get("preMarketPrice"), quote.get("postMarketPrice")
         if state.startswith("PRE") and pre and regular:
             price = float(pre)
-            return {"price": price, "pct": price / float(regular) - 1, "session": "pre"}
+            return {
+                "price": price,
+                "pct": price / float(regular) - 1,
+                "session": "pre",
+                "as_of": _quote_date(quote, today=True),
+            }
         if post and prev and not state.startswith("PRE"):
             price = float(post)
             return {
                 "price": price,
                 "pct": price / float(prev) - 1,
                 "session": "post" if state.startswith("POST") else None,
+                "as_of": _quote_date(quote),
             }
         if regular and prev:
             price = float(regular)
-            return {"price": price, "pct": price / float(prev) - 1, "session": None}
+            return {
+                "price": price,
+                "pct": price / float(prev) - 1,
+                "session": None,
+                "as_of": _quote_date(quote),
+            }
     return None
 
 
@@ -898,18 +1020,33 @@ def _session_move(ticker: str) -> float | None:
     return quote["pct"] if quote else None
 
 
+def session_quotes(tickers: list[str], max_workers: int = 8) -> dict[str, dict]:
+    """`session_quote` per ticker, concurrent. Missing quotes are absent.
+
+    The full snapshot rather than the bare percentage, because a day move is
+    only half a fact: `as_of` says which session it is, and a caller that
+    prints it as "today" without looking is how a Wednesday card ends up
+    quoting Monday's close.
+    """
+    if not tickers:
+        return {}
+    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+        pairs = pool.map(lambda t: (t, session_quote(t)), tickers)
+    return {t: q for t, q in pairs if q and q.get("pct") is not None}
+
+
 def session_moves(tickers: list[str], max_workers: int = 8) -> dict[str, float]:
     """Day % move per ticker (native), extended hours included, concurrent.
 
     Feeds the off-session day-change cells: premarket / after-hours while those
     windows are open, the last completed session once they close — never the
     flat premarket 0% the daily basket can produce. Tickers whose quote is
-    unavailable are absent (caller falls back to the basket value)."""
-    if not tickers:
-        return {}
-    with ThreadPoolExecutor(max_workers=max_workers) as pool:
-        pairs = pool.map(lambda t: (t, _session_move(t)), tickers)
-    return {t: v for t, v in pairs if v is not None}
+    unavailable are absent (caller falls back to the basket value). Callers
+    that will *write* the number into prose want `session_quotes` instead, for
+    the `as_of` that says which session it is."""
+    return {
+        t: q["pct"] for t, q in session_quotes(tickers, max_workers).items()
+    }
 
 
 def analyze(

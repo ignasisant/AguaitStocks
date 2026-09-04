@@ -3,15 +3,13 @@
 Drag-zooming narrows x only; Plotly keeps the y range the full span set, so a
 small early window would draw flat on the floor of a big axis. The refit is
 client-side (Streamlit sees no relayout), computed from the band extents the
-page ships in a hidden slot. Both halves are covered end to end: the page's
-own `_yfit_slot` builds the markup (lifted out of the page module, which
-cannot be imported outside a Streamlit run), and its data attributes are fed
-to the page's own JS under node with a DOM shim.
+page ships in a hidden slot. Both halves are covered end to end:
+`yfit_slot.render` builds the markup, and its data attributes are fed to the
+module's own JS under node with a DOM shim.
 """
 
 from __future__ import annotations
 
-import ast
 import json
 import re
 import shutil
@@ -20,6 +18,8 @@ from pathlib import Path
 
 import pandas as pd
 import pytest
+
+from stocks.web import yfit_slot
 
 PAGE = Path("src/stocks/web/app_pages/portfolio.py")
 
@@ -65,33 +65,6 @@ FRAME = pd.DataFrame(
 )
 
 
-def _page_bits() -> dict:
-    """`_YFIT_JS` and `_yfit_slot` executed in a stubbed namespace.
-
-    The page module runs its whole body on import (it reads the ledger and
-    calls st.stop), so the two definitions are lifted out of its AST instead.
-    """
-    src = PAGE.read_text()
-    tree = ast.parse(src)
-    want = ("_YFIT_JS", "_yfit_slot")
-    cuts = []
-    for node in tree.body:
-        name = None
-        if isinstance(node, ast.Assign) and isinstance(node.targets[0], ast.Name):
-            name = node.targets[0].id
-        elif isinstance(node, ast.FunctionDef):
-            name = node.name
-        if name in want:
-            cuts.append(ast.get_source_segment(src, node))
-    assert len(cuts) == len(want), cuts
-    ns = {"pd": pd}
-    exec("\n\n".join(cuts), ns)  # noqa: S102 - page source, not user input
-    return ns
-
-
-BITS = _page_bits()
-
-
 def _markup(frame: pd.DataFrame) -> str:
     captured = {}
 
@@ -100,7 +73,7 @@ def _markup(frame: pd.DataFrame) -> str:
             captured["body"] = body
             captured["kwargs"] = kwargs
 
-    BITS["_yfit_slot"](Box(), frame)
+    yfit_slot.render(Box(), frame)
     assert captured["kwargs"] == {"unsafe_allow_javascript": True}
     return captured["body"]
 
@@ -125,7 +98,7 @@ def _run(
         .replace("__EVENTS__", events)
         .replace(
             "__SCRIPT__",
-            BITS["_YFIT_JS"].replace("<script>", "").replace("</script>", ""),
+            yfit_slot.YFIT_JS.replace("<script>", "").replace("</script>", ""),
         )
     )
     out = subprocess.run(
@@ -156,7 +129,7 @@ def test_the_hover_trace_is_tagged_for_the_bridge():
     slot is emitted next to it on desktop."""
     src = PAGE.read_text()
     assert 'meta="history", customdata=customdata,' in src
-    assert "if not _MOBILE:\n                _yfit_slot(st, hist)" in src
+    assert "yfit_slot.render(st, hist)" in src
 
 
 # --------------------------------------------------------- the browser reading

@@ -42,7 +42,7 @@ from stocks.web.landing import (
 from stocks.web.markup import esc
 
 SITE_NAME = "TopStocks"
-REPO_URL = "https://github.com/ignasi-sant/stocks"
+REPO_URL = landing.GITHUB_URL
 
 # The share card. 1200x630 is the size Open Graph, Twitter/X, LinkedIn,
 # WhatsApp and Slack all render at 1.91:1 without re-cropping.
@@ -133,8 +133,8 @@ def _meta(name: str, content: str) -> str:
     return f'<meta name="{name}" content="{esc(content)}">'
 
 
-def _prop(prop: str, content: str) -> str:
-    return f'<meta property="{prop}" content="{esc(content)}">'
+def _prop(prop: str, content: str | int) -> str:
+    return f'<meta property="{prop}" content="{esc(str(content))}">'
 
 
 def json_ld(lang: str, base_url: str, jurisdiction: str | None = None) -> str:

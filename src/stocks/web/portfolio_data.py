@@ -32,8 +32,8 @@ from stocks.analysis.portfolio import (
     market_live,
     position_values_history,
     positions_frame,
-    session_moves,
     session_quote,
+    session_quotes,
     time_weighted_returns,
 )
 from stocks.portfolio.custody import Custody, by_position
@@ -76,10 +76,29 @@ def custody_map(
 
 @st.cache_data(ttl=300, show_spinner=False)
 def positions_table(db: str, mtime: float, base: str = "EUR") -> pd.DataFrame:
-    """Live-priced positions table in `base` (one concurrent price burst via
-    market_values), cached so Home, plain reruns and the Realized & tax
-    tab reuse it instead of refetching every position serially."""
-    return positions_frame(ledger_state(db, mtime, base)[1], base=base)
+    """Live-priced positions table in `base`, cached so Home, plain reruns and
+    the Realized & tax tab reuse it instead of pricing the book again.
+
+    Values are the last row of `basket_history` — the same download that feeds
+    the day/week/month chips and the per-ticker day change. Reusing it means
+    the page makes one price download rather than two, and the market-value
+    tile is the last point of the chart printed beside it by construction
+    instead of by coincidence. Prices therefore age on the basket's ttl (which
+    the day-change cells already followed), and names outside their session
+    still get the fresher quote override in `enriched_positions`.
+
+    Only when the basket comes back empty — no price series at all — does the
+    frame fall through to pricing itself, where a wholesale throttle raises
+    rather than valuing the book at zero (analysis.portfolio.market_values).
+    """
+    positions = ledger_state(db, mtime, base)[1]
+    vals = basket_history(db, mtime, base)
+    latest = (
+        {t: float(v) for t, v in vals.iloc[-1].items() if pd.notna(v)}
+        if not vals.empty
+        else None
+    )
+    return positions_frame(positions, base=base, values=latest)
 
 
 @st.cache_data(ttl=900, show_spinner=False)
@@ -93,15 +112,24 @@ def basket_history(db: str, mtime: float, base: str = "EUR") -> pd.DataFrame:
 
 
 @st.cache_data(ttl=300, show_spinner=False)
-def last_session_moves(tickers: tuple[str, ...]) -> dict[str, float]:
-    """Cached day % move per ticker (quote burst), extended hours included.
+def last_session_quotes(tickers: tuple[str, ...]) -> dict[str, dict]:
+    """Cached quote snapshot per ticker (one burst): price, day %, `as_of`.
 
     Only fetched for names outside their regular session — the daily close-to-
     close basket can collapse to ~0% there (a stale/flat premarket bar), so the
     day-change cells read from this instead: the live pre/after-hours move while
     Yahoo quotes one, the last completed session once those windows shut. Keyed
     by the ticker tuple; ttl refreshes it around the next open."""
-    return session_moves(list(tickers))
+    return session_quotes(list(tickers))
+
+
+def last_session_moves(tickers: tuple[str, ...]) -> dict[str, float]:
+    """Just the percentages from `last_session_quotes` — same cached burst.
+
+    For cells that only render a number. Anything that writes the number into
+    prose (the daily card) reads the quotes, because `as_of` is what keeps a
+    last-completed-session move from being printed as "today"."""
+    return {t: q["pct"] for t, q in last_session_quotes(tickers).items()}
 
 
 @st.cache_data(ttl=120, show_spinner=False)
@@ -128,10 +156,18 @@ def enriched_positions(db: str, mtime: float, base: str = "EUR") -> pd.DataFrame
     value = tbl["value"].dropna().sum()
     tbl["weight"] = tbl["value"] / value if value else float("nan")
     vals = basket_history(db, mtime, base)
+    tbl["day_asof"] = None
     if len(vals) >= 2:
         last, prev = vals.iloc[-1], vals.iloc[-2]
         tbl["day"] = (last - prev).reindex(tbl.index)
         tbl["day_pct"] = (last / prev - 1).reindex(tbl.index)
+        # Which session those two closes are — the basket's last bar, and only
+        # for rows that actually have a value there (a name whose latest daily
+        # bar is still empty is priced off the two before it).
+        stamp = getattr(vals.index[-1], "date", lambda: vals.index[-1])()
+        tbl["day_asof"] = pd.Series(
+            str(stamp), index=tbl.index
+        ).where(tbl["day_pct"].notna())
     else:
         tbl["day"] = tbl["day_pct"] = float("nan")
     # Outside the regular session the close-to-close basket can be a flat
@@ -140,16 +176,21 @@ def enriched_positions(db: str, mtime: float, base: str = "EUR") -> pd.DataFrame
     # from the EUR value. Crypto is 24/7 so it never overrides.
     off = tuple(t for t in tbl.index if not market_live(t))
     if off:
-        moves = last_session_moves(off)
-        for t, pct in moves.items():
-            if t in tbl.index:
-                tbl.at[t, "day_pct"] = pct
-                val = tbl.at[t, "value"]
-                tbl.at[t, "day"] = (
-                    val * pct / (1 + pct)
-                    if pd.notna(val) and pct != -1
-                    else float("nan")
-                )
+        for t, quote in last_session_quotes(off).items():
+            if t not in tbl.index:
+                continue
+            pct = quote["pct"]
+            tbl.at[t, "day_pct"] = pct
+            # The override moves the row to the quote's session, which is the
+            # last *completed* one off-hours — carried so the daily card can
+            # date the figure instead of calling it today's.
+            tbl.at[t, "day_asof"] = quote.get("as_of")
+            val = tbl.at[t, "value"]
+            tbl.at[t, "day"] = (
+                val * pct / (1 + pct)
+                if pd.notna(val) and pct != -1
+                else float("nan")
+            )
     return tbl.sort_values("weight", ascending=False, na_position="last")
 
 
@@ -249,22 +290,37 @@ def native_base_rates(ccys: tuple[str, ...], base: str = "EUR") -> dict[str, flo
 
 
 @st.cache_data(ttl=900, show_spinner=False)
-def recent_closes(tickers: tuple[str, ...]) -> dict[str, list[float]]:
-    """Last two daily closes per ticker (prev, last).
+def watchlist_closes(tickers: tuple[str, ...]) -> dict[str, list[float]]:
+    """A year of daily closes per ticker, oldest first.
 
     One bulk download (data.fetch.fetch_many) for the whole watchlist, cached
     15 min so the ticker list renders without hammering the network on every
-    rerun. The cache key is the ticker tuple, so every page that shows the
-    page shares one download.
+    rerun. The cache key is the ticker tuple, so every reader shares one
+    download.
+
+    A year rather than the five days the rows need, because Home also scans
+    for 52-week extremes: those used to be a second bulk download over the
+    same symbols, and two request sets over one watchlist is how a page gets
+    itself rate-limited. `recent_closes` slices the tail off this; the
+    extremes scan reads the whole series.
     """
     from stocks.data.fetch import fetch_many
 
     out: dict[str, list[float]] = {}
-    for t, df in fetch_many(list(tickers), period="5d").items():
+    for t, df in fetch_many(list(tickers), period="1y").items():
         close = df["Close"].dropna() if "Close" in df else None
         if close is not None and len(close):
-            out[t] = [float(v) for v in close.iloc[-2:]]
+            out[t] = [float(v) for v in close]
     return out
+
+
+def recent_closes(tickers: tuple[str, ...]) -> dict[str, list[float]]:
+    """Last two daily closes per ticker (prev, last) — the day % change.
+
+    A slice of `watchlist_closes`, not a fetch of its own — callers wanting to
+    drop the download behind it clear `watchlist_closes`.
+    """
+    return {t: c[-2:] for t, c in watchlist_closes(tickers).items()}
 
 
 def db_mtime(db: str) -> float:

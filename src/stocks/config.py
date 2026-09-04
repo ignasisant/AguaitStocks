@@ -3,10 +3,33 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from functools import lru_cache
 from pathlib import Path
 
 import yaml
 from dotenv import load_dotenv
+
+# libyaml-backed loader/dumper where the wheel ships it (it does on every
+# platform this deploys to) — the C parser is several times faster than the
+# pure-Python one on the same bytes, and every watchlist read and Profile-editor
+# write goes through these.
+try:  # pragma: no cover — availability is a build detail of the wheel
+    from yaml import CSafeDumper as SafeDumper
+    from yaml import CSafeLoader as SafeLoader
+except ImportError:  # pragma: no cover
+    from yaml import SafeDumper, SafeLoader  # type: ignore[assignment]
+
+
+def yaml_load(text: str) -> dict:
+    """`yaml.safe_load` on the fast loader; {} for an empty document."""
+    return yaml.load(text, Loader=SafeLoader) or {}
+
+
+def yaml_dump(data) -> str:
+    """`yaml.safe_dump` on the fast dumper, in this project's house style:
+    key order preserved (these files are read by humans) and real UTF-8."""
+    return yaml.dump(data, Dumper=SafeDumper, sort_keys=False,
+                     allow_unicode=True)
 
 load_dotenv()
 
@@ -100,6 +123,46 @@ class Holding:
         return self.shares > 0
 
 
+def stat_key(path: Path) -> tuple[int, int] | None:
+    """(mtime_ns, size) signature for `path`, or None when it doesn't exist.
+
+    The cache key for `_yaml`, and for `web.auth`'s prefs memo. Size rides
+    along with the timestamp because coarse-granularity filesystems can round
+    two writes inside the same second to the same mtime; a rewrite that
+    changes the byte count is then still seen.
+    """
+    try:
+        st = path.stat()
+    except OSError:
+        return None
+    return (st.st_mtime_ns, st.st_size)
+
+
+@lru_cache(maxsize=64)
+def _yaml_cached(path: Path, _key: tuple[int, int]) -> dict:
+    """The parse behind `_yaml` — memoized on the caller's stat signature."""
+    return yaml_load(path.read_text())
+
+
+def _yaml(path: Path) -> dict:
+    """Parsed YAML for `path` ({} when it doesn't exist), memoized per file.
+
+    `resolve()` reads `aliases` out of this file on *every* yfinance lookup,
+    and a parse of a 1.6 KB watchlist costs ~3.4 ms: one 30-ticker bulk
+    download was spending ~100 ms re-parsing the same bytes, and a page that
+    asks `market_live` per ticker paid it again. Keying the memo on the file's
+    (mtime, size) rather than clearing it from every writer means the Profile
+    editor's rewrites (stocks.web.auth) are picked up on the next read with no
+    invalidation call to forget.
+
+    The returned dict is the shared cached object: callers read from it and
+    build their own structures (the maps below, `load_watchlist`'s Holdings);
+    none of them may mutate it in place.
+    """
+    key = stat_key(path)
+    return {} if key is None else _yaml_cached(path, key)
+
+
 def _reference_raw(path: Path) -> dict:
     """Raw watchlist YAML for the global reference maps (aliases/tv).
 
@@ -110,9 +173,7 @@ def _reference_raw(path: Path) -> dict:
     """
     if not path.exists() and path == WATCHLIST_FILE:
         path = EXAMPLE_WATCHLIST_FILE
-    if not path.exists():
-        return {}
-    return yaml.safe_load(path.read_text()) or {}
+    return _yaml(path)
 
 
 def ticker_aliases(path: Path = WATCHLIST_FILE) -> dict[str, str]:
@@ -148,10 +209,15 @@ def tv_symbols(path: Path = WATCHLIST_FILE) -> dict[str, str]:
 
 
 def load_watchlist(path: Path = WATCHLIST_FILE) -> list[Holding]:
-    """Parse watchlist.yaml into Holding objects. Empty list if missing."""
-    if not path.exists():
-        return []
-    raw = yaml.safe_load(path.read_text()) or {}
+    """Parse watchlist.yaml into Holding objects. Empty list if missing.
+
+    Reads through `_yaml`, so the eight-odd calls a single rerun makes (the
+    topbar, the page, search, chat) share one parse. The Holdings themselves
+    are rebuilt per call on purpose: they are mutable dataclasses carrying
+    mutable `tags`/`alerts` lists, and handing every caller the same instances
+    would let one page's edit surface in another's.
+    """
+    raw = _yaml(path)
     holdings: list[Holding] = []
     for item in raw.get("watchlist", []):
         alerts = [Alert(**a) for a in item.get("alerts", [])]

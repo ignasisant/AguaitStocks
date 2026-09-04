@@ -341,3 +341,75 @@ def test_the_tour_query_param_opens_at_a_named_step(app):
     steps = [s.id for s in onboarding.visible_steps()]
     assert at.session_state[onboarding._MODE] == "tour"
     assert steps[at.session_state[onboarding._STEP]] == "notify"
+
+
+# ------------------------------------------------------ explore_state (Home)
+
+# The setup card's second strip: the three things an account that has
+# connected nothing can still do today. Each detector reads state the app
+# already keeps, so trying one of them costs no extra write.
+
+
+@pytest.fixture
+def account(monkeypatch, tmp_path):
+    """A signed-in account's own dir, outside a script run.
+
+    `is_logged_in`/`db_path` are stubbed because both detectors read them off
+    Streamlit state (st.user, session_state["user_paths"]) that only exists
+    inside one — these tests exercise the detectors, not the session.
+    """
+    paths = auth.paths_for("newbie@example.com", users_dir=tmp_path)
+    paths.root.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(auth, "user_paths", lambda: paths)
+    monkeypatch.setattr(auth, "watchlist_path", lambda: paths.watchlist)
+    monkeypatch.setattr(auth, "db_path", lambda: paths.db)
+    monkeypatch.setattr(auth, "is_logged_in", lambda: True)
+    return paths
+
+
+def test_a_freshly_seeded_account_has_tried_nothing(account):
+    account.watchlist.write_text(auth.STARTER_WATCHLIST)
+    assert onboarding.explore_state({}) == {
+        "search": False, "ask": False, "watchlist": False,
+    }
+
+
+def test_a_looked_up_ticker_counts_as_the_search_tried(account):
+    account.watchlist.write_text(auth.STARTER_WATCHLIST)
+    state = onboarding.explore_state({"recent_searches": ["NVDA"]})
+    assert state["search"] is True
+
+
+def test_an_answered_conversation_counts_as_the_assistant_tried(account):
+    account.watchlist.write_text(auth.STARTER_WATCHLIST)
+    auth.save_chat([{"role": "user", "content": "how is my book?"}], account.chat)
+    assert onboarding.explore_state({})["ask"] is True
+
+
+def test_an_empty_conversation_does_not_count(account):
+    account.watchlist.write_text(auth.STARTER_WATCHLIST)
+    account.chat.write_text('{"conversations": [{"id": "a", "messages": []}]}')
+    assert onboarding.explore_state({})["ask"] is False
+
+
+def test_editing_the_seeded_watchlist_is_what_makes_it_the_users_own(account):
+    account.watchlist.write_text(auth.STARTER_WATCHLIST)
+    assert onboarding.explore_state({})["watchlist"] is False
+    account.watchlist.write_text("watchlist:\n  - ticker: NVDA\n")
+    assert onboarding.explore_state({})["watchlist"] is True
+
+
+def test_a_missing_watchlist_reads_as_untouched_rather_than_raising(account):
+    assert onboarding.explore_state({})["watchlist"] is False
+
+
+def test_explore_state_is_kept_apart_from_the_four_setup_capabilities(account):
+    """Two strips, two meanings. The tour badges every connectable step from
+    setup_state, so a key that drifted across would badge a step for something
+    there is nothing to connect."""
+    account.watchlist.write_text(auth.STARTER_WATCHLIST)
+    explore = set(onboarding.explore_state({}))
+    setup = set(onboarding.setup_state({}))
+    assert explore == {"search", "ask", "watchlist"}
+    assert setup == {"login", "import", "ai", "telegram"}
+    assert not explore & setup

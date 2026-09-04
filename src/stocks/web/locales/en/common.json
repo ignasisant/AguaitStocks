@@ -21,5 +21,7 @@
   "common.toast_offline": "No connection to the data provider — some figures are missing.",
   "common.retry": "Retry",
   "common.sync_failed": "Cloud sync failed — change kept on this device for now.",
-  "common.storage_restore_failed": "Cloud storage is unreachable, so sign-in was halted to protect your data. Retry in a few minutes."
+  "common.storage_restore_failed": "Cloud storage is unreachable, so sign-in was halted to protect your data. Retry in a few minutes.",
+  "common.cta_import": "Import a statement",
+  "common.cta_add_tickers": "Add tickers"
 }

@@ -33,10 +33,10 @@ and a reciprocal that is silently wrong is worse than a blank).
 from __future__ import annotations
 
 import json
-import math
 from dataclasses import dataclass
 
 from stocks.config import DATA_DIR
+from stocks.formatting import finite
 from stocks.fuzzy import FUZZY_CUTOFF, MIN_QUERY, fuzzy_ratio
 
 # Yahoo quoteType values this module treats as a fund. INDEX is deliberately
@@ -221,15 +221,6 @@ class FundProfile:
 # ------------------------------------------------------------- classification
 
 
-def _num(value) -> float | None:
-    """`value` as a finite float, None for anything else (NaN, pd.NA, text)."""
-    try:
-        out = float(value)
-    except (TypeError, ValueError):
-        return None
-    return out if math.isfinite(out) else None
-
-
 def _read_types() -> dict[str, str]:
     try:
         data = json.loads(TYPE_CACHE.read_text())
@@ -286,11 +277,9 @@ def quote_type(ticker: str, *, fetch: bool = True) -> str | None:
     if not fetch:
         return None
     try:
-        import yfinance as yf
+        from stocks.data.fetch import info as quote_info
 
-        from stocks.data.fetch import resolve
-
-        info = yf.Ticker(resolve(key)).info or {}
+        info = quote_info(key)
     except Exception:
         return None
     found = info.get("quoteType")
@@ -363,7 +352,7 @@ def _frame_value(frame, row: str) -> float | None:
     try:
         if frame is None or frame.empty or row not in frame.index:
             return None
-        return _num(frame.iloc[:, 0].get(row))
+        return finite(frame.iloc[:, 0].get(row))
     except Exception:
         return None
 
@@ -376,7 +365,7 @@ def _weights(raw: dict | None, labels: dict[str, str]) -> tuple[tuple[str, float
     """
     out: dict[str, float] = {}
     for slug, value in (raw or {}).items():
-        weight = _num(value)
+        weight = finite(value)
         if not weight or weight <= 0:
             continue
         label = labels.get(str(slug)) or str(slug).replace("_", " ").title()
@@ -391,7 +380,7 @@ def _holdings(frame) -> tuple[FundHolding, ...]:
         if frame is None or frame.empty:
             return ()
         for symbol, row in frame.iterrows():
-            weight = _num(row.get("Holding Percent"))
+            weight = finite(row.get("Holding Percent"))
             if weight is None:
                 continue
             rows.append(
@@ -419,7 +408,7 @@ def _expense_ratio(ops, info: dict) -> float | None:
     # A blank or zero ops row is common on European listings, and a fund that
     # genuinely costs nothing does not exist — fall through rather than
     # reporting 0.00%.
-    percent = _num(info.get("netExpenseRatio")) or _num(
+    percent = finite(info.get("netExpenseRatio")) or finite(
         info.get("annualReportExpenseRatio")
     )
     return percent / 100 if percent else None
@@ -444,7 +433,9 @@ def fetch_profile(ticker: str, info: dict | None = None) -> FundProfile | None:
     symbol = resolve(key)
     if info is None:
         try:
-            info = yf.Ticker(symbol).info or {}
+            from stocks.data.fetch import info as quote_info
+
+            info = quote_info(symbol)
         except Exception:
             return None
     kind = str(info.get("quoteType") or "").upper()
@@ -481,9 +472,9 @@ def fetch_profile(ticker: str, info: dict | None = None) -> FundProfile | None:
         family=info.get("fundFamily") or overview.get("family"),
         legal_type=info.get("legalType") or overview.get("legalType"),
         expense_ratio=_expense_ratio(ops, info),
-        aum=_num(info.get("totalAssets")),
-        dividend_yield=_num(info.get("yield"))
-        or _num(info.get("trailingAnnualDividendYield")),
+        aum=finite(info.get("totalAssets")),
+        dividend_yield=finite(info.get("yield"))
+        or finite(info.get("trailingAnnualDividendYield")),
         turnover=_frame_value(ops, "Annual Holdings Turnover"),
         bond_duration=_frame_value(bonds, "Duration"),
         bond_maturity=_frame_value(bonds, "Maturity"),

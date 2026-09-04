@@ -23,11 +23,12 @@ quantity at the split date makes the ratio unambiguous.
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from pathlib import Path
 
 import pandas as pd
 import streamlit as st
 
-from stocks.portfolio import last_import, platforms
+from stocks.portfolio import demo, last_import, platforms
 from stocks.portfolio.ledger import add_many, all_transactions, clear, delete_many
 from stocks.portfolio.validate import known_tickers, validate
 from stocks.web import auth, skeletons
@@ -54,6 +55,8 @@ ledger = all_transactions(paths.db)
 if st.session_state.pop("imports_cleared", False):
     st.toast(tr("import.toast_cleared"), icon=":material/delete_forever:")
 
+demo_rows = [t for t in ledger if demo.is_demo(t)]
+
 with st.container(horizontal=True, vertical_alignment="center"):
     st.metric(tr("import.metric_in_ledger"), len(ledger))
     with st.popover(
@@ -71,6 +74,12 @@ with st.container(horizontal=True, vertical_alignment="center"):
             last_import.forget(paths.last_import)
             st.session_state["imports_cleared"] = True
             st.rerun()
+
+
+if demo_rows:
+    # Not a warning here: on this page the demo book is on its way out, and
+    # what the reader needs to know is that importing is what removes it.
+    st.caption(tr("import.demo_rows_caption", n=len(demo_rows)))
 
 
 def _tx_frame(txs) -> pd.DataFrame:
@@ -139,6 +148,46 @@ platform = platforms.by_key(
     )
 )
 
+ASSETS = Path(__file__).resolve().parents[1] / "assets"
+_SAMPLE = "import_sample"  # session key: the staged example statement
+
+
+class _Sample:
+    """The shipped example statement, shaped like an st.file_uploader value.
+
+    Everything below this point reads `.name` and `.getvalue()` and nothing
+    else, so the example rides the identical path a real upload does — parse,
+    validate, preview, commit, last-import record, undo. A separate "load demo
+    data" route would be the thing that drifts from the real one, and would
+    also have to invent a ledger; this is a statement, parsed for real.
+    """
+
+    def __init__(self, name: str, data: bytes) -> None:
+        self.name = name
+        self._data = data
+
+    def getvalue(self) -> bytes:
+        return self._data
+
+
+def _sample_offer(platform: platforms.Platform) -> None:
+    """Offer the example statement to an account with nothing to import yet.
+
+    Only on the empty path: an account that already has a ledger has no use
+    for it, and a button that adds someone else's trades to a real book would
+    be a trap rather than a tour.
+    """
+    if not platform.sample:
+        return
+    path = ASSETS / platform.sample
+    if not path.is_file():  # a trimmed deploy — say nothing rather than fail
+        return
+    st.caption(tr("import.sample_caption", platform=platform.label))
+    if st.button(tr("import.sample_button"), icon=":material/science:"):
+        st.session_state[_SAMPLE] = (platform.key, path.name, path.read_bytes())
+        st.rerun()
+
+
 # Key the uploader by platform so switching platforms drops the staged file —
 # a statement must never be parsed by another platform's parser.
 uploaded = st.file_uploader(
@@ -150,10 +199,24 @@ uploaded = st.file_uploader(
     type=list(platform.file_types),
     key=f"upload_{platform.key}",
 )
+# Kept across reruns, not consumed on the run that staged it: there are two
+# interactions (the wipe checkbox, the commit button) between staging the
+# example and importing it, and st.file_uploader's own value survives those
+# the same way. Dropped when a real upload arrives or the platform changes —
+# a statement must never be parsed by another platform's parser — and cleared
+# on commit below.
+staged = st.session_state.get(_SAMPLE)
+if uploaded is not None or (staged and staged[0] != platform.key):
+    st.session_state.pop(_SAMPLE, None)
+    staged = None
+if uploaded is None and staged is not None:
+    uploaded = _Sample(staged[1], staged[2])
 if uploaded is None:
     record = last_import.load(paths.last_import)
     if record is None:
         st.info(platform.hint)
+        if len(demo_rows) == len(ledger):  # nothing real to lose
+            _sample_offer(platform)
         st.stop()
 
     # Committed imports live in the ledger (SQLite) — nothing to re-upload.
@@ -229,7 +292,7 @@ wipe = st.checkbox(tr("import.wipe_checkbox"))
 _preview = skeletons.reserve("table", rows=6, cols=5, title=True)
 validation = validate(
     result,
-    [] if wipe else ledger,
+    [] if wipe else demo.without(ledger),
     known=known_tickers(paths.watchlist, paths.db),
     lookup=_ticker_exists,
 )
@@ -304,7 +367,13 @@ if st.button(tr("import.commit_button"), type="primary",
              disabled=not importable or not origin):
     if wipe:
         clear(paths.db)
+    # The first real import is what the demo book was borrowed against: an
+    # invented cost basis must never end up mixed into a real one.
+    demo.clear(paths.db)
     ids = add_many(platforms.stamp_broker(importable, origin), paths.db)
+    # Imported: the staging slot has done its job, and leaving it filled would
+    # re-offer the same rows for a second commit on the next rerun.
+    st.session_state.pop(_SAMPLE, None)
     last_import.save(
         last_import.ImportRecord(
             filename=uploaded.name,

@@ -26,8 +26,6 @@ import re
 from pathlib import Path
 from urllib.parse import urlparse
 
-import yfinance as yf
-
 from stocks import obs
 from stocks.config import DATA_DIR
 from stocks.data.http import get_bytes_and_type, probe_image
@@ -103,7 +101,9 @@ def _company_domain(ticker: str) -> str | None:
     """Website domain via yfinance, or None — never raises: Yahoo throttles
     shared cloud IPs hard, and a logo lookup must not take the page down."""
     try:
-        website = (yf.Ticker(ticker).info or {}).get("website")
+        from stocks.data.fetch import info as quote_info
+
+        website = quote_info(ticker).get("website")
     except Exception:
         return None
     return domain_from_website(website)

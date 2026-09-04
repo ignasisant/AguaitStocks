@@ -27,8 +27,6 @@ and only then commits (see the web Import page / ledger.add_many).
 
 from __future__ import annotations
 
-from pathlib import Path
-
 from stocks.portfolio import statement
 from stocks.portfolio.ledger import Transaction
 from stocks.portfolio.statement import (
@@ -173,6 +171,3 @@ def parse_rows(rows: list[dict], col: dict[str, str] | None = None) -> ParseResu
     """
     return statement.parse_rows(rows, FORMAT, col)
 
-
-def parse_file(path: str | Path) -> ParseResult:
-    return parse_csv(Path(path).read_text())

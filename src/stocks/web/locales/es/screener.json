@@ -1,6 +1,7 @@
 {
   "screener.title": "Filtro de la lista de seguimiento",
-  "screener.watchlist_empty": "Lista de seguimiento vacía. Añade valores en la página **Perfil**.",
+  "screener.empty_title": "Nada que filtrar",
+  "screener.empty_body": "El filtro ordena los valores de tu lista de seguimiento unos junto a otros por valoración, crecimiento y calidad. Añade unos cuantos para obtener una tabla comparable.",
   "screener.only_crypto": "Solo hay cripto en la lista de seguimiento — el filtro por KPI necesita acciones.",
   "screener.crypto_excluded": "{n} activo(s) cripto excluido(s) — sin fundamentales que filtrar.",
   "screener.screen_filters": "Cribado y filtros",

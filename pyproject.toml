@@ -14,7 +14,6 @@ dependencies = [
     "cryptography>=43",
     "ddgs>=9.15.0",
     "google-genai>=1.0",
-    "httpx>=0.28.1",
     "lxml>=6.1.1",
     "model2vec>=0.9.0",
     "openai>=1.60",
@@ -47,17 +46,15 @@ build-backend = "uv_build"
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 
-# Type checking. Ratcheted, not all-at-once: the packages listed here are
-# clean and CI keeps them that way. The rest of the tree still has ~78
-# diagnostics, most of them pandas frames whose stubs can't express what a
-# column holds — widening `include` one package at a time is the way in, not a
-# blanket suppression. Run `uvx ty check src/stocks` to see the whole picture.
+# Type checking. The whole of src/stocks is checked and CI keeps it that way,
+# so a new package is covered the day it lands — there is no include list left
+# to forget to extend. Where pandas attaches a method dynamically and no
+# checker can see it (DatetimeIndex's date accessors, mainly), the suppression
+# sits on a one-line wrapper with a comment naming why, not on the call site.
+# Tests are out: their fakes are deliberately partial stand-ins for library
+# objects, and typing those adds ceremony without catching a shipped bug.
 [tool.ty.src]
-include = [
-    "src/stocks/chat",
-    "src/stocks/data",
-    "src/stocks/portfolio",
-]
+include = ["src/stocks"]
 
 [tool.ruff]
 line-length = 90

@@ -1,5 +1,6 @@
 """Who may spend the operator-funded free chain, and who may not."""
 
+import time
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -32,11 +33,13 @@ def policy(monkeypatch):
 # ------------------------------------------------------------------ policies
 
 
-def test_the_default_asks_the_account_to_be_a_day_old(policy):
+def test_the_default_lets_a_brand_new_account_in(policy):
+    # A user who just signed up can use the assistant in that first session:
+    # being told to come back tomorrow is how a new account never comes back.
     policy()
-    assert engine.free_policy() == "established"
-    assert not engine.free_eligible(_prefs(1))
-    assert engine.free_eligible(_prefs(25))
+    assert engine.free_policy() == "trial"
+    assert engine.free_eligible(_prefs(0))
+    assert engine.free_eligible(_prefs(1))
 
 
 def test_open_lets_anyone_signed_in_through(policy):
@@ -44,20 +47,91 @@ def test_open_lets_anyone_signed_in_through(policy):
     assert engine.free_eligible(_prefs(0))
 
 
+def test_established_still_holds_a_young_account_out(policy):
+    # The old hard wall is still an option a worried operator can set.
+    policy(eligibility="established")
+    assert not engine.free_eligible(_prefs(1))
+    assert engine.free_eligible(_prefs(25))
+
+
 def test_an_unknown_policy_falls_back_to_the_default(policy):
     policy(eligibility="whatever")
-    assert engine.free_policy() == "established"
+    assert engine.free_policy() == "trial"
 
 
 def test_the_waiting_period_is_configurable(policy):
-    policy(min_account_hours="72")
+    policy(eligibility="established", min_account_hours="72")
     assert not engine.free_eligible(_prefs(48))
     assert engine.free_eligible(_prefs(80))
 
 
 def test_a_nonsense_waiting_period_uses_the_default(policy):
-    policy(min_account_hours="soon")
+    policy(eligibility="established", min_account_hours="soon")
     assert engine.free_eligible(_prefs(25))
+
+
+# ------------------------------------------------------------- trial window
+
+
+def test_a_new_account_spends_against_the_smaller_cap(policy):
+    policy()
+    assert engine.in_free_trial(_prefs(1))
+    assert engine.free_daily_cap(_prefs(1)) == engine.FREE_TRIAL_CAP
+    assert engine.free_daily_cap(_prefs(25)) == engine.FREE_DAILY_CAP
+    # No account in hand means the configured cap, not the trial one.
+    assert engine.free_daily_cap() == engine.FREE_DAILY_CAP
+
+
+def test_the_trial_window_closes_on_the_same_clock_as_the_old_wall(policy):
+    policy(min_account_hours="72")
+    assert engine.in_free_trial(_prefs(48))
+    assert not engine.in_free_trial(_prefs(80))
+
+
+def test_the_trial_cap_is_configurable(policy):
+    policy(trial_cap="2")
+    assert engine.free_daily_cap(_prefs(1)) == 2
+
+
+def test_a_nonsense_trial_cap_uses_the_default(policy):
+    policy(trial_cap="loads")
+    assert engine.free_daily_cap(_prefs(1)) == engine.FREE_TRIAL_CAP
+
+
+def test_the_trial_cap_never_exceeds_the_configured_one(policy):
+    # An operator who dialled the daily allowance below the trial one meant
+    # that number as the ceiling for everybody.
+    policy(daily_cap="3")
+    assert engine.free_daily_cap(_prefs(1)) == 3
+
+
+def test_only_the_trial_policy_has_a_trial(policy):
+    policy(eligibility="open")
+    assert not engine.in_free_trial(_prefs(1))
+    assert engine.free_daily_cap(_prefs(1)) == engine.FREE_DAILY_CAP
+
+
+def test_an_account_of_unknown_age_is_not_put_on_trial(policy):
+    policy()
+    assert not engine.in_free_trial(_prefs(0, estimated=True))
+    assert not engine.in_free_trial({})
+
+
+def test_a_new_account_runs_out_at_the_trial_cap_not_the_full_one(policy):
+    policy()
+    prefs = _prefs(1)
+    for _ in range(engine.FREE_TRIAL_CAP):
+        assert engine.spend_free_quota(prefs)
+    assert not engine.spend_free_quota(prefs)
+    assert engine.free_account_left(prefs) == 0
+
+
+def test_the_trial_wall_says_the_allowance_grows(policy):
+    policy()
+    prefs = _prefs(1)
+    prefs[f"free_msgs::{time.strftime('%Y-%m-%d')}"] = engine.FREE_TRIAL_CAP
+    assert engine.free_cap_reason(prefs) == "trial"
+    assert engine.FREE_CAP_ERRORS["trial"] == "chat.free_cap_trial"
 
 
 # ---------------------------------------------------------------- allowlist
@@ -114,7 +188,7 @@ def test_a_naive_timestamp_is_read_as_utc():
 
 
 def test_an_ineligible_account_is_not_offered_the_chain(policy, monkeypatch):
-    policy()
+    policy(eligibility="established")
     assert all(p.id != "free" for p, _, _ in engine.attempts(_prefs(1)))
 
 
@@ -132,10 +206,12 @@ def test_an_eligible_account_still_gets_it(policy, monkeypatch):
 def test_the_quota_refuses_an_ineligible_account_outright(policy):
     # The gate is re-checked where the money is spent, so a saved provider
     # preference cannot walk around the provider list.
-    policy()
+    policy(eligibility="established")
     prefs = _prefs(1)
     assert not engine.spend_free_quota(prefs)
     assert not [k for k in prefs if k.startswith("free_msgs::")]
+    assert engine.free_cap_reason(prefs) == "ineligible"
+    assert engine.FREE_CAP_ERRORS["ineligible"] == "chat.free_ineligible"
 
 
 def test_byok_is_untouched_by_the_policy(policy, monkeypatch):

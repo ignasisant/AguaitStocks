@@ -19,6 +19,7 @@ from dataclasses import replace
 
 import streamlit as st
 
+from stocks.config import currency_symbol
 from stocks.portfolio import tax
 from stocks.web import auth, i18n
 
@@ -125,7 +126,7 @@ def label(code: str) -> str:
 
 
 def symbol(currency: str) -> str:
-    return auth.CURRENCY_SYMBOL.get(currency.upper(), f"{currency} ")
+    return currency_symbol(currency)
 
 
 def money(value: float, currency: str, *, signed: bool = False) -> str:

@@ -165,6 +165,18 @@ def all_transactions(path: Path = DB_PATH) -> list[Transaction]:
     return [_row_to_tx(r) for r in rows]
 
 
+def has_transactions(path: Path = DB_PATH) -> bool:
+    """Whether the ledger holds anything at all.
+
+    "Has this account imported yet" is asked on every Home rerun and once per
+    guided-tour step, and it used to be answered by loading the whole table
+    and mapping every row into a Transaction just to take its truthiness. One
+    row is enough.
+    """
+    with closing(connect(path)) as conn:
+        return conn.execute("SELECT 1 FROM transactions LIMIT 1").fetchone() is not None
+
+
 def delete(tx_id: int, path: Path = DB_PATH) -> None:
     with closing(connect(path)) as conn, conn:
         conn.execute("DELETE FROM transactions WHERE id = ?", (tx_id,))

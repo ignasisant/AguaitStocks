@@ -21,7 +21,7 @@ from stocks.analysis.screener import (
 from stocks.config import tickers as watchlist_tickers
 from stocks.data.crypto import is_crypto
 from stocks.data.funds import is_fund
-from stocks.web import auth, skeletons
+from stocks.web import auth, empty, skeletons
 from stocks.web.i18n import t as tr
 from stocks.web.kpi_text import kpi_desc, kpi_label
 from stocks.web.widgets import is_mobile, ticker_table_html
@@ -38,7 +38,16 @@ all_tickers = watchlist_tickers(auth.watchlist_path())
 # excluded from the next run on.
 tickers = [t for t in all_tickers if not is_crypto(t) and not is_fund(t, fetch=False)]
 if not all_tickers:
-    st.warning(tr("screener.watchlist_empty"))
+    empty.state(
+        tr("screener.empty_title"),
+        tr("screener.empty_body"),
+        event="screener.watchlist",
+        page="app_pages/profile.py",
+        label=tr("common.cta_add_tickers"),
+        cta_icon="add",
+        preview="table",
+        preview_kw={"rows": 5, "cols": 6},
+    )
     st.stop()
 if not tickers:
     st.info(tr("screener.only_crypto"))

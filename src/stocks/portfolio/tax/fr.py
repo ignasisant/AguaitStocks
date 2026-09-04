@@ -36,7 +36,8 @@ from stocks.portfolio.tax.base import (
     ReportingFlag,
     TaxPeriod,
     TaxSettings,
-    covers,
+    open_period,
+    sales_in,
 )
 
 CODE = "FR"
@@ -119,12 +120,8 @@ def fiscal_period(
     `buy_dates` is unused: France has no repurchase rule blocking a loss — a
     buy-back simply re-averages the holding, which the replay already did.
     """
-    out = FrTaxPeriod(
-        jurisdiction=CODE, currency=CURRENCY, year=int(period[:4]), period=period
-    )
-    for s in realized:
-        if not covers(period, s.sell_date, YEAR_START):
-            continue
+    out = open_period(FrTaxPeriod, CODE, CURRENCY, period)
+    for s in sales_in(period, realized, YEAR_START):
         out.sales.append(s)
         if s.gain >= 0:
             out.realized_gain += s.gain

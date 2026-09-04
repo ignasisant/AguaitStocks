@@ -1,6 +1,7 @@
 {
   "screener.title": "Watchlist screener",
-  "screener.watchlist_empty": "Watchlist empty. Add tickers on the **Profile** page.",
+  "screener.empty_title": "Nothing to screen",
+  "screener.empty_body": "The screener ranks the stocks on your watchlist side by side on valuation, growth and quality. Add a few tickers to get a comparable table.",
   "screener.only_crypto": "Only crypto on the watchlist — the KPI screener needs stocks.",
   "screener.crypto_excluded": "{n} crypto asset(s) excluded — no fundamentals to screen.",
   "screener.screen_filters": "Screen & filters",

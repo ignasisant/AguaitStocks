@@ -32,5 +32,8 @@
   "import.broker_help": "This format names no broker, so pick the one the file came from — or type its name if it isn't listed. It is stamped on every row; the Fees and Custody views group your book by it.",
   "import.commit_button": "Commit to ledger",
   "import.commit_success": "Imported {n} transactions. Ledger now holds {total}.",
-  "import.commit_help": "Committed rows persist in the ledger across reloads — no need to re-upload. Open **Portfolio** for positions & tax, or **Overview** to see your buys/sells on the price chart."
+  "import.commit_help": "Committed rows persist in the ledger across reloads — no need to re-upload. Open **Portfolio** for positions & tax, or **Overview** to see your buys/sells on the price chart.",
+  "import.sample_caption": "No {platform} statement to hand? Try the app with an example one — it is parsed, previewed and committed exactly like yours, and undone with **Clear last import**.",
+  "import.sample_button": "Load an example statement",
+  "import.demo_rows_caption": "{n} of these are demo transactions. Importing a statement removes them."
 }

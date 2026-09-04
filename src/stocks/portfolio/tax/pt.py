@@ -37,7 +37,8 @@ from stocks.portfolio.tax.base import (
     ReportingFlag,
     TaxPeriod,
     TaxSettings,
-    covers,
+    open_period,
+    sales_in,
 )
 
 CODE = "PT"
@@ -192,16 +193,8 @@ def fiscal_period(
     `buy_dates` is unused: Portugal has no repurchase rule blocking a loss.
     """
     cfg = settings or TaxSettings()
-    out = PtTaxPeriod(
-        jurisdiction=CODE,
-        currency=CURRENCY,
-        year=int(period[:4]),
-        period=period,
-        settings=cfg,
-    )
-    for s in realized:
-        if not covers(period, s.sell_date, YEAR_START):
-            continue
+    out = open_period(PtTaxPeriod, CODE, CURRENCY, period, settings=cfg)
+    for s in sales_in(period, realized, YEAR_START):
         out.sales.append(s)
         long = _is_long(s)
         gain = s.gain

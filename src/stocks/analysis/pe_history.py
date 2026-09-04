@@ -35,9 +35,14 @@ def split_factors(
     today's share basis (matching split-adjusted prices). A 10:1 split after
     a quarter gives that quarter a factor of 10.
     """
+    items: list[tuple[date, float]]
     if isinstance(splits, pd.Series):
-        items = [(k.date() if hasattr(k, "date") else k, float(v))
-                 for k, v in splits.items()]
+        # A yfinance splits Series is keyed by Timestamp; the comparison
+        # below is against plain dates.
+        items = [
+            (ts.date(), float(v))
+            for ts, v in zip(pd.DatetimeIndex(splits.index), splits, strict=True)
+        ]
     else:
         items = [(k, float(v)) for k, v in splits.items()]
     out: dict[date, float] = {}

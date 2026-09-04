@@ -11,6 +11,7 @@ from __future__ import annotations
 import html
 import re
 from datetime import date
+from typing import cast
 from urllib.error import URLError
 
 import pandas as pd
@@ -18,6 +19,7 @@ import plotly.graph_objects as go
 import streamlit as st
 from yfinance.exceptions import YFRateLimitError
 
+from stocks import obs
 from stocks.analysis.fundamentals import (
     KPI_SOURCES,
     annual_financials,
@@ -32,7 +34,7 @@ from stocks.analysis.fundamentals import (
 from stocks.analysis.indicators import add_indicators
 from stocks.analysis.moat import PILLAR_WEIGHTS, MoatScore, moat_score
 from stocks.analysis.pe_history import pe_vs_history, window_stats
-from stocks.config import load_watchlist
+from stocks.config import currency_symbol, load_watchlist
 from stocks.data.bafin import insider_transactions as bafin_transactions
 from stocks.data.crypto import is_crypto, split_pair
 from stocks.data.edgar import cik_for
@@ -56,8 +58,7 @@ from stocks.formatting import compact_money
 from stocks.portfolio.custody import Custody, by_position, mix
 from stocks.portfolio.ledger import all_transactions
 from stocks.portfolio.positions import build as build_positions
-from stocks.web import auth, notices, skeletons
-from stocks.web.i18n import active_language
+from stocks.web import auth, frames, notices, range_readout, skeletons
 from stocks.web.i18n import t as tr
 from stocks.web.kpi_text import kpi_desc, sources_table
 from stocks.web.widgets import (
@@ -91,6 +92,7 @@ from stocks.web.widgets import (
     TRANSPARENT,
     UP_COLOR,
     WARN_COLOR,
+    KpiTile,
     broker_chips_html,
     chart_layout,
     company_name,
@@ -114,7 +116,7 @@ _MOBILE = is_mobile()
 # value is converted into it, and the ledger replay behind that value uses it
 # as its base (see web/portfolio_data.py).
 REPORT_CCY = auth.reporting_currency()
-REPORT_SYM = auth.CURRENCY_SYMBOL[REPORT_CCY]
+REPORT_SYM = currency_symbol(REPORT_CCY)
 
 # Selection comes from the top-bar search (web/app.py); the ?ticker=
 # deep-link handling there feeds the same session key.
@@ -166,7 +168,7 @@ def _trim(df: pd.DataFrame, label: str) -> pd.DataFrame:
     if df.empty:
         return df
     if label in ("1d", "1w"):
-        sessions = df.index.normalize()
+        sessions = frames.sessions(df)
         keep = sessions.unique()[-1 if label == "1d" else -5:]
         return df[sessions >= keep[0]]
     return df[df.index >= df.index[-1] - _WINDOW[label]]
@@ -191,10 +193,10 @@ def _rangebreaks(df: pd.DataFrame, interval: str) -> list[dict]:
     — so US and EU tickers both work without an exchange calendar. Markets
     with weekend bars (crypto) get no breaks at all.
     """
-    if df.empty or (df.index.dayofweek >= 5).any():
+    if df.empty or (frames.weekdays(df) >= 5).any():
         return []
     breaks = [dict(bounds=["sat", "mon"])]
-    sessions = df.index.normalize().unique()
+    sessions = frames.sessions(df).unique()
     holidays = pd.bdate_range(sessions[0], sessions[-1]).difference(sessions)
     if len(holidays):
         breaks.append(dict(values=holidays.tolist()))
@@ -204,7 +206,9 @@ def _rangebreaks(df: pd.DataFrame, interval: str) -> list[dict]:
         hours = t.dt.hour + t.dt.minute / 60
         open_h = hours.groupby(day).min().median()
         close_h = (
-            hours.groupby(day).max() + pd.Timedelta(interval) / pd.Timedelta(hours=1)
+            hours.groupby(day).max()
+            + cast(pd.Timedelta, pd.Timedelta(interval))
+            / cast(pd.Timedelta, pd.Timedelta(hours=1))
         ).median()
         if close_h != open_h:
             breaks.append(dict(bounds=[close_h % 24, open_h], pattern="hour"))
@@ -236,7 +240,9 @@ def _earnings_events(t: str):
 
     try:
         return fetch_earnings(t)
-    except Exception:
+    except Exception as exc:
+        obs.warn("ticker.earnings_fetch_failed", ticker=t,
+                 error_type=type(exc).__name__, error=str(exc)[:300])
         return [], []
 
 
@@ -277,7 +283,12 @@ def _event_markers(
             continue
         # First bar of the event's session; a report on a non-trading day
         # (or after the close) lands on the next bar, where the gap shows.
-        pos = min(df.index.searchsorted(ts), len(df) - 1)
+        # searchsorted's stub takes numbers and strings, not the Timestamp
+        # a DatetimeIndex actually wants.
+        pos = min(
+            int(frames.dates(df).searchsorted(ts)),  # ty: ignore[no-matching-overload]
+            len(df) - 1,
+        )
         r = by_date.get(d)
         parts = [tr("ticker.hover_results", date=f"{d:%Y-%m-%d}")]
         if r and r.reported_eps is not None:
@@ -310,7 +321,9 @@ def _held(db: str, mtime: float):
     try:
         positions, _ = build_positions(_ledger(db, mtime), to_base=lambda a, c, d: a)
         return {p.ticker: p for p in positions}
-    except Exception:
+    except Exception as exc:
+        obs.warn("ticker.positions_failed", db=db, mtime=mtime,
+                 error_type=type(exc).__name__, error=str(exc)[:300])
         return {}
 
 
@@ -322,7 +335,9 @@ def _custody(db: str, mtime: float) -> dict[str, dict[str, Custody]]:
     EUR basis, so this stays off the network."""
     try:
         return by_position(_ledger(db, mtime), to_base=lambda a, c, d: a)
-    except Exception:
+    except Exception as exc:
+        obs.warn("ticker.custody_failed", db=db, mtime=mtime,
+                 error_type=type(exc).__name__, error=str(exc)[:300])
         return {}
 
 
@@ -336,6 +351,23 @@ def _position_values(db: str, mtime: float, base: str = "EUR") -> dict[str, floa
 
     held = _held(db, mtime)
     return market_values(list(held.values()), base=base) if held else {}
+
+
+def _position_values_safe(db: str, mtime: float, base: str = "EUR") -> dict[str, float]:
+    """`_position_values`, degraded to {} while Yahoo is throttling.
+
+    The portfolio weight and the ≈reporting-currency figure are garnish on the
+    position block — this page's subject is the ticker's own price, which comes
+    from its own fetch. A rate-limited book-wide burst must not take the page
+    down with it. Caught out here rather than inside the loader so the empty
+    answer isn't cached for the loader's full ttl.
+    """
+    try:
+        return _position_values(db, mtime, base)
+    except (YFRateLimitError, URLError) as exc:
+        obs.warn("ticker.position_values_degraded",
+                 error_type=type(exc).__name__, error=str(exc)[:200])
+        return {}
 
 
 def _live_quote(ticker: str) -> dict | None:
@@ -372,7 +404,9 @@ def _projection(t: str, last_fy: int) -> pd.DataFrame:
     except (YFRateLimitError, URLError) as exc:
         notices.data_toast(exc)
         return pd.DataFrame()  # no projection overlay this run
-    except Exception:
+    except Exception as exc:
+        obs.warn("ticker.projection_failed", ticker=t,
+                 error_type=type(exc).__name__, error=str(exc)[:300])
         return pd.DataFrame()
     est_ccy = estimate_currency(raw_est.revenue_estimate) or estimate_currency(
         raw_est.earnings_estimate
@@ -485,7 +519,7 @@ def _mobile_summary_html(
         + "</span></div>"
     ]
     if my_pos:
-        values_base = _position_values(db, db_mtime(db), REPORT_CCY)
+        values_base = _position_values_safe(db, db_mtime(db), REPORT_CCY)
         total = sum(values_base.values())
         value = values_base.get(my_pos.ticker)
         value_native = my_pos.quantity * last
@@ -532,7 +566,7 @@ def _position_metrics(cols, pos, last: float) -> None:
     pnl_native = value_native - pos.cost_native
     pnl_pct = (last / pos.avg_cost_native - 1) * 100 if pos.avg_cost_native else 0.0
     db = str(auth.db_path())
-    values_base = _position_values(db, db_mtime(db), REPORT_CCY)
+    values_base = _position_values_safe(db, db_mtime(db), REPORT_CCY)
     total = sum(values_base.values())
     value = values_base.get(pos.ticker)
 
@@ -555,110 +589,6 @@ def _position_metrics(cols, pos, last: float) -> None:
     p4.caption(tr("ticker.n_shares", n=f"{pos.quantity:,.4f}"))
 
 
-# Drag-zooming the price chart picks a custom window, but Plotly reports that
-# as a client-side relayout and Streamlit surfaces no relayout event (only
-# box/lasso *selections*, which would cost the drag-to-zoom gesture and a
-# server round-trip per drag). So the change over the picked window is computed
-# in the browser: the price series rides along in the readout slot's data
-# attributes — Plotly serializes numeric arrays as base64 ({"dtype", "bdata"}),
-# so gd.data is not readable from JS without decoding it — and the picked
-# window is read off the chart's own layout once the drag ends. No rerun, so
-# the line lands as the mouse comes up. Desktop only: phones pin both axes.
-_RANGE_JS = r"""
-<script>
-(function () {
-  if (window.__topstocksRangeChange) return;  /* wire once per session */
-  window.__topstocksRangeChange = true;
-  /* Axis range endpoints arrive as "2026-06-28 15:07:03.5225" (space, and a
-     sub-millisecond fraction outside the ISO grammar Safari holds to); our own
-     stamps are ISO. Neither carries a zone — the frame is exchange-local wall
-     time, as the chart's — so both parse alike and only their span is used. */
-  const ms = (v) => {
-    if (typeof v === "number") return v;
-    return Date.parse(String(v).replace(" ", "T").replace(/(\.\d{3})\d+/, "$1"));
-  };
-  /* The price chart is the one carrying a meta="price" trace; every other
-     chart on the page keeps its own zoom to itself. */
-  const chart = () =>
-    Array.prototype.find.call(
-      document.querySelectorAll(".js-plotly-plot"),
-      (gd) => (gd.data || []).some((t) => t.meta === "price")
-    );
-  const clear = (b) => {
-    if (b) { b.textContent = ""; b.style.display = "none"; }
-  };
-  const read = () => {
-    /* Both nodes are looked up per event, never captured: Streamlit replaces
-       them on every rerun (period or chart-type switch), and the fresh slot
-       starts out empty. */
-    const gd = chart();
-    const b = document.querySelector(".ts-range-change");
-    if (!gd || !b) return;
-    const ax = (gd.layout || {}).xaxis || {};
-    if (ax.autorange || !ax.range) { clear(b); return; }  /* back to the window */
-    const xs = (b.dataset.x || "").split(",");
-    const ys = (b.dataset.y || "").split(",");
-    const lo = Math.min(ms(ax.range[0]), ms(ax.range[1]));
-    const hi = Math.max(ms(ax.range[0]), ms(ax.range[1]));
-    let i0 = -1, i1 = -1;
-    for (let i = 0; i < xs.length; i++) {
-      if (!ys[i]) continue;  /* gap in the series */
-      const t = ms(xs[i]);
-      if (!(t >= lo && t <= hi)) continue;
-      if (i0 < 0) i0 = i;
-      i1 = i;
-    }
-    if (i0 < 0 || i1 === i0) { clear(b); return; }  /* under two bars in view */
-    const a = parseFloat(ys[i0]), z = parseFloat(ys[i1]);
-    if (!a || isNaN(z)) { clear(b); return; }
-    const pct = (z / a - 1) * 100;
-    /* Intraday windows land inside one date: label those with the clock. */
-    const fmt = new Intl.DateTimeFormat(b.dataset.locale || undefined,
-      ms(xs[i1]) - ms(xs[i0]) < 2 * 864e5
-        ? {day: "numeric", month: "short", hour: "2-digit", minute: "2-digit"}
-        : {day: "numeric", month: "short", year: "2-digit"});
-    b.textContent = (b.dataset.tmpl || "{pct} {start} {end}")
-      .replace("{pct}", (pct >= 0 ? "+" : "") + pct.toFixed(2) + "%")
-      .replace("{start}", fmt.format(new Date(ms(xs[i0]))))
-      .replace("{end}", fmt.format(new Date(ms(xs[i1]))));
-    b.style.color = pct >= 0 ? b.dataset.up : b.dataset.down;
-    b.style.display = "";
-  };
-  /* Deliberately not gd.on("plotly_relayout"): Streamlit re-plots the same
-     div on a fragment rerun, and Plotly.newPlot purges the handlers off it
-     while the element (so any "already wired" mark on it) survives — the
-     readout then goes dead for the rest of the session. Document-level
-     listeners outlive every remount. The drag ends on mouseup, the reset on
-     dblclick, and the modebar buttons on their own click; the timeout lets
-     Plotly land the relayout before the layout is read.
-     The listeners take no target filter: Plotly covers the whole document
-     with a .dragcover while a drag is live, so the mouseup that ends a zoom
-     lands outside the chart. read() is a no-op whenever the axis is not
-     zoomed, which is every other click on the page. */
-  const after = () => setTimeout(read, 80);
-  document.addEventListener("mouseup", after, true);
-  document.addEventListener("dblclick", after, true);
-})();
-</script>
-"""
-
-
-def _range_readout(box, df: pd.DataFrame) -> None:
-    """Empty slot under the period change, filled by _RANGE_JS on zoom."""
-    xs = ",".join(df.index.strftime("%Y-%m-%dT%H:%M"))
-    ys = ",".join("" if pd.isna(v) else f"{v:.4f}" for v in df["Close"])
-    # The catalog string formatted with its own placeholders back in, so the
-    # browser substitutes the numbers into a translated template.
-    tmpl = tr("ticker.range_change", pct="{pct}", start="{start}", end="{end}")
-    box.html(
-        '<div class="ts-range-change"'
-        f' style="display:none;font-size:{FS_XS};line-height:1.6"'
-        f' data-x="{xs}" data-y="{ys}"'
-        f' data-locale="{html.escape(active_language(), quote=True)}"'
-        f' data-up="{UP_COLOR}" data-down="{DOWN_COLOR}"'
-        f' data-tmpl="{html.escape(tmpl, quote=True)}"></div>' + _RANGE_JS,
-        unsafe_allow_javascript=True,
-    )
 
 
 @st.fragment
@@ -724,7 +654,9 @@ def _price_section(ticker: str) -> None:
         metrics_slot.clear()
         chart_slot.clear()
         return
-    except Exception:
+    except Exception as exc:
+        obs.warn("ticker.history_failed", ticker=ticker, interval=sel,
+                 error_type=type(exc).__name__, error=str(exc)[:300])
         metrics_slot.clear()
         chart_slot.container().warning(tr("ticker.history_failed"))
         return
@@ -786,8 +718,8 @@ def _price_section(ticker: str) -> None:
                 )
             )
             # Second line, hidden until the reader drag-zooms the chart to a
-            # window of their own (see _RANGE_JS).
-            _range_readout(c1, df)
+            # window of their own (see range_readout.RANGE_JS).
+            range_readout.render(c1, df)
 
             rsi_val = float(df["RSI14"].iloc[-1])
             c2.metric(
@@ -870,8 +802,9 @@ def _price_section(ticker: str) -> None:
     # Your own buys/sells from the imported ledger, at trade date × trade price.
     if my_trades:
         def _chart_ts(day: str) -> pd.Timestamp:
-            ts = pd.Timestamp(day)
-            return ts.tz_localize(df.index.tz) if df.index.tz is not None else ts
+            ts = cast(pd.Timestamp, pd.Timestamp(day))
+            tz = frames.dates(df).tz
+            return ts.tz_localize(tz) if tz is not None else ts
 
         chart_start = df.index[0]
         avg_cost = my_pos.avg_cost_native if my_pos else 0.0
@@ -1103,8 +1036,47 @@ def _header_html() -> str:
     )
 
 
+def _ai_prompt_key() -> str:
+    """Which analysis question this symbol deserves.
+
+    A coin has no fundamentals and a fund has no business of its own, so both
+    get their own question rather than a company one that half applies.
+    `is_fund` is asked with `fetch=False`: the header must not pay a `.info`
+    lookup to label a button, and an unseen symbol reading as a stock is the
+    harmless side of that trade — the prompt is a question, not a claim.
+    """
+    if is_crypto(ticker):
+        return "ticker.ai_prompt_crypto"
+    if is_fund(ticker, fetch=False):
+        return "ticker.ai_prompt_fund"
+    return "ticker.ai_prompt"
+
+
+def _ai_analyze_button(box) -> None:
+    """The header's Analyse-with-AI action: opens the assistant with this
+    company's analysis already asked (chat_core.ask reruns the app and never
+    returns).
+
+    Signed-in only, like the launcher itself — app.py draws the panel for
+    logged-in accounts only, so for a guest this button would open nothing.
+    Icon-only on phones, where the app bar already carries logo, name, badge
+    and custodian marks.
+    """
+    if not auth.is_logged_in():
+        return
+    if box.button(
+        "" if _MOBILE else tr("ticker.ai_analyze"),
+        icon=":material/auto_awesome:", key="page_ai_analyze", type="primary",
+        help=tr("ticker.ai_analyze_help", ticker=ticker),
+    ):
+        from stocks.web import chat_core
+
+        chat_core.ask(tr(_ai_prompt_key(), ticker=ticker, name=label))
+
+
 row = st.container(horizontal=True, vertical_alignment="center")
 row.container(width="stretch").html(_header_html())
+_ai_analyze_button(row)
 ticker_actions(ticker, container=row, key="page")
 
 with st.container(border=True):
@@ -1114,13 +1086,13 @@ with st.container(border=True):
 @st.cache_data(ttl=3600, show_spinner=False)
 def _crypto_info(t: str) -> dict:
     """Snapshot info for a crypto pair (market cap, volume, supply)."""
-    import yfinance as yf
-
-    from stocks.data.fetch import resolve
+    from stocks.data.fetch import info as quote_info
 
     try:
-        return yf.Ticker(resolve(t)).info or {}
-    except Exception:
+        return quote_info(t)
+    except Exception as exc:
+        obs.warn("ticker.info_failed", ticker=t,
+                 error_type=type(exc).__name__, error=str(exc)[:300])
         return {}
 
 
@@ -1132,7 +1104,7 @@ def _crypto_section(t: str) -> None:
     box = skeletons.reserve("metrics", n=4)
     info = _crypto_info(t)
     _, quote = split_pair(t) or (t, "USD")
-    sym = {"USD": "$", "EUR": "€", "GBP": "£"}.get(quote, "")
+    sym = currency_symbol(quote)
     cap = info.get("marketCap")
     vol = info.get("volume24Hr") or info.get("volume")
     supply = info.get("circulatingSupply")
@@ -1188,8 +1160,8 @@ def _fund_kpis(p: FundProfile) -> None:
     basket for it — for effective duration, the number that actually decides
     what a rate move does to it.
     """
-    sym = auth.CURRENCY_SYMBOL.get(str(p.currency or "").upper(), "")
-    tiles = [
+    sym = currency_symbol(p.currency)
+    tiles: list[KpiTile] = [
         (tr("ticker.fund_ter"), _fund_pct(p.expense_ratio, 2), None,
          tr("ticker.fund_ter_help")),
         (tr("ticker.fund_aum"),
@@ -1359,7 +1331,7 @@ def _annual_combined_chart(fin: pd.DataFrame, proj: pd.DataFrame) -> None:
         if col == "Revenue" and not rev_est.empty:
             prev = s.dropna().iloc[-1] if s.notna().any() else None
             for lbl, v in rev_est.items():
-                x.append(lbl)
+                x.append(str(lbl))
                 y.append(v)
                 pct = _yoy_pct(v, prev)
                 text.append(f"{pct:+.0f}%" if pct is not None else "")
@@ -1565,7 +1537,9 @@ try:
 except (YFRateLimitError, URLError) as exc:
     notices.data_toast(exc)
     fin = pd.DataFrame()  # the section below self-hides on empty
-except Exception:
+except Exception as exc:
+    obs.warn("ticker.financials_failed", ticker=ticker,
+             error_type=type(exc).__name__, error=str(exc)[:300])
     fin = pd.DataFrame()  # the section below self-hides on empty
 if fin.empty:
     _fin_card.clear()  # no statements for this name — the card never appears
@@ -1611,7 +1585,9 @@ try:
 except (YFRateLimitError, URLError) as exc:
     notices.data_toast(exc)
     mets = {}
-except Exception:
+except Exception as exc:
+    obs.warn("ticker.metrics_failed", ticker=ticker,
+             error_type=type(exc).__name__, error=str(exc)[:300])
     mets = {}
 
 with _fund_card.container(border=True):
@@ -1648,7 +1624,9 @@ with _fund_card.container(border=True):
                         as_of=as_of,
                     )
                 )
-            except Exception:
+            except Exception as exc:
+                obs.warn("ticker.fx_conversion_failed", ticker=ticker,
+                         error_type=type(exc).__name__, error=str(exc)[:300])
                 st.caption(tr("ticker.fx_unavailable"))
 
 
@@ -1667,7 +1645,9 @@ def _pe_history(t: str) -> tuple[str | None, pd.Series]:
         close = fetch_history(t, period="10y", interval="1d")["Close"]
         out = pe_vs_history(t, close=close)
         return out["source"], out["pe"]
-    except Exception:
+    except Exception as exc:
+        obs.warn("ticker.pe_history_failed", ticker=t,
+                 error_type=type(exc).__name__, error=str(exc)[:300])
         return None, pd.Series(dtype=float)
 
 
@@ -1731,7 +1711,9 @@ def _valuation_section(ticker: str) -> None:
         # mismatch reads as data vintage, not a bug.
         try:
             fund_pe = _metrics(ticker).get("pe_ttm")
-        except Exception:
+        except Exception as exc:
+            obs.warn("ticker.fund_pe_failed", ticker=ticker,
+                     error_type=type(exc).__name__, error=str(exc)[:300])
             fund_pe = None
         if fund_pe and fund_pe > 0 and cur > 0 and abs(cur - fund_pe) / fund_pe > 0.20:
             st.warning(
@@ -1793,14 +1775,16 @@ try:
 except (YFRateLimitError, URLError) as exc:
     notices.data_toast(exc)
     moat = None
-except Exception:
+except Exception as exc:
+    obs.warn("ticker.moat_failed", ticker=ticker,
+             error_type=type(exc).__name__, error=str(exc)[:300])
     moat = None
 with _moat_card.container(border=True):
     st.subheader(tr("ticker.moat"))
     if moat is None or moat.score is None:
         st.caption(tr("ticker.moat_insufficient"))
     else:
-        moat_tiles = [(
+        moat_tiles: list[KpiTile] = [(
             tr("ticker.moat_score"),
             format_value("moat", moat.score),
             verdict("moat", moat.score),
@@ -1857,7 +1841,7 @@ if not txs and _sec_filer(ticker) is False:
     txs = _insiders_de(ticker, issuer)
 # Every row of one list shares a currency: EDGAR is USD, BaFin is EUR.
 _ccy = txs[0].currency if txs else "USD"
-_sym = {"EUR": "€", "USD": "$", "GBP": "£"}.get(_ccy, "")
+_sym = currency_symbol(_ccy)
 _from_bafin = bool(txs) and txs[0].source == "BaFin"
 
 with _ins_card.container(border=True):
@@ -1918,7 +1902,10 @@ with _ins_card.container(border=True):
             flow = pd.DataFrame(
                 {
                     "month": [
-                        pd.Timestamp(t.date).to_period("M").to_timestamp() for t in om
+                        cast(pd.Timestamp, pd.Timestamp(t.date))
+                        .to_period("M")
+                        .to_timestamp()
+                        for t in om
                     ],
                     "side": ["Buy" if t.code == BUY_CODE else "Sell" for t in om],
                     "value": [t.value for t in om],

@@ -25,6 +25,7 @@ SHAPES = [
     ("chart", {"shape": "pie"}),
     ("chart", {"shape": "heatmap", "cells": 6}),
     ("table", {"rows": 5, "cols": 4}),
+    ("table", {"rows": 3, "cols": 3, "split": 2}),
     ("rows", {"rows": 8}),
     ("cards", {"n": 3, "lines": 6}),
     ("calendar", {"weeks": 4, "cols": 5, "cell": 62}),
@@ -112,6 +113,18 @@ def test_table_falls_back_to_dense_rows_on_phones(monkeypatch):
     assert skeletons.html("table", rows=3, cols=4) == skeletons.html("rows", rows=3)
     monkeypatch.setattr(skeletons, "_mobile", lambda: False)
     assert "sk-trow" in skeletons.html("table", rows=3, cols=4)
+
+
+def test_split_pairs_the_same_table_side_by_side(monkeypatch):
+    """Home's movers card holds gainers and losers in two columns; one wide
+    shimmer would relayout into two narrow ones on the swap."""
+    monkeypatch.setattr(skeletons, "_mobile", lambda: False)
+    one = skeletons.html("table", rows=3, cols=3)
+    two = skeletons.html("table", rows=3, cols=3, split=2)
+    assert two.count("sk-table") == 2 and one in two
+    # Phones stack the real columns, so the pair has to survive that fork too.
+    monkeypatch.setattr(skeletons, "_mobile", lambda: True)
+    assert skeletons.html("table", rows=3, split=2).count("sk-rows") == 2
 
 
 # --------------------------------------------------------------- slot lifecycle

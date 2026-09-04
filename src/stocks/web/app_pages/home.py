@@ -3,11 +3,11 @@
 The AI "Daily action" card opens the page — one briefing a day on what to look
 at, see web/daily_ui.py. Then the Portfolio page's headline metrics (cost
 basis, market value, unrealised & realised P/L, then today / 1 week / 1 month
-deltas) with a range-selectable value-vs-injected sparkline and today's movers,
-then "What's new" cards (watchlist big moves, earnings, recent transactions,
-52-week extremes), then the watchlist groups collapsed into expanders. Every
-ticker cell links to the Ticker page; the full ledger analytics stay on
-Portfolio.
+deltas) with a range-selectable value-vs-injected sparkline and a movers card
+(1d/1w/1m gainers and losers), then "What's new" cards (watchlist big moves,
+earnings, recent transactions, 52-week extremes), then the watchlist groups
+collapsed into expanders. Every ticker cell links to the Ticker page; the full
+ledger analytics stay on Portfolio.
 """
 
 from __future__ import annotations
@@ -25,15 +25,17 @@ from stocks.analysis.portfolio import (
     basket_change,
     market_active,
     market_live,
+    ticker_changes,
     us_extended_session,
     us_market_open,
 )
-from stocks.config import Holding, load_watchlist
+from stocks.config import Holding, currency_symbol, load_watchlist
 from stocks.data.crypto import is_crypto
 from stocks.data.earnings import calendar_events
 from stocks.data.funds import is_fund
-from stocks.portfolio.ledger import all_transactions
-from stocks.web import auth, daily_ui, notices, onboarding, skeletons
+from stocks.portfolio import demo
+from stocks.portfolio.ledger import has_transactions
+from stocks.web import auth, daily_ui, empty, notices, onboarding, skeletons
 from stocks.web.earnings_ui import calendar_component, render_result_body
 from stocks.web.i18n import t as tr
 from stocks.web.portfolio_data import (
@@ -60,6 +62,7 @@ from stocks.web.widgets import (
     logo,
     recent_closes,
     ticker_table_html,
+    watchlist_closes,
 )
 
 
@@ -100,7 +103,7 @@ def _first_run_banner() -> None:
     if prefs.get("onboarding_dismissed"):
         return
     try:
-        if all_transactions(auth.db_path()):
+        if has_transactions(auth.db_path()):
             return
     except Exception:
         pass  # unreadable/missing ledger = still new — show the banner
@@ -198,6 +201,46 @@ def _setup_card() -> None:
                 auth.save_prefs(prefs)
                 st.rerun()
 
+        # Second strip: the things that need none of the four above. An
+        # account that has connected nothing can still complete all three
+        # today, which is the point — the row above is a list of what is
+        # missing, and this one is a list of what already works. It never
+        # gates the dismiss: this is an invitation, not a chore.
+        _explore_row(signed_in)
+
+
+def _explore_row(signed_in: bool) -> None:
+    """The try-it-out strip inside the setup card."""
+    explored = onboarding.explore_state()
+    tried = tr("home.explore_progress", done=sum(explored.values()),
+               total=len(explored))
+    row = st.container(horizontal=True, vertical_alignment="center", gap="small")
+    row.markdown(f"{tr('home.explore_title')} :gray-badge[{tried}]")
+
+    def _label(on: bool, icon: str, label: str) -> str:
+        return (f":green[:material/{icon}:] **{label}**" if on
+                else f":gray[:material/{icon}:] :gray[{label}]")
+
+    # Search lives in the top bar on every page, so this one points at the
+    # page where a ticker's analysis lands rather than at a field it cannot
+    # focus from here.
+    if row.button(_label(explored["search"], "search", tr("home.explore_search")),
+                  key="explore_search", type="tertiary"):
+        st.switch_page("app_pages/ticker.py")
+
+    # The assistant answers keyless on the shared chain, so this is completable
+    # without the AI pill above it ever turning green.
+    if row.button(_label(explored["ask"], "forum", tr("home.explore_ask")),
+                  key="explore_ask", type="tertiary", disabled=not signed_in):
+        st.session_state["chat_panel_open"] = True
+        st.rerun()
+
+    if row.button(_label(explored["watchlist"], "list_alt",
+                         tr("home.explore_watchlist")),
+                  key="explore_watchlist", type="tertiary",
+                  disabled=not signed_in):
+        st.switch_page("app_pages/profile.py")
+
 
 _first_run_banner()
 _setup_card()
@@ -222,10 +265,11 @@ if auth.is_logged_in():
 
 # ---------------------------------------------------------- portfolio glance
 # Daily-glance cut of the Portfolio page: value / today / unrealised P/L plus
-# a range-selectable sparkline, then today's top movers. The full table, risk,
-# tax and dividends stay on the Portfolio page.
-# Movers table: ticker, live share price with the day move as a chip beside it
-# ("$226.10  +18.92%"), live market value (display currency), portfolio weight.
+# a range-selectable sparkline, then the top movers over 1d/1w/1m. The full
+# table, risk, tax and dividends stay on the Portfolio page.
+# Movers table: ticker, live share price with the window's move as a chip beside
+# it ("$226.10  +18.92%"), live market value (display currency), portfolio
+# weight.
 # The price/value/weight columns come from enriched_positions (tbl) reindexed to
 # each list's tickers; the value column's fmt is built at render (it needs the
 # display-currency symbol) and the price cells are pre-formatted per row in
@@ -243,7 +287,7 @@ def _native_price(value: float, ccy: str, rates: dict[str, float]) -> str:
     rate = rates.get(ccy)
     if not rate or pd.isna(value):
         return "n/a"
-    prefix = auth.CURRENCY_SYMBOL.get(ccy) or f"{ccy} "
+    prefix = currency_symbol(ccy)
     return f"{prefix}{value / rate:,.2f}"
 
 
@@ -270,7 +314,7 @@ if auth.is_logged_in():
     # The account's reporting currency: the ledger is replayed in it, so it
     # keys every cached loader below (see web/portfolio_data.py).
     REPORT_CCY = auth.reporting_currency()
-    REPORT_SYM = auth.CURRENCY_SYMBOL[REPORT_CCY]
+    REPORT_SYM = currency_symbol(REPORT_CCY)
     try:
         txs, positions, realized = ledger_state(DB, db_mtime(DB), REPORT_CCY)
     except (YFRateLimitError, URLError) as exc:
@@ -285,6 +329,11 @@ if auth.is_logged_in():
     # closed; both empty = brand-new user, already covered by the banner.
     if positions or realized:
         st.subheader(tr("home.portfolio_title"))
+        # Whose figures these are, said where they are shown. The Portfolio
+        # page carries the loud version and the way to remove them; here it is
+        # one line, because the glance is a glance.
+        if demo.active(auth.db_path()):
+            st.caption(tr("home.demo_caption"))
     if positions:
         # The live price burst behind the glance is the page's slowest block,
         # so the card shimmers its two KPI rows in place while it runs: the
@@ -292,6 +341,13 @@ if auth.is_logged_in():
         # and dropping back down when the numbers land. Every branch out ends
         # in the slot, so the shimmer is always replaced by what it stood for.
         glance = skeletons.reserve("metrics", border=True, n=(4, 3))
+        # The movers card below reads that same burst, so it reserves its
+        # place in the same breath — otherwise the section under it paints
+        # high and drops when the card lands. Two tables side by side, three
+        # rows each: the shape it resolves into.
+        movers_slot = skeletons.reserve(
+            "table", border=True, title=True, rows=3, cols=3, split=2
+        )
         try:
             tbl = enriched_positions(DB, db_mtime(DB), REPORT_CCY)
         except (YFRateLimitError, URLError) as exc:
@@ -301,8 +357,14 @@ if auth.is_logged_in():
             tbl = None  # price/FX enrichment failed — skip the glance card
         if tbl is None:
             glance.container().warning(tr("home.data_unavailable"))
-        elif tbl.empty:
+            movers_slot.clear()  # the warning above already says why
+        elif tbl.empty or not tbl["value"].notna().any():
+            # Not one position priced. The rows still carry their ledger cost,
+            # so rendering the card anyway would sum an all-NaN value column to
+            # a confident €0 and chip it at -100% — a throttled quote burst
+            # reading as a wiped-out book. Say prices are missing instead.
             glance.container().caption(tr("home.prices_unavailable"))
+            movers_slot.clear()
         else:
             cost = tbl["cost"].sum()
             value = tbl["value"].dropna().sum()
@@ -431,71 +493,139 @@ if auth.is_logged_in():
                 # basket, not flow-adjusted, so it diverges from injected
                 # capital around buys/sells.
 
-            # Movers today: biggest day moves among open positions — the full
-            # table lives on the Portfolio page. Positive/negative split, so a
-            # ticker lands in at most one list. Own card, matching the glance
-            # card above.
+            # Movers: the biggest moves among open positions over the window
+            # the card's selector is on — the full table lives on the Portfolio
+            # page. Positive/negative split, so a ticker lands in at most one
+            # list. Own card, matching the glance card above.
             movers = tbl["day_pct"].dropna()
             held_moves = movers.to_dict()  # fed to the Big-moves card below
-            gainers = movers[movers > 0].nlargest(3)
-            losers = movers[movers < 0].nsmallest(3)
-            if not gainers.empty or not losers.empty:
-                with st.container(border=True):
-                    st.markdown(tr("home.movers_today"))
-                    gcol, lcol = st.columns(2)
+            # Bound out here rather than read off `tbl` inside the closure
+            # below: this branch has already established that `tbl` is a real
+            # frame, but the closure escapes that narrowing.
+            held_index = tbl.index
 
-                    def _mover_table(box, series: pd.Series, label: str) -> None:
-                        box.caption(label)
-                        if series.empty:
-                            box.caption(tr("home.none_today"))
-                            return
-                        idx = series.index
-                        # Price per share in the currency the ticker trades in
-                        # ($ for a US name, € for a European one) — a share
-                        # price is quoted by its own market, unlike the EUR
-                        # value/weight columns beside it. value / shares
-                        # rather than a second quote burst (value is already
-                        # live-priced), then divided back by the native->EUR
-                        # rate it was built with. Unpriced rows read "n/a".
-                        shares = tbl["shares"].reindex(idx).replace(0, float("nan"))
-                        per_share = tbl["value"].reindex(idx) / shares
-                        ccys = [
-                            REPORT_CCY if pd.isna(c) or not c else str(c).upper()
-                            for c in tbl["ccy"].reindex(idx)
-                        ]
-                        rates = native_base_rates(tuple(sorted(set(ccys))), REPORT_CCY)
-                        price = [
-                            _native_price(v, c, rates)
-                            for v, c in zip(per_share, ccys, strict=True)
-                        ]
-                        box.html(
-                            ticker_table_html(
-                                pd.DataFrame(
-                                    {
-                                        "ticker": idx,
-                                        "price": price,
-                                        "day_pct": series.values,
-                                        "value": tbl["value"].reindex(idx).values,
-                                        "weight": tbl["weight"].reindex(idx).values,
-                                    }
-                                ),
-                                fmt={**MOVER_FMT, "value": f"{sym}{{:,.0f}}"},
-                                signed=("day_pct",),
-                                # Price + its day move in one cell, the % as a
-                                # tinted chip — same treatment as the Positions
-                                # table's "-97 (-1.1%)" cells.
-                                pairs=(("price", "day_pct"),),
-                                labels=MOVER_LABELS,
-                                names=False,
-                                muted={t for t in idx if not market_active(t)},
-                                muted_cols=("day_pct",),
-                                mobile={"value": "value", "delta": "day_pct",
-                                        "sub": ("price", "weight")},
-                            )
+            # Windows the card offers, in calendar days (the sparkline's
+            # convention right above: literal labels, no i18n).
+            MOVER_RANGES = {"1d": 1, "1w": 7, "1m": 30}
+
+            def _mover_moves(days: int) -> pd.Series:
+                """Per-ticker % move over the window, held names only.
+
+                1d is the enriched day column, which already carries the
+                off-session quote override the tiles show. Longer windows come
+                off the same basket history the delta tiles read — per-ticker
+                values at today's quantities, so a ratio is the price move
+                including FX and costs no extra fetch.
+                """
+                if days <= 1:
+                    return movers
+                return ticker_changes(hist, days).reindex(held_index).dropna()
+
+            # Built once per script run, not per fragment rerun: switching the
+            # range only picks a window that is already in hand, and the gate
+            # below needs all three anyway — a flat day still deserves the card
+            # when the week moved.
+            ranged = {k: _mover_moves(d) for k, d in MOVER_RANGES.items()}
+            if not any((s != 0).any() for s in ranged.values()):
+                movers_slot.clear()  # nothing moved in any window
+            else:
+                # Bound out here: narrowing `tbl` past its None branch
+                # doesn't reach inside a nested function.
+                held = tbl
+
+                def _mover_table(
+                    box, series: pd.Series, label: str, *, live: bool
+                ) -> None:
+                    box.caption(label)
+                    if series.empty:
+                        box.caption(tr("home.none_moved"))
+                        return
+                    idx = series.index
+                    # Price per share in the currency the ticker trades in
+                    # ($ for a US name, € for a European one) — a share
+                    # price is quoted by its own market, unlike the EUR
+                    # value/weight columns beside it. value / shares
+                    # rather than a second quote burst (value is already
+                    # live-priced), then divided back by the native->EUR
+                    # rate it was built with. Unpriced rows read "n/a".
+                    shares = held["shares"].reindex(idx).replace(0, float("nan"))
+                    per_share = held["value"].reindex(idx) / shares
+                    ccys = [
+                        REPORT_CCY if pd.isna(c) or not c else str(c).upper()
+                        for c in held["ccy"].reindex(idx)
+                    ]
+                    rates = native_base_rates(tuple(sorted(set(ccys))), REPORT_CCY)
+                    price = [
+                        _native_price(v, c, rates)
+                        for v, c in zip(per_share, ccys, strict=True)
+                    ]
+                    box.html(
+                        ticker_table_html(
+                            pd.DataFrame(
+                                {
+                                    "ticker": idx,
+                                    "price": price,
+                                    "day_pct": series.values,
+                                    "value": held["value"].reindex(idx).values,
+                                    "weight": held["weight"].reindex(idx).values,
+                                }
+                            ),
+                            fmt={**MOVER_FMT, "value": f"{sym}{{:,.0f}}"},
+                            signed=("day_pct",),
+                            # Price + its move in one cell, the % as a
+                            # tinted chip — same treatment as the Positions
+                            # table's "-97 (-1.1%)" cells.
+                            pairs=(("price", "day_pct"),),
+                            labels=MOVER_LABELS,
+                            names=False,
+                            # Only today's figure can be a stale close; a week
+                            # is close-to-close by construction, nothing to dim.
+                            muted=(
+                                {t for t in idx if not market_active(t)}
+                                if live
+                                else frozenset()
+                            ),
+                            muted_cols=("day_pct",),
+                            mobile={"value": "value", "delta": "day_pct",
+                                    "sub": ("price", "weight")},
                         )
+                    )
 
-                    _mover_table(gcol, gainers, tr("home.gainers"))
-                    _mover_table(lcol, losers, tr("home.losers"))
+                @st.fragment
+                def _movers_card() -> None:
+                    """The movers card and its range selector. A fragment, like
+                    the sparkline above: switching window redraws this card
+                    alone, and it needs no fetch to do it — the card's border
+                    comes from the slot it fills, so it is on screen from the
+                    page's first paint either way."""
+                    # Phones stack the title over the chips: three chips plus a
+                    # heading don't fit a 390px row without the heading
+                    # ellipsizing (the ticker page's convention).
+                    row = st.container(
+                        horizontal=not is_mobile(),
+                        horizontal_alignment="distribute",
+                        vertical_alignment="center",
+                    )
+                    row.markdown(tr("home.movers_title"))
+                    rng = (
+                        row.segmented_control(
+                            tr("home.movers_range"),
+                            list(MOVER_RANGES),
+                            default="1d",
+                            key="home_movers_range",
+                            label_visibility="collapsed",
+                        )
+                        or "1d"
+                    )
+                    moves = ranged[rng]
+                    gcol, lcol = st.columns(2)
+                    _mover_table(gcol, moves[moves > 0].nlargest(3),
+                                 tr("home.gainers"), live=rng == "1d")
+                    _mover_table(lcol, moves[moves < 0].nsmallest(3),
+                                 tr("home.losers"), live=rng == "1d")
+
+                with movers_slot.container(border=True):
+                    _movers_card()
     elif realized:
         # Ledger has history but every position is closed.
         st.info(
@@ -609,24 +739,25 @@ _xt_slot = skeletons.reserve(
 
 
 # Defined above the refresh button so its clear() call can reference it; the
-# actual 1y fetch still only runs in the deferred fill at the bottom.
-@st.cache_data(ttl=6 * 3600, show_spinner=False)
+# actual fetch still only runs in the deferred fill at the bottom.
 def _year_extremes(
     tickers: tuple[str, ...],
 ) -> list[tuple[str, float, str, float | None]]:
     """(ticker, last close, "high"/"low", distance) for names within 2% of
-    their 52-week high or low — one bulk 1y download, keyed by the ticker tuple
-    so watchlist or portfolio edits invalidate it. Distance is None when the
-    price is at/beyond the extreme; the display label is built and localized at
-    render so a cached row never carries a fixed-language string."""
-    from stocks.data.fetch import fetch_many
+    their 52-week high or low.
 
+    Reads the shared year of closes the watchlist rows already downloaded
+    (`portfolio_data.watchlist_closes`) rather than pulling its own — two
+    bulk request sets over one watchlist is how this page used to get itself
+    rate-limited. Distance is None when the price is at/beyond the extreme;
+    the display label is built and localized at render so a cached row never
+    carries a fixed-language string.
+    """
     out: list[tuple[str, float, str, float | None]] = []
-    for t, df in fetch_many(list(tickers), period="1y").items():
-        close = df["Close"].dropna() if "Close" in df else None
-        if close is None or len(close) < 2:
+    for t, closes in watchlist_closes(tickers).items():
+        if len(closes) < 2:
             continue
-        last, hi, lo = float(close.iloc[-1]), float(close.max()), float(close.min())
+        last, hi, lo = closes[-1], max(closes), min(closes)
         if hi and last >= hi * 0.98:
             out.append((t, last, "high", None if last >= hi else last / hi - 1))
         elif lo and last <= lo * 1.02:
@@ -636,11 +767,15 @@ def _year_extremes(
 
 # ------------------------------------------------------------------ watchlist
 if not holdings:
-    st.warning(tr("home.watchlist_empty"))
-    st.page_link(
-        "app_pages/profile.py",
-        label=tr("home.link_add_tickers"),
-        icon=":material/account_circle:",
+    empty.state(
+        tr("home.empty_watchlist_title"),
+        tr("home.empty_watchlist_body"),
+        event="home.watchlist",
+        page="app_pages/profile.py",
+        label=tr("common.cta_add_tickers"),
+        cta_icon="add",
+        preview="rows",
+        preview_kw={"rows": 5},
     )
 
 # The watchlist close burst runs here rather than higher up so the two deferred
@@ -714,11 +849,10 @@ if holdings or positions:
     # closes, both position price loads, the ledger history, the 52-week
     # scan) and rerun; ledger caches stay hot.
     if st.button(tr("home.refresh_prices"), icon=":material/refresh:"):
-        recent_closes.clear()
+        watchlist_closes.clear()  # watchlist rows + the 52-week scan
         positions_table.clear()
         basket_history.clear()
         ledger_history.clear()
-        _year_extremes.clear()
         st.rerun()
 
 
@@ -1018,7 +1152,9 @@ else:
             # Non-banner failure (payload/parser change): stub the card and
             # keep the page — the miss isn't cached, so a rerun retries.
             _events = _results = None
-        if _events is None:
+        # The two are always set together; naming both keeps that true for a
+        # reader (and a type checker) at the uses below.
+        if _events is None or _results is None:
             st.caption(tr("home.earnings_unavailable"))
         else:
             _today = date.today()
@@ -1043,10 +1179,11 @@ else:
             if _syms:
                 _names = {t: (company_name(t) or t) for t in _syms}
                 _logos = {t: logo(t) for t in _syms}
+                _res = _results  # captured by the dialog below, past the guard
 
                 @st.dialog(tr("earnings.dialog_title"), width="large")
                 def _mini_result_dialog(ticker: str, iso: str) -> None:
-                    render_result_body(ticker, iso, _results, _names, _logos)
+                    render_result_body(ticker, iso, _res, _names, _logos)
 
                 _grid = _mini_cal_grid(
                     data={"html": _mini_calendar_html(

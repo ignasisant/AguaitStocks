@@ -32,9 +32,12 @@ daily_ui.render(
 )
 """
 
+# Every figure here is one the page's facts actually carry (day_change below):
+# the card's audit rejects a reply that quotes anything else, which is the
+# point of test_a_card_quoting_a_figure_the_book_lacks_never_reaches_the_page.
 REPLY = {
     "headline": "Nvidia carries the day",
-    "bullets": ["NVDA +3.2% today", "ASML reports in 4 days"],
+    "bullets": ["Book +1.2% today — check NVDA's weight", "ASML reports in 4 days"],
     "focus": ["NVDA"],
 }
 
@@ -92,12 +95,30 @@ def _card(at) -> str:
     return "".join(el.body for el in at.get("html"))
 
 
+def test_a_card_quoting_a_figure_the_book_lacks_never_reaches_the_page(
+    page, free, stored
+):
+    """A provider that invents a percentage is a miss, not a card: the reader
+    gets the computed figures instead, and nothing false is stored."""
+    free.reply = json.dumps({
+        "headline": "Nvidia carries the day",
+        "bullets": ["NVDA +37.4% today", "ASML reports in 4 days"],
+        "focus": ["NVDA"],
+    })
+    page.run()
+    assert not page.exception
+    body = _card(page)
+    assert "37.4" not in body and "Nvidia carries the day" not in body
+    assert "+1.20%" in body  # the computed card, straight from the book
+    assert not stored
+
+
 def test_the_card_is_generated_once_and_then_read_from_the_store(page, free, stored):
     page.run()
     assert not page.exception
     body = _card(page)
     assert "Nvidia carries the day" in body
-    assert "NVDA +3.2% today" in body
+    assert "Book +1.2% today" in body
     assert daily.action_day(datetime.now()).isoformat() == stored["day"]
     assert len(free.calls) == 1
 
@@ -402,3 +423,12 @@ def test_the_phone_sheet_gives_the_two_actions_a_surface():
     for key in ("daily_action_ask", "daily_action_refresh"):
         assert f".st-key-{key} button" in block
     assert "min-height: 44px" in block  # the DS touch target
+
+
+def test_the_style_block_has_no_left_angle_bracket():
+    """DOMPurify silently drops a whole style block whose text holds one — no
+    error, no console warning. It shipped: a comment in the phone block said
+    "st-key-" plus an angle-bracketed placeholder, and production painted the
+    card with none of its own chrome (badge, tight list, chips, buttons)."""
+    body = daily_ui._CSS.split("<style>")[1].split("</style>")[0]
+    assert "<" not in body

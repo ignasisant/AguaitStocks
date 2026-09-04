@@ -70,6 +70,38 @@ def test_ensure_user_data_seeds_starter_watchlist(tmp_path):
     assert [h.ticker for h in load_watchlist(p.watchlist)] == ["NVDA"]
 
 
+def test_starter_watchlist_is_a_spread_of_live_tickers_and_no_positions(tmp_path):
+    """The seed exists so a first visit has data to rank, group and compare.
+
+    The no-`shares` assertion is the important one: every figure the app draws
+    for a seeded row is live market data, so nothing a brand-new account sees
+    is ever a holding it does not own. A seeded `shares`/`cost` would turn the
+    starter list into a fake portfolio in an app that also files tax reports.
+    """
+    p = tmp_path / "starter.yaml"
+    p.write_text(auth.STARTER_WATCHLIST)
+    holdings = load_watchlist(p)
+
+    assert not any(h.is_position for h in holdings)
+    assert not any(h.cost for h in holdings)
+
+    tickers = [h.ticker for h in holdings]
+    assert len(tickers) == len(set(tickers))
+    # The screener's P/E table, the 52-week scan and the sentiment pass all
+    # rank across the list; two rows gave them nothing to compare.
+    assert len(tickers) >= 8
+    assert all(h.name for h in holdings)  # names, or the tables read as codes
+
+    assert any(h.favorite for h in holdings)  # the favorites expander opens
+    assert any(h.tags for h in holdings)  # tag groups + earnings filter pills
+    # Home's plain "Watchlist" group holds what is neither favorite nor
+    # tagged; tagging every row would empty it and hide the ungrouped view.
+    assert any(not h.favorite and not h.tags for h in holdings)
+
+    assert any("-" in t for t in tickers)  # a crypto pair — the Crypto gating
+    assert any("." in t for t in tickers)  # a non-US listing, for FX
+
+
 def test_ensure_user_data_reports_only_the_seeding_call(tmp_path):
     p = paths_for("jane@example.com", users_dir=tmp_path)
     assert ensure_user_data(p) is True  # created the account

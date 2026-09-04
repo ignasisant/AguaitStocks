@@ -415,6 +415,59 @@ def test_basket_change_ignores_tickers_missing_at_either_endpoint():
     assert abs(chg[1] - 0.10) < 1e-9
 
 
+from stocks.analysis.portfolio import ticker_changes  # noqa: E402
+
+
+def test_ticker_changes_windows_match_the_basket_anchors():
+    """Home's movers card reads per-name moves off the frame the tiles use, so
+    it must anchor exactly where `basket_change` does — a "1w" gainer list that
+    measured a different week from the "1 week" tile beside it would be wrong
+    in a way nobody can see."""
+    idx = pd.date_range("2024-01-01", periods=40, freq="D")
+    vals = pd.DataFrame(
+        {
+            "A": [float(100 + i) for i in range(40)],   # rises all window
+            "B": [float(200 - i) for i in range(40)],   # falls all window
+        },
+        index=idx,
+    )
+    day = ticker_changes(vals, 1)
+    assert abs(day["A"] - 1 / 138) < 1e-9
+    assert abs(day["B"] - (-1 / 162)) < 1e-9
+    week = ticker_changes(vals, 7)  # anchors exactly 7 days back
+    assert abs(week["A"] - 7 / 132) < 1e-9
+    assert abs(week["B"] - (-7 / 168)) < 1e-9
+    month = ticker_changes(vals, 30)
+    assert abs(month["A"] - 30 / 109) < 1e-9
+    # Gainer/loser split: sign, not magnitude, decides which list a name lands
+    # in, and no name can be in both.
+    assert list(month[month > 0].index) == ["A"]
+    assert list(month[month < 0].index) == ["B"]
+
+
+def test_ticker_changes_drops_names_missing_at_either_endpoint():
+    idx = pd.date_range("2024-01-01", periods=3, freq="D")
+    vals = pd.DataFrame(
+        {
+            "A": [100.0, 100.0, 110.0],
+            "B": [float("nan"), float("nan"), 500.0],  # listed mid-window
+            "C": [0.0, 0.0, 50.0],                     # no position until now
+        },
+        index=idx,
+    )
+    chg = ticker_changes(vals, 1)
+    assert list(chg.index) == ["A"]  # B and C would read as infinite gains
+    assert abs(chg["A"] - 0.10) < 1e-9
+
+
+def test_ticker_changes_window_not_covered():
+    idx = pd.date_range("2024-01-01", periods=5, freq="D")
+    vals = pd.DataFrame({"A": [1.0] * 5}, index=idx)
+    assert ticker_changes(vals, 30).empty
+    assert ticker_changes(vals.iloc[:1], 1).empty
+    assert ticker_changes(pd.DataFrame(), 1).empty
+
+
 from datetime import UTC, datetime  # noqa: E402
 
 from stocks.analysis.portfolio import (  # noqa: E402
@@ -458,7 +511,12 @@ class _FakeQuote:
 def _patch_quote(monkeypatch, info):
     import yfinance
 
+    from stocks.data.fetch import clear_info_cache
+
     monkeypatch.setattr(yfinance, "Ticker", lambda symbol: _FakeQuote(info))
+    # `.info` is memoized per symbol (data.fetch.info), so a test that swaps
+    # the quote mid-function has to drop the memo or it re-reads the old blob.
+    clear_info_cache()
 
 
 def test_session_move_uses_premarket_against_last_close(monkeypatch):
@@ -538,6 +596,39 @@ def test_session_quote_labels_after_hours_but_not_a_shut_market(monkeypatch):
     # a live session — the hero must not claim "after hours".
     _patch_quote(monkeypatch, {**info, "marketState": "CLOSED"})
     assert session_quote("NVDA")["session"] is None
+
+
+def test_session_quote_stamps_the_exchange_session(monkeypatch):
+    """The date is the point: off-hours `pct` is the last *completed* session,
+    and a caller writing prose has no other way to know that."""
+    _patch_quote(monkeypatch, {
+        "marketState": "CLOSED",
+        "regularMarketPrice": 145.59,
+        "regularMarketPreviousClose": 136.72,
+        # 2026-09-03 20:00 UTC = 16:00 in New York, that session's close.
+        "regularMarketTime": 1788465600,
+        "exchangeTimezoneName": "America/New_York",
+    })
+    assert session_quote("NOW")["as_of"] == "2026-09-03"
+
+
+def test_a_premarket_move_belongs_to_today_not_to_the_last_close(monkeypatch):
+    _patch_quote(monkeypatch, {
+        "marketState": "PRE",
+        "regularMarketPrice": 100.0,
+        "regularMarketPreviousClose": 98.0,
+        "preMarketPrice": 102.0,
+        "regularMarketTime": 1788465600,
+        "exchangeTimezoneName": "America/New_York",
+    })
+    from datetime import date as _date
+
+    quote = session_quote("NOW")
+    assert quote["session"] == "pre"
+    # Today in New York — the premarket session's own date, not the close's.
+    assert quote["as_of"] >= "2026-09-03" and len(quote["as_of"]) == len(
+        _date.today().isoformat()
+    )
 
 
 def test_session_quote_none_when_quote_missing(monkeypatch):

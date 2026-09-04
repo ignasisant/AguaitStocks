@@ -66,6 +66,14 @@ CSS = """
     .topstocks-sk .skb {animation: none; background: var(--sk-base);}
   }
 
+  /* Ghost: a skeleton used as an empty state rather than as a load.
+     Same shape, no sheen and faded back, because it is not going to resolve
+     into anything on its own — it is showing the reader what this section
+     will look like once they have given it data. A sweeping shimmer there
+     would promise an arrival that never comes. */
+  .topstocks-gh {opacity: 0.3; pointer-events: none;}
+  .topstocks-gh .skb {animation: none; background: var(--sk-base);}
+
   /* Stat tiles — the 12px label / Epilogue value / delta pill stack that
      st.metric renders (app.py styles the real thing to match). */
   .sk-metrics {display: flex; flex-direction: column; gap: 0.9rem;}
@@ -128,6 +136,12 @@ CSS = """
   .sk-tick .sk-logo {height: 22px; width: 22px; flex: none;
                      border-radius: var(--ag-radius-xs);}
   .sk-tick .sk-name {height: 11px; flex: 1 1 auto; max-width: 150px;}
+  /* Two of those side by side — Home's gainers/losers pair. Stacks at the
+     same width Streamlit's own columns do, so the swap is a fill on a phone
+     too. */
+  .sk-split {display: flex; gap: 1rem;}
+  .sk-split > * {flex: 1 1 0; min-width: 0;}
+  @media (max-width: 640px) {.sk-split {flex-direction: column;}}
 
   /* Dense rows — the phone rendering of the same table (.agr-row). */
   .sk-rows {display: flex; flex-direction: column;}
@@ -284,28 +298,36 @@ def _rows(*, rows: int = 5) -> str:
     return f'<div class="topstocks-sk sk-rows">{row * rows}</div>'
 
 
-def _table(*, rows: int = 5, cols: int = 4, header: bool = True) -> str:
+def _table(
+    *, rows: int = 5, cols: int = 4, header: bool = True, split: int = 1
+) -> str:
     """Ticker-table slot, in whichever form the real table will take.
 
     widgets.ticker_table_html renders a wide grid on desktop and dense
     two-line rows on phones; the skeleton follows the same fork so the swap
-    is a fill, not a relayout.
+    is a fill, not a relayout. `split` draws that many of the same table side
+    by side — Home's gainers/losers pair — stacking on phones the way the
+    columns holding them do.
     """
     if _mobile():
-        return _rows(rows=rows)
-    grid = f"grid-template-columns:1.7fr {'1fr ' * max(cols - 1, 1)}"
-    head = (
-        f'<div class="sk-trow sk-thead" style="{grid}">{_blocks(cols)}</div>'
-        if header
-        else ""
-    )
-    body = (
-        f'<div class="sk-trow" style="{grid}">'
-        '<div class="sk-tick"><span class="skb sk-logo"></span>'
-        '<span class="skb sk-name"></span></div>'
-        f'{_blocks(max(cols - 1, 1))}</div>'
-    )
-    return f'<div class="topstocks-sk sk-table">{head}{body * rows}</div>'
+        one = _rows(rows=rows)
+    else:
+        grid = f"grid-template-columns:1.7fr {'1fr ' * max(cols - 1, 1)}"
+        head = (
+            f'<div class="sk-trow sk-thead" style="{grid}">{_blocks(cols)}</div>'
+            if header
+            else ""
+        )
+        body = (
+            f'<div class="sk-trow" style="{grid}">'
+            '<div class="sk-tick"><span class="skb sk-logo"></span>'
+            '<span class="skb sk-name"></span></div>'
+            f'{_blocks(max(cols - 1, 1))}</div>'
+        )
+        one = f'<div class="topstocks-sk sk-table">{head}{body * rows}</div>'
+    if split == 1:
+        return one
+    return f'<div class="topstocks-sk sk-split">{one * split}</div>'
 
 
 def _cards(*, n: int = 3, lines: int = 4) -> str:
@@ -348,11 +370,19 @@ _SHAPES = {
 }
 
 
-def html(kind: str = "text", *, title: bool = False, **kw) -> str:
+def html(
+    kind: str = "text", *, title: bool = False, ghost: bool = False, **kw
+) -> str:
     """Markup for one skeleton, for callers that place it themselves.
 
     `title` prepends a heading bar, for the cards that open with an
     `st.subheader` / `st.markdown` line above the block being fetched.
+
+    `ghost` turns the shape into an empty state instead of a load: faded and
+    still, for a section that has nothing to draw because the reader has not
+    imported anything yet (see web/empty.py). The wrapper is a parent rather
+    than a class on the shape itself, so it also covers the nested div the
+    `title` variant produces.
     """
     try:
         build = _SHAPES[kind]
@@ -366,6 +396,8 @@ def html(kind: str = "text", *, title: bool = False, **kw) -> str:
             '<div class="topstocks-sk sk-card">'
             f'<span class="skb sk-ctitle"></span>{body}</div>'
         )
+    if ghost:
+        body = f'<div class="topstocks-gh">{body}</div>'
     return body
 
 

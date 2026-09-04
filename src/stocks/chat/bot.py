@@ -210,7 +210,9 @@ def handle_update(update: dict, users: list[fanout.NotifyUser],
         watchlist=user.watchlist, db=user.db, message=text, lang=user.lang,
     )
     if reply.error:
-        _send(translate(reply.error, lang, cap=engine.free_daily_cap(),
+        _send(translate(reply.error, lang,
+                        cap=engine.free_daily_cap(user.prefs),
+                        full=engine.free_daily_cap(),
                         provider=""), chat_id, dry_run)
         return f"{user.label}: {reply.error}"
     _send(reply.text, chat_id, dry_run)

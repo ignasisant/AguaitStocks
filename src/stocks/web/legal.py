@@ -14,14 +14,15 @@ in full.
 from __future__ import annotations
 
 from stocks.web.i18n import DEFAULT_LANG, LANGUAGES
+from stocks.web.landing import GITHUB_URL
 from stocks.web.markup import esc
 
 PATH_PRIVACY = "/legal/privacy"
 PATH_TERMS = "/legal/terms"
 
-LAST_UPDATED = "2026-08-31"
+LAST_UPDATED = "2026-09-02"
 
-_CONTACT = "https://github.com/ignasi-sant/stocks/issues"
+_CONTACT = f"{GITHUB_URL}/issues"
 
 # ------------------------------------------------------------------- copy
 # {doc: {lang: (title, [(heading, [paragraphs...]), ...])}}

@@ -1,6 +1,7 @@
 {
   "earnings.title": "Earnings calendar",
-  "earnings.no_stocks": "No stocks on the watchlist (crypto has no earnings). Add tickers on the **Profile** page.",
+  "earnings.empty_title": "No stocks to track",
+  "earnings.empty_body": "The calendar reads the stocks on your watchlist; crypto and funds never report earnings. Add a ticker and its next reporting date, the consensus for the quarter and its past results all show up here.",
   "earnings.filter_portfolio": "Portfolio",
   "earnings.filter_favorites": "Favorites",
   "earnings.no_dates": "No earnings dates found for the watchlist.",

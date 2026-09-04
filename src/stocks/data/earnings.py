@@ -440,11 +440,12 @@ def fetch_statement_currency(ticker: str) -> str | None:
     its local currency while its estimates are quoted per USD ADS — so the
     figures can only be labeled from the snapshot.
     """
-    import yfinance as yf
     from yfinance.exceptions import YFRateLimitError
 
+    from stocks.data.fetch import info as quote_info
+
     try:
-        return (yf.Ticker(resolve(ticker)).info or {}).get("financialCurrency")
+        return quote_info(ticker).get("financialCurrency")
     except YFRateLimitError:
         raise
     except Exception:

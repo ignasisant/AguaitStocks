@@ -42,8 +42,9 @@ from stocks.portfolio.tax.base import (
     ReportingFlag,
     TaxPeriod,
     TaxSettings,
-    covers,
+    open_period,
     progressive_tax,
+    sales_in,
 )
 
 CODE = "AU"
@@ -210,16 +211,8 @@ def fiscal_period(
     instead, which no ledger can compute.
     """
     cfg = settings or TaxSettings()
-    out = AuTaxPeriod(
-        jurisdiction=CODE,
-        currency=CURRENCY,
-        year=int(period[:4]),
-        period=period,
-        settings=cfg,
-    )
-    for s in realized:
-        if not covers(period, s.sell_date, YEAR_START):
-            continue
+    out = open_period(AuTaxPeriod, CODE, CURRENCY, period, settings=cfg)
+    for s in sales_in(period, realized, YEAR_START):
         out.sales.append(s)
         gain = s.gain
         if gain >= 0:

@@ -286,7 +286,9 @@ def _content_terms(db: sqlite3.Connection | None, terms: set[str]) -> set[str]:
             if hits <= total * _DF_MAX_SHARE:
                 keep.add(term)
         return keep or terms
-    except Exception:
+    except Exception as exc:
+        obs.warn("chat.memory.content_terms_failed",
+                 error_type=type(exc).__name__, error=str(exc)[:300])
         return terms
 
 
@@ -357,7 +359,9 @@ def recall(path: Path, query: str, limit: int = RECALL_LIMIT,
         return []
     try:
         db = _connect(path)
-    except Exception:
+    except Exception as exc:
+        obs.warn("chat.memory.recall_connect_failed",
+                 error_type=type(exc).__name__, error=str(exc)[:300])
         return []
     try:
         depth = max(limit * 4, 8)
@@ -396,7 +400,9 @@ def forget(path: Path, thread: str) -> int:
         return 0
     try:
         db = _connect(path)
-    except Exception:
+    except Exception as exc:
+        obs.warn("chat.memory.forget_connect_failed",
+                 error_type=type(exc).__name__, error=str(exc)[:300])
         return 0
     try:
         with db:
@@ -409,7 +415,9 @@ def forget(path: Path, thread: str) -> int:
                            " WHERE id = ?))", (note_id, note_id))
             db.execute("DELETE FROM notes WHERE thread = ?", (thread,))
             return len(ids)
-    except Exception:
+    except Exception as exc:
+        obs.warn("chat.memory.forget_delete_failed",
+                 error_type=type(exc).__name__, error=str(exc)[:300])
         return 0
     finally:
         db.close()

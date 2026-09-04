@@ -142,9 +142,10 @@ _CSS = r"""
        phone the pair reads as two stray captions floating in whitespace, not
        as controls. Give them an edge, a fill and the DS 44px target, and pull
        them together so they read as one block. Keyed selectors (Streamlit
-       stamps st-key-<key> on a widget's container) rather than testids, which
-       is the same hook chat_core.py's FAB uses; !important because the
-       theme's own button rules are more specific than a class. */
+       stamps an "st-key-" plus the widget key class on a widget's container)
+       rather than testids, which is the same hook chat_core.py's FAB uses;
+       !important because the theme's own button rules are more specific than
+       a class. */
     .st-key-daily_action_row {gap: 8px !important;}
     .st-key-daily_action_ask button,
     .st-key-daily_action_refresh button {
@@ -263,6 +264,7 @@ def _start(
     day: date,
     stored: daily.DailyAction | None,
     *,
+    key: tuple,
     forced: bool = False,
 ) -> dict:
     """Kick off one generation in a background thread; return its job dict.
@@ -278,7 +280,7 @@ def _start(
     """
     profile = auth.load_profile(prefs)
     job: dict = {
-        "key": (day.isoformat(), lang),
+        "key": key,
         "forced": forced,
         "prefs": prefs,
         "stored": stored,
@@ -428,6 +430,11 @@ def render(
             slot.clear()
 
 
+def _asof(facts: dict) -> str:
+    """The trading session the page's figures are from ("" when unknown)."""
+    return str((facts.get("session") or {}).get("date") or "")
+
+
 def _remember(action: daily.DailyAction, key: tuple) -> daily.DailyAction:
     """Keep the resolved card in the session, so a fragment rerun (the refresh
     click, the poll tick, the Ask button) redraws it instead of re-deciding
@@ -461,7 +468,11 @@ def _resolve(
     def waiting(forced: bool):
         return (None if forced else daily.computed(facts, lang, day)), True
 
-    key = (day.isoformat(), lang)
+    # The session date is part of the key: a card written before the open
+    # quotes the previous close, and when the next session lands the card is
+    # stale hours before the 09:00 date rollover. Rekeying retires the
+    # session-cached card and the "already tried today" guard with it.
+    key = (day.isoformat(), lang, _asof(facts))
     force = bool(st.session_state.pop(_FORCE, False))
     job = st.session_state.get(_JOB)
     if force:
@@ -478,7 +489,7 @@ def _resolve(
         cached = st.session_state.get(_CARD)
         if cached is not None and cached.get("key") == key:
             return cached["action"], False
-        if daily.is_fresh(stored, day, lang):
+        if daily.is_fresh(stored, day, lang, _asof(facts)):
             return _remember(stored, key), False
         if st.session_state.get(_TRIED) == key:
             # A generation already ran today and gave nothing back: a provider
@@ -486,7 +497,7 @@ def _resolve(
             # every rerun would spend the allowance on the same failure.
             return daily.computed(facts, lang, day), False
     st.session_state[_TRIED] = key
-    job = _start(prefs, facts, lang, day, stored, forced=force)
+    job = _start(prefs, facts, lang, day, stored, key=key, forced=force)
     job["thread"].join(GRACE_S)
     if job["done"]:
         return _finish(job, facts, lang, day, key)
