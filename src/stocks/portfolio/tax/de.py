@@ -39,8 +39,9 @@ from stocks.portfolio.tax.base import (
     ReportingFlag,
     TaxPeriod,
     TaxSettings,
-    covers,
     flag,
+    open_period,
+    sales_in,
 )
 
 CODE = "DE"
@@ -228,17 +229,11 @@ def fiscal_period(
     around a sale never blocks the loss. Kept for the shared signature.
     """
     cfg = settings or TaxSettings()
-    out = DeTaxPeriod(
-        jurisdiction=CODE,
-        currency=CURRENCY,
-        year=int(period[:4]),
-        period=period,
-        settings=cfg,
-        funds_classified=cfg.fund_tickers is not None,
+    out = open_period(
+        DeTaxPeriod, CODE, CURRENCY, period,
+        settings=cfg, funds_classified=cfg.fund_tickers is not None,
     )
-    for s in realized:
-        if not covers(period, s.sell_date, YEAR_START):
-            continue
+    for s in sales_in(period, realized, YEAR_START):
         out.sales.append(s)
         gain = s.gain
         fund = _is_fund(s.ticker, cfg)

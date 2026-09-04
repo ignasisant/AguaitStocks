@@ -154,3 +154,18 @@ def test_supported_types_covers_every_parser_plus_the_fallback():
     types = autodetect.supported_types()
     assert {"csv", "xlsx", "pdf"} <= set(types)
     assert types == tuple(sorted(types))
+
+
+def test_loose_parser_list_matches_platforms():
+    from stocks.portfolio import platforms
+
+    platform_keys = {p.key for p in platforms.PLATFORMS}
+    assert set(autodetect._LOOSE) <= platform_keys
+
+
+def test_fingerprint_list_matches_loose_parsers():
+    from stocks.portfolio import platforms
+
+    platform_keys = {p.key for p in platforms.PLATFORMS}
+    assert set(autodetect._FINGERPRINT) <= platform_keys
+    assert set(autodetect._FINGERPRINT) <= set(autodetect._LOOSE)

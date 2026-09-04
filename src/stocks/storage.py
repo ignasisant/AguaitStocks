@@ -73,7 +73,7 @@ def _config() -> dict | None:
         }
         needed = ("bucket", "access_key_id", "secret_access_key")
         _cached["config"] = section if all(section.get(k) for k in needed) else None
-    return _cached["config"]  # type: ignore[return-value]
+    return _cached["config"]  # ty: ignore[invalid-return-type]
 
 
 def enabled() -> bool:

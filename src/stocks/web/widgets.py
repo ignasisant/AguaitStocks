@@ -159,6 +159,7 @@ from stocks.web.portfolio_data import (  # noqa: F401 — facade re-export
     positions_table,
     recent_closes,
     trade_bars,
+    watchlist_closes,
 )
 from stocks.web.search import (  # noqa: F401 — facade re-export
     FUZZY_CUTOFF,
@@ -171,6 +172,7 @@ from stocks.web.search import (  # noqa: F401 — facade re-export
     world_matches,
 )
 from stocks.web.tables import (  # noqa: F401 — facade re-export
+    KpiTile,
     data_table,
     kpi_delta_chip,
     kpi_grid_html,

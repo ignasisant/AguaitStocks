@@ -24,8 +24,6 @@ Nothing here writes to the ledger; the Import page previews and commits.
 
 from __future__ import annotations
 
-from pathlib import Path
-
 from stocks.data.crypto import to_pair
 from stocks.portfolio import statement
 from stocks.portfolio.ledger import Transaction
@@ -60,10 +58,6 @@ _CCY_MARKS = (
 def parse_csv(text: str) -> ParseResult:
     """Parse Revolut crypto-statement CSV text (no side effects)."""
     return statement.parse_csv(text, FORMAT)
-
-
-def parse_file(path: str | Path) -> ParseResult:
-    return parse_csv(Path(path).read_text())
 
 
 def _map_action(rtype: str) -> str | None:

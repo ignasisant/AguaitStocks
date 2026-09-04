@@ -55,6 +55,14 @@ _BYOK_ORDER = ("anthropic", "openai", "gemini")
 # [free_llm] daily_cap (secrets.toml).
 FREE_DAILY_CAP = 30
 
+# What an account gets before it is established (see FREE_ELIGIBILITY below).
+# A user who just signed up gets to actually try the assistant — being told to
+# come back tomorrow is how a new account leaves and never returns — but on a
+# small allowance, so farming throwaway Google accounts buys a few messages
+# each instead of the full pot. Override: FREE_LLM_TRIAL_CAP env or
+# [free_llm] trial_cap.
+FREE_TRIAL_CAP = 5
+
 # How many past messages to actually send the model per request. The full
 # thread stays on disk; only this tail is re-sent, so cost stops growing
 # quadratically with conversation length. ~10 exchanges of memory.
@@ -110,7 +118,9 @@ def decrypt_byok(prefs: dict, pid: str) -> str:
         if not enc_key or not byok_alive(prefs, pid):
             return ""
         return Fernet(enc_key).decrypt(prefs[enc_k].encode()).decode()
-    except Exception:
+    except Exception as exc:
+        obs.warn("chat.engine.decrypt_failed", pid=pid,
+                 error_type=type(exc).__name__, error=str(exc)[:300])
         return ""
 
 
@@ -162,20 +172,27 @@ def maintain_byok(prefs: dict, pid: str | None = None) -> bool:
 # accounts exhaust FREE_GLOBAL_DAILY_CAP, which is not only a bill — it is the
 # real users seeing "free tier exhausted" for the rest of the day.
 #
-#   open        anyone signed in (what this was before the gate existed)
-#   established the default: the account has been around a day, so farming it
-#               costs an attacker a day of waiting per account
+#   open        anyone signed in, on the full allowance from the first minute
+#   trial       the default: anyone signed in, but an account younger than
+#               FREE_MIN_ACCOUNT_HOURS spends against FREE_TRIAL_CAP instead of
+#               the full one. A new user can try the assistant the moment they
+#               sign up, and a day of farming buys an attacker a handful of
+#               messages per throwaway account rather than a full pot
+#   established the hard wall: no free chain at all until the account has been
+#               around a day. Costs an attacker a day of waiting per account,
+#               and costs every honest new user their first session
 #   allowlist   only the addresses in [free_llm] allowed_emails
 #
 # BYOK is untouched under every policy: a user with their own key pays their
 # own bill and needs no permission from anyone.
-FREE_ELIGIBILITY = "established"
+FREE_ELIGIBILITY = "trial"
 FREE_MIN_ACCOUNT_HOURS = 24
 
 
 def free_policy() -> str:
     got = secret("FREE_LLM_ELIGIBILITY", "free_llm", "eligibility").lower()
-    return got if got in ("open", "established", "allowlist") else FREE_ELIGIBILITY
+    valid = ("open", "trial", "established", "allowlist")
+    return got if got in valid else FREE_ELIGIBILITY
 
 
 def free_allowlist() -> set[str]:
@@ -218,7 +235,9 @@ def free_eligible(prefs: dict) -> bool:
     the headless Telegram job — no session, no request, no email lookup.
     """
     policy = free_policy()
-    if policy == "open":
+    if policy in ("open", "trial"):
+        # Both let a signed-in account through; under "trial" a young one is
+        # held to the smaller cap instead (see free_daily_cap).
         return True
     if policy == "allowlist":
         allowed = free_allowlist()
@@ -229,6 +248,19 @@ def free_eligible(prefs: dict) -> bool:
         return str(prefs.get("email") or "").strip().lower() in allowed
     age = account_age_hours(prefs)
     return age is None or age >= _min_account_hours()
+
+
+def in_free_trial(prefs: dict) -> bool:
+    """Whether this account is still on the reduced new-account allowance.
+
+    Only under the "trial" policy, and only while the account is demonstrably
+    young: an unknown age reads as established here for the same reason it does
+    in free_eligible — the accounts with no usable stamp are the old ones.
+    """
+    if free_policy() != "trial":
+        return False
+    age = account_age_hours(prefs)
+    return age is not None and age < _min_account_hours()
 
 
 def attempts(prefs: dict) -> list[tuple[Provider, str, str]]:
@@ -259,12 +291,37 @@ def attempts(prefs: dict) -> list[tuple[Provider, str, str]]:
 # ------------------------------------------------------------- free quota
 
 
-def free_daily_cap() -> int:
+def _configured_daily_cap() -> int:
     try:
         return int(secret("FREE_LLM_DAILY_CAP", "free_llm", "daily_cap")
                    or FREE_DAILY_CAP)
     except (TypeError, ValueError):
         return FREE_DAILY_CAP
+
+
+def free_trial_cap() -> int:
+    try:
+        return int(secret("FREE_LLM_TRIAL_CAP", "free_llm", "trial_cap")
+                   or FREE_TRIAL_CAP)
+    except (TypeError, ValueError):
+        return FREE_TRIAL_CAP
+
+
+def free_daily_cap(prefs: dict | None = None) -> int:
+    """Today's allowance for this account, in messages.
+
+    Pass the account's prefs wherever the figure is spent or shown to someone:
+    an account still in its trial window gets the smaller cap, and a reader
+    told the full one would watch the wall arrive early. Called without prefs
+    it answers the configured cap — what a caller holding no account (a CLI
+    banner) can honestly mean.
+    """
+    full = _configured_daily_cap()
+    if prefs is not None and in_free_trial(prefs):
+        # Never *above* the configured cap: an operator who dialled the daily
+        # allowance below the trial one meant that number to be the ceiling.
+        return min(free_trial_cap(), full)
+    return full
 
 
 # Cost backstop across ALL accounts: the per-account cap bounds one user, this
@@ -353,7 +410,7 @@ def spend_free_quota(prefs: dict) -> bool:
     day = time.strftime("%Y-%m-%d")
     key = f"free_msgs::{day}"
     used = int(prefs.get(key, 0))
-    if used >= free_daily_cap():
+    if used >= free_daily_cap(prefs):
         return False
     if not _spend_global_free():
         return False
@@ -361,6 +418,83 @@ def spend_free_quota(prefs: dict) -> bool:
         prefs.pop(stale)
     prefs[key] = used + 1
     return True
+
+
+def refund_free_quota(prefs: dict, units: int = 1) -> None:
+    """Give `units` back to both counters after a turn that answered nothing.
+
+    A unit is spent before the model is called, because that is the only
+    moment a turn can still be refused — so a provider that dies takes the
+    reader's message *and* their allowance, and the Retry under the failure
+    charges them for the same question again. Mutates `prefs` in place (the
+    caller saves) and rolls the shared pot back by the same amount, since the
+    call that would have cost money never happened.
+
+    Both counters are cost guards, not ledgers: a refund that lands after
+    midnight is dropped rather than credited against tomorrow's allowance,
+    which is the safe direction to be wrong in.
+    """
+    if units <= 0:
+        return
+    day = time.strftime("%Y-%m-%d")
+    key = f"free_msgs::{day}"
+    used = int(prefs.get(key, 0) or 0)
+    if used:
+        prefs[key] = max(0, used - units)
+    _load_global_free()
+    if _global_free["day"] == day and _global_free["used"]:
+        _global_free["used"] = max(0, int(_global_free["used"]) - units)
+        _save_global_free()
+
+
+def free_account_left(prefs: dict) -> int:
+    """Units left on this account's own counter today."""
+    key = f"free_msgs::{time.strftime('%Y-%m-%d')}"
+    return max(0, free_daily_cap(prefs) - int(prefs.get(key, 0) or 0))
+
+
+def free_global_left() -> int:
+    """Units left in the shared pot today."""
+    _load_global_free()
+    if _global_free["day"] != time.strftime("%Y-%m-%d"):
+        return free_global_daily_cap()  # a day the counter has not met yet
+    return max(0, free_global_daily_cap() - int(_global_free["used"]))
+
+
+def free_left(prefs: dict) -> int:
+    """What a reader actually has left: whichever wall binds first.
+
+    An account holding 12 units in front of an empty shared pot has none, and
+    a counter that says 12 walks them into a refusal contradicting it.
+    """
+    return min(free_account_left(prefs), free_global_left())
+
+
+# The locale key each free_cap_reason() answer speaks with. Formatted with
+# cap=free_daily_cap(prefs) and full=free_daily_cap() — the trial copy is the
+# one that needs both, because its news is that the smaller number grows.
+FREE_CAP_ERRORS = {
+    "account": "chat.free_cap",
+    "trial": "chat.free_cap_trial",
+    "global": "chat.free_cap_global",
+    "ineligible": "chat.free_ineligible",
+}
+
+
+def free_cap_reason(prefs: dict) -> str:
+    """Which wall a refused free turn hit: trial, account, global or ineligible.
+
+    Checked in the order spend_free_quota checks them, so the answer names the
+    refusal the caller just got instead of making a second, independent guess.
+    An account wall hit inside the trial window is its own answer: that reader
+    is not out until tomorrow at the same number, they are out until tomorrow
+    at a bigger one.
+    """
+    if not free_eligible(prefs):
+        return "ineligible"
+    if free_account_left(prefs) <= 0:
+        return "trial" if in_free_trial(prefs) else "account"
+    return "global"
 
 
 # ------------------------------------------------------ sandboxed completion
@@ -398,7 +532,9 @@ def complete_attempts(
     keep = accept or (lambda raw: (raw or "").strip() or None)
     try:
         candidates = attempts(prefs)
-    except Exception:
+    except Exception as exc:
+        obs.warn("chat.engine.answer_candidates_failed",
+                 error_type=type(exc).__name__, error=str(exc)[:300])
         return None
     for provider, key, model in candidates:
         if getattr(provider, "id", "") == "free" and not spend_free(prefs):
@@ -409,7 +545,10 @@ def complete_attempts(
             out = keep(future.result(timeout=timeout_s))
             if out is not None:
                 return out
-        except Exception:
+        except Exception as exc:
+            obs.warn("chat.engine.provider_failed", provider=provider.id,
+                     model=model or getattr(provider, "default_model", ""),
+                     error_type=type(exc).__name__, error=str(exc)[:300])
             continue  # timeout, bad key, rate limit, unparseable — next one
         finally:
             pool.shutdown(wait=False, cancel_futures=True)
@@ -582,7 +721,15 @@ def enriched_frame(db: Path, base: str = "EUR") -> pd.DataFrame | None:
     if not txs:
         return None
     positions, _ = build(txs, base=base)
-    tbl = positions_frame(positions, base=base)
+    try:
+        tbl = positions_frame(positions, base=base)
+    except Exception as exc:
+        # A throttled price burst now surfaces instead of pricing the book at
+        # zero (analysis.portfolio.market_values). The assistant answers from
+        # the rest of its context rather than the turn failing outright.
+        obs.warn("chat.positions_unavailable",
+                 error_type=type(exc).__name__, error=str(exc)[:200])
+        return None
     if tbl.empty:
         return None
     value = tbl["value"].dropna().sum()
@@ -780,7 +927,9 @@ def in_parallel(*calls: Callable[[], object],
         for f in futures:
             try:
                 out.append(f.result(timeout=timeout))
-            except Exception:
+            except Exception as exc:
+                obs.warn("chat.engine.completion_timeout",
+                         error_type=type(exc).__name__, error=str(exc)[:300])
                 out.append(None)
         return out
     finally:
@@ -826,7 +975,10 @@ def title_for(provider: Provider, api_key: str, message: str) -> str:
             _TITLE_SYSTEM,
             [{"role": "user", "content": message[:500]}],
         )
-    except Exception:
+    except Exception as exc:
+        obs.warn("chat.engine.title_failed", provider=provider.id,
+                 model=provider.classifier_model or provider.default_model,
+                 error_type=type(exc).__name__, error=str(exc)[:300])
         return fallback
     title = " ".join((raw or "").split()).strip().strip("\"'\u201c\u201d").rstrip(".")
     return _trim(title) or fallback
@@ -852,7 +1004,9 @@ def autotitle(chat_path: Path, provider: Provider, api_key: str,
             conv["id"], title_for(provider, api_key, history[0]["content"]),
             chat_path,
         )
-    except Exception:
+    except Exception as exc:
+        obs.warn("chat.engine.autotitle_failed",
+                 error_type=type(exc).__name__, error=str(exc)[:300])
         return
 
 
@@ -958,7 +1112,9 @@ def answer(*, prefs: dict, prefs_path: Path, chat_path: Path,
         if act is not None:
             try:
                 tools.execute(act, watchlist)
-            except Exception:
+            except Exception as exc:
+                obs.warn("chat.engine.action_failed", action=act.kind,
+                         error_type=type(exc).__name__, error=str(exc)[:300])
                 act = None
         if act is not None:
             note = action_reply(act, lang)
@@ -1031,6 +1187,11 @@ def answer(*, prefs: dict, prefs_path: Path, chat_path: Path,
             obs.warn("chat.provider_failed", provider=provider.id,
                      model=model or provider.default_model,
                      error_type=type(exc).__name__, error=str(exc)[:300])
+            if provider.id == "free":
+                # The unit was taken before the call that never answered; the
+                # web panel refunds the same way (chat_core._refund_free_quota).
+                refund_free_quota(prefs)
+                auth.save_prefs(prefs, prefs_path)
             continue
         finally:
             pool.shutdown(wait=False, cancel_futures=True)
@@ -1053,4 +1214,10 @@ def answer(*, prefs: dict, prefs_path: Path, chat_path: Path,
 
     obs.warn("chat.failed", reason="free_cap" if capped else "api_error",
              providers=[p.id for p, _k, _m in atts])
-    return Reply(error="chat.free_cap" if capped else "chat.api_error")
+    if not capped:
+        return Reply(error="chat.api_error")
+    # Which wall: this account's allowance (back tomorrow), the shared pot
+    # (everyone's, and possibly back within the hour), or a policy that never
+    # let this account near the chain — telling that last reader they spent
+    # messages they never sent is how a refusal becomes a bug report.
+    return Reply(error=FREE_CAP_ERRORS[free_cap_reason(prefs)])

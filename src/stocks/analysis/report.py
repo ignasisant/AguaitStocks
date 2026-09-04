@@ -25,6 +25,7 @@ from stocks.analysis.fundamentals import (
     sources_table,
 )
 from stocks.analysis.indicators import rsi
+from stocks.formatting import pct
 
 DISCLAIMER = (
     "Not investment advice and not produced by a registered investment "
@@ -66,9 +67,11 @@ def technical_snapshot(df: pd.DataFrame, price_col: str = "Close") -> dict:
         return {}
     last = float(close.iloc[-1])
     out: dict[str, float | str | None] = {"price": last}
+    smas: dict[int, float | None] = {}
     for w in (20, 50, 200):
         sma = close.rolling(w).mean().iloc[-1] if len(close) >= w else None
-        out[f"sma{w}"] = float(sma) if sma is not None else None
+        smas[w] = float(sma) if sma is not None else None
+        out[f"sma{w}"] = smas[w]
     out["rsi14"] = float(rsi(close, 14).iloc[-1]) if len(close) > 14 else None
 
     win = close.tail(252)  # ~1 trading year
@@ -80,7 +83,7 @@ def technical_snapshot(df: pd.DataFrame, price_col: str = "Close") -> dict:
     recent = close.tail(60)
     out["support"] = float(recent.min())
     out["resistance"] = float(recent.max())
-    out["trend"] = _trend_label(last, out.get("sma50"), out.get("sma200"))
+    out["trend"] = _trend_label(last, smas[50], smas[200])
     return out
 
 
@@ -171,10 +174,6 @@ def scenario_table(
 # --------------------------------------------------------------------------- #
 # Markdown rendering (pure).
 # --------------------------------------------------------------------------- #
-def _pct(x: float | None) -> str:
-    return f"{x * 100:.1f}%" if x is not None else "n/a"
-
-
 def _money(x: float | None) -> str:
     return format_value("market_cap", x) if x is not None else "n/a"
 
@@ -308,7 +307,7 @@ def _section_technicals(tech: dict) -> list[str]:
         ),
         f"- 52w range: {format_value('price', tech.get('low_52w'))} – "
         f"{format_value('price', tech.get('high_52w'))} "
-        f"({_pct(tech.get('pct_from_high'))} from high)",
+        f"({pct(tech.get('pct_from_high'))} from high)",
         f"- Recent support / resistance (60d): "
         f"{format_value('price', tech.get('support'))} / "
         f"{format_value('price', tech.get('resistance'))}",

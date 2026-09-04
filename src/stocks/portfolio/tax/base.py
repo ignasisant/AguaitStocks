@@ -25,7 +25,7 @@ date, a Spanish filer's is EUR at the ECB rate. NOT tax advice; a planning aid.
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from datetime import date, timedelta
 
@@ -219,6 +219,31 @@ def covers(period: str, sell_date: str, year_start: tuple[int, int] = (1, 1)) ->
     start = date(year, month, day)
     end = date(year + 1, month, day) - timedelta(days=1)
     return start <= date.fromisoformat(sell_date) <= end
+
+
+def open_period[P: TaxPeriod](
+    kind: type[P], code: str, currency: str, period: str, **extra
+) -> P:
+    """A jurisdiction's empty period, stamped with its code, currency and year.
+
+    Every `fiscal_period` opens exactly this way and then diverges completely,
+    so the stamp lives here and the divergence stays visible in each country
+    module. `extra` carries the fields only some subclasses declare — the
+    settings the report was run with, whether a fund list was supplied.
+    """
+    return kind(
+        jurisdiction=code, currency=currency, year=int(period[:4]),
+        period=period, **extra,
+    )
+
+
+def sales_in(
+    period: str,
+    realized: list[RealizedSale],
+    year_start: tuple[int, int] = (1, 1),
+) -> Iterator[RealizedSale]:
+    """The disposals `period` covers, in ledger order (see `covers`)."""
+    return (s for s in realized if covers(period, s.sell_date, year_start))
 
 
 def tax_year_of(sell_date: str, year_start: tuple[int, int] = (1, 1)) -> int:

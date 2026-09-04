@@ -249,6 +249,66 @@ def test_global_free_cap_resets_at_utc_midnight(monkeypatch):
     assert engine.spend_free_quota({})  # new day -> counter forgotten
 
 
+def test_refund_returns_the_unit_to_both_counters(monkeypatch):
+    """A turn that answered nothing owes nothing: the unit is spent before the
+    provider is called, so the failure path hands it back and the reader can
+    spend it on the question they actually get an answer to."""
+    monkeypatch.setenv("FREE_LLM_DAILY_CAP", "2")
+    monkeypatch.setenv("FREE_LLM_GLOBAL_DAILY_CAP", "2")
+    monkeypatch.setattr(engine, "_global_free", {"day": "", "used": 0})
+    prefs: dict = {}
+    assert engine.spend_free_quota(prefs)
+
+    engine.refund_free_quota(prefs)
+
+    day_key = f"free_msgs::{time.strftime('%Y-%m-%d')}"
+    assert prefs[day_key] == 0
+    assert engine._global_free["used"] == 0
+    # Both units are still there to spend.
+    assert engine.spend_free_quota(prefs) and engine.spend_free_quota(prefs)
+    assert not engine.spend_free_quota(prefs)
+
+
+def test_a_refund_after_midnight_is_dropped_not_credited(monkeypatch):
+    """Counters are cost guards, not ledgers — yesterday's unit must not turn
+    into an extra message today."""
+    monkeypatch.setattr(engine, "_global_free",
+                        {"day": "1999-12-31", "used": 5})
+    prefs = {"free_msgs::1999-12-31": 5}
+
+    engine.refund_free_quota(prefs)
+
+    assert prefs["free_msgs::1999-12-31"] == 5  # untouched
+    assert engine._global_free["used"] == 5
+    assert engine.free_account_left(prefs) == engine.free_daily_cap()
+
+
+def test_free_left_states_whichever_wall_binds_first(monkeypatch):
+    monkeypatch.setenv("FREE_LLM_DAILY_CAP", "10")
+    monkeypatch.setenv("FREE_LLM_GLOBAL_DAILY_CAP", "3")
+    monkeypatch.setattr(engine, "_global_free", {"day": "", "used": 0})
+    prefs: dict = {}
+    assert engine.free_left(prefs) == 3  # room on the account, not in the pot
+
+    for _ in range(3):
+        assert engine.spend_free_quota(prefs)
+
+    assert engine.free_account_left(prefs) == 7  # the account has room left...
+    assert engine.free_left(prefs) == 0  # ...and no way to use it today
+    assert engine.free_cap_reason(prefs) == "global"
+
+
+def test_free_cap_reason_names_the_account_wall(monkeypatch):
+    monkeypatch.setenv("FREE_LLM_DAILY_CAP", "1")
+    monkeypatch.setenv("FREE_LLM_GLOBAL_DAILY_CAP", "50")
+    monkeypatch.setattr(engine, "_global_free", {"day": "", "used": 0})
+    prefs: dict = {}
+    assert engine.spend_free_quota(prefs)
+
+    assert engine.free_cap_reason(prefs) == "account"
+    assert engine.free_left(prefs) == 0
+
+
 # ------------------------------------------------------------ skill routing
 
 

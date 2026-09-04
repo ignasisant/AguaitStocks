@@ -535,7 +535,7 @@ def comp_medals(metrics: list[dict]) -> dict[str, str]:
     scores = comp_scores(metrics)
     if len(scores) < 3:
         return {}
-    ranked = sorted(scores, key=scores.get, reverse=True)
+    ranked = sorted(scores, key=lambda t: scores[t], reverse=True)
     return dict(zip(ranked, ("🥇", "🥈", "🥉"), strict=False))
 
 

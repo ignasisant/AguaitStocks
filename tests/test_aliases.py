@@ -67,6 +67,40 @@ def test_fetch_many_downloads_resolved_but_keys_by_broker_code(monkeypatch):
     assert set(out) == {"RCF", "NVDA"}  # caller-facing keys stay broker codes
 
 
+def test_fetch_many_strips_the_ticker_level_for_a_lone_symbol(monkeypatch):
+    """yfinance 1.5 groups by ticker even for one symbol.
+
+    The frame handed back must be flat-columned whatever the symbol count, or
+    every `df["Close"]` downstream finds nothing and a one-name watchlist —
+    or a single-position book — reads as unpriced.
+    """
+    _patch_aliases(monkeypatch)
+
+    def fake_download(symbols, **kwargs):
+        idx = pd.date_range("2026-01-05", periods=2, name="Date")
+        cols = pd.MultiIndex.from_product([list(symbols), ["Close"]])
+        return pd.DataFrame(1.0, index=idx, columns=cols)
+
+    monkeypatch.setattr(fetch.yf, "download", fake_download)
+    out = fetch.fetch_many(["NVDA"])
+    assert list(out) == ["NVDA"]
+    assert list(out["NVDA"].columns) == ["Close"]
+    assert out["NVDA"]["Close"].iloc[-1] == 1.0
+
+
+def test_fetch_many_still_reads_a_flat_single_symbol_frame(monkeypatch):
+    """And the older shape — flat columns, no ticker level — still works."""
+    _patch_aliases(monkeypatch)
+
+    def fake_download(symbols, **kwargs):
+        idx = pd.date_range("2026-01-05", periods=2, name="Date")
+        return pd.DataFrame({"Close": [1.0, 2.0]}, index=idx)
+
+    monkeypatch.setattr(fetch.yf, "download", fake_download)
+    out = fetch.fetch_many(["NVDA"])
+    assert out["NVDA"]["Close"].iloc[-1] == 2.0
+
+
 def test_latest_price_resolves_alias(monkeypatch):
     _patch_aliases(monkeypatch)
     seen = {}

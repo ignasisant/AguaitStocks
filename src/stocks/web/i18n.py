@@ -27,6 +27,7 @@ import json
 from pathlib import Path
 
 import streamlit as st
+from streamlit.runtime.scriptrunner import get_script_run_ctx
 
 _LOCALES = Path(__file__).parent / "locales"
 
@@ -36,17 +37,63 @@ LANGUAGES = {"en": "English", "es": "Español"}
 DEFAULT_LANG = "en"
 
 
+# Session-state key holding this run's {lang: fragment mtimes} probe, primed
+# once by set_active_language(). See _catalog.
+_MTIMES_KEY = "_i18n_mtimes"
+# lang -> (mtimes, merged catalog): the last catalog served for each language,
+# so a t() that already knows the run's mtimes skips the st.cache_data lookup
+# (hash + lock) too. One entry per language, replaced when the key changes —
+# it can't grow. Catalogs are shipped files, not user data, so a process-wide
+# memo leaks nothing between sessions.
+_MEMO: dict[str, tuple[tuple[float, ...], dict[str, str]]] = {}
+
+
+def _run_mtimes() -> dict[str, tuple[float, ...]] | None:
+    """This run's primed mtime probes, or None when there is no Streamlit run.
+
+    Gated on the script-run context rather than wrapped in a try/except:
+    reading `st.session_state` in bare mode (the notification cron, the CLI,
+    tests) doesn't raise, it logs a warning — and one warning per `t()` is
+    thousands of lines per digest.
+    """
+    if get_script_run_ctx(suppress_warning=True) is None:
+        return None
+    return st.session_state.get(_MTIMES_KEY)
+
+
+def _mtimes(lang: str) -> tuple[float, ...]:
+    """Modification times of a language's fragments — the freshness key."""
+    d = _LOCALES / lang
+    files = sorted(d.glob("*.json")) if d.is_dir() else []
+    return tuple(f.stat().st_mtime for f in files)
+
+
 def _catalog(lang: str) -> dict[str, str]:
     """Merge every locales/<lang>/*.json fragment into one flat dict.
 
-    Cached per (language, fragment mtimes): the mtime key costs a handful of
-    stats per rerun but means an edited fragment is picked up on the next run
-    — Streamlit's file watcher doesn't reload JSON, so a plain per-language
-    cache served stale keys in dev until a server restart.
+    Cached per (language, fragment mtimes): the mtime key means an edited
+    fragment is picked up on the next run — Streamlit's file watcher doesn't
+    reload JSON, so a plain per-language cache served stale keys in dev until a
+    server restart.
+
+    Probing those mtimes is what has to stay cheap. `t()` fires a couple of
+    hundred times per rerun and each probe globs the directory and stats all
+    eighteen fragments (~113us, ~25 ms a page); so the probe runs once per
+    rerun in set_active_language() and lands in session state, and `t()` reads
+    it from there. Outside a Streamlit run — the notification cron calling
+    `translate`, tests — there is no session to prime, so it falls back to
+    probing per call, which is what this always did.
     """
-    d = _LOCALES / lang
-    files = sorted(d.glob("*.json")) if d.is_dir() else []
-    return _catalog_cached(lang, tuple(f.stat().st_mtime for f in files))
+    primed = _run_mtimes()
+    key = primed.get(lang) if primed else None
+    if key is None:
+        key = _mtimes(lang)
+    hit = _MEMO.get(lang)
+    if hit is not None and hit[0] == key:
+        return hit[1]
+    catalog = _catalog_cached(lang, key)
+    _MEMO[lang] = (key, catalog)
+    return catalog
 
 
 @st.cache_data(show_spinner=False)
@@ -97,9 +144,17 @@ def set_active_language() -> str:
     app.py calls this once per rerun before page.run(); pages and widgets then
     read it (via t()) without re-resolving, and a Profile change lands on the
     next rerun because app.py re-runs this first.
+
+    Also takes this run's one look at the catalog files' mtimes, for both the
+    active language and the English fallback every missing key drops through to
+    (see _catalog). Being called per rerun is what keeps the dev hot-reload:
+    the probe is fresh each run, just not each t().
     """
     lang = resolve_language()
     st.session_state["active_lang"] = lang
+    st.session_state[_MTIMES_KEY] = {
+        code: _mtimes(code) for code in {lang, DEFAULT_LANG}
+    }
     return lang
 
 

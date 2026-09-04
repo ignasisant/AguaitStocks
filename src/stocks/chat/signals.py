@@ -33,6 +33,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import date
 
+from stocks.formatting import finite
+
 # An alert this close to its level is "about to fire" — near enough to plan
 # around today, far enough that it does not just repeat the fired ones.
 NEAR_PCT = 3.0
@@ -83,16 +85,8 @@ class Signal:
         return {"kind": self.kind, "ticker": self.ticker, **self.data}
 
 
-def _num(value) -> float | None:
-    try:
-        out = float(value)
-    except (TypeError, ValueError):
-        return None
-    return out if out == out else None
-
-
 def _round(value, digits: int = 2) -> float | None:
-    out = _num(value)
+    out = finite(value)
     return None if out is None else round(out, digits)
 
 
@@ -114,7 +108,7 @@ def _alert_signals(holdings, closes: dict, held: set[str]) -> list[Signal]:
     out: list[Signal] = []
     for h in holdings:
         prices = closes.get(h.ticker) or []
-        price = _num(prices[-1]) if prices else None
+        price = finite(prices[-1]) if prices else None
         if price is None:
             continue
         for alert in h.alerts:
@@ -147,7 +141,7 @@ def _position_signals(tbl, currency: str) -> list[Signal]:
     if tbl is None or tbl.empty:
         return out
     for ticker, row in tbl.iterrows():
-        pnl_pct = _num(row.get("pnl_pct"))
+        pnl_pct = finite(row.get("pnl_pct"))
         if pnl_pct is not None and pnl_pct * 100 <= -DRAWDOWN_PCT:
             out.append(Signal(
                 DRAWDOWN, str(ticker), _URGENCY[DRAWDOWN],
@@ -157,7 +151,7 @@ def _position_signals(tbl, currency: str) -> list[Signal]:
                     "currency": currency,
                 },
             ))
-        weight = _num(row.get("weight"))
+        weight = finite(row.get("weight"))
         if weight is not None and weight * 100 >= CONCENTRATION_PCT:
             out.append(Signal(
                 CONCENTRATION, str(ticker), _URGENCY[CONCENTRATION],
@@ -200,7 +194,7 @@ def _harvest_signals(
         return []
     out: list[Signal] = []
     for ticker, row in tbl.iterrows():
-        pnl = _num(row.get("pnl"))
+        pnl = finite(row.get("pnl"))
         if pnl is None or pnl > -HARVEST_MIN:
             continue
         out.append(Signal(
@@ -209,7 +203,7 @@ def _harvest_signals(
                 "loss": _round(abs(pnl)),
                 "gain_ytd": _round(net_gain),
                 "offset": _round(min(abs(pnl), net_gain)),
-                "pnl_pct": _round((_num(row.get("pnl_pct")) or 0) * 100),
+                "pnl_pct": _round((finite(row.get("pnl_pct")) or 0) * 100),
                 "currency": currency,
                 "jurisdiction": getattr(jurisdiction, "code", None),
                 "repurchase_window": getattr(jurisdiction, "repurchase_window", ""),
@@ -253,7 +247,7 @@ def _low_signals(extremes, held: set[str]) -> list[Signal]:
     for ticker, price, kind, distance in extremes:
         if kind != "low" or ticker in held:
             continue
-        gap = abs(_num(distance) or 0.0) * 100
+        gap = abs(finite(distance) or 0.0) * 100
         if gap > LOW_52W_PCT:
             continue
         out.append(Signal(

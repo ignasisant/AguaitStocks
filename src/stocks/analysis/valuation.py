@@ -200,8 +200,10 @@ def blend(
     if scenarios and abs(total_prob - 1.0) > 1e-6:
         raise ValueError(f"scenario probabilities sum to {total_prob:.3f}, expected 1.0")
     rows = []
+    ers: list[tuple[float, dict]] = []
     for s in scenarios:
         er = expected_return(price, s.fair_value, s.years)
+        ers.append((s.prob, er))
         rows.append(
             {
                 "name": s.name,
@@ -214,8 +216,8 @@ def blend(
         )
     weighted = {
         "fair_value": sum(s.prob * s.fair_value for s in scenarios),
-        "total": sum(r["prob"] * (r["total"] or 0) for r in rows),
-        "annualized": sum(r["prob"] * (r["annualized"] or 0) for r in rows),
+        "total": sum(prob * (er["total"] or 0) for prob, er in ers),
+        "annualized": sum(prob * (er["annualized"] or 0) for prob, er in ers),
     }
     return rows, weighted
 

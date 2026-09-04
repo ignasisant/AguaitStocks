@@ -144,8 +144,11 @@ class _Message:
 
 
 def _tool_call(cid, name, args):
+    # `type` is the SDK's discriminator between function and custom tool
+    # calls; only function calls carry `.function`.
     return SimpleNamespace(
-        id=cid, function=SimpleNamespace(name=name, arguments=json.dumps(args)))
+        id=cid, type="function",
+        function=SimpleNamespace(name=name, arguments=json.dumps(args)))
 
 
 class _OpenAIClient:
@@ -196,7 +199,7 @@ def test_openai_answers_each_tool_call_by_id(openai_client):
 
 
 def test_openai_survives_unparseable_arguments(openai_client):
-    bad = SimpleNamespace(id="c1", function=SimpleNamespace(
+    bad = SimpleNamespace(id="c1", type="function", function=SimpleNamespace(
         name="get_quotes", arguments="{not json"))
     openai_client(_Message(tool_calls=[bad]), _Message(content="DONE"))
     run = llm._openai_tools("k", "m", "sys", [{"role": "user", "content": "hi"}],

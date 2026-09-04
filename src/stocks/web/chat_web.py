@@ -41,6 +41,7 @@ from typing import TYPE_CHECKING
 
 from pydantic import field_validator
 
+from stocks import obs
 from stocks.chat import structured
 
 if TYPE_CHECKING:
@@ -241,8 +242,10 @@ def search(queries: list[str], read_limit: int = READ_PAGES) -> list[Result]:
                         continue
                     seen.add(url)
                     out.append(Result(title or url, url, body[:_SNIPPET_CHARS]))
-    except Exception:
-        pass  # keep whatever was collected before the failure
+    except Exception as exc:
+        obs.warn("chat.web.search_failed", error_type=type(exc).__name__,
+                 error=str(exc)[:300])
+        # keep whatever was collected before the failure
     out = out[:MAX_RESULTS]
     return read_pages(out, read_limit) if read_limit > 0 else out
 

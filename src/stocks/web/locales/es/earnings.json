@@ -1,6 +1,7 @@
 {
   "earnings.title": "Calendario de resultados",
-  "earnings.no_stocks": "No hay valores en la lista (las criptos no tienen resultados). Añade valores en la página **Perfil**.",
+  "earnings.empty_title": "No hay valores que seguir",
+  "earnings.empty_body": "El calendario lee los valores de tu lista de seguimiento; las criptos y los fondos no publican resultados. Añade un valor y aquí aparecerán su próxima fecha de publicación, el consenso del trimestre y sus resultados pasados.",
   "earnings.filter_portfolio": "Cartera",
   "earnings.filter_favorites": "Favoritos",
   "earnings.no_dates": "No se encontraron fechas de resultados para la lista.",

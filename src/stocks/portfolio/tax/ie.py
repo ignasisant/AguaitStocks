@@ -41,10 +41,11 @@ from stocks.portfolio.tax.base import (
     ReportingFlag,
     TaxPeriod,
     TaxSettings,
-    covers,
     days_after_window,
+    open_period,
     recovered_losses,
     replacement_dates,
+    sales_in,
 )
 
 CODE = "IE"
@@ -188,17 +189,11 @@ def fiscal_period(
     and the losses settle over the whole year.
     """
     cfg = settings or TaxSettings()
-    out = IeTaxPeriod(
-        jurisdiction=CODE,
-        currency=CURRENCY,
-        year=int(period[:4]),
-        period=period,
-        settings=cfg,
-        funds_classified=cfg.fund_tickers is not None,
+    out = open_period(
+        IeTaxPeriod, CODE, CURRENCY, period,
+        settings=cfg, funds_classified=cfg.fund_tickers is not None,
     )
-    for s in realized:
-        if not covers(period, s.sell_date, YEAR_START):
-            continue
+    for s in sales_in(period, realized, YEAR_START):
         out.sales.append(s)
         fund = _is_fund(s.ticker, cfg)
         gain = s.gain

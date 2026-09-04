@@ -15,7 +15,7 @@ from datetime import UTC, date, datetime
 from pathlib import Path
 
 from stocks import obs
-from stocks.config import CURRENCY_SYMBOL, load_watchlist
+from stocks.config import currency_symbol, load_watchlist
 from stocks.data.earnings import EarningsEvent, upcoming
 from stocks.portfolio.ledger import all_transactions
 from stocks.portfolio.positions import build
@@ -98,11 +98,11 @@ def compute_digest_data(
 
 def _money(amount: float, currency: str = "EUR") -> str:
     """€48,230 — always thousands-separated, no decimals for totals."""
-    return f"{CURRENCY_SYMBOL.get(currency, '')}{amount:,.0f}"
+    return f"{currency_symbol(currency)}{amount:,.0f}"
 
 
 def _delta(change: float, pct: float, currency: str = "EUR") -> str:
-    return f"{change:+,.0f} {CURRENCY_SYMBOL.get(currency, '')} ({pct * 100:+.2f}%)"
+    return f"{change:+,.0f} {currency_symbol(currency)} ({pct * 100:+.2f}%)"
 
 
 def _date_line(d: date, lang: str) -> str:

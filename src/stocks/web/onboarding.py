@@ -36,10 +36,12 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from typing import Literal
 
 import streamlit as st
 
-from stocks.portfolio.ledger import all_transactions
+from stocks import obs
+from stocks.portfolio.ledger import has_transactions
 from stocks.web import auth, i18n
 from stocks.web.i18n import t as tr
 
@@ -93,7 +95,7 @@ class Step:
 
 def _has_ledger(_prefs: dict) -> bool:
     try:
-        return bool(all_transactions(auth.db_path()))
+        return has_transactions(auth.db_path())
     except Exception:
         return False  # unreadable/missing ledger reads as "nothing imported"
 
@@ -257,10 +259,14 @@ RELEASES: tuple[Release, ...] = (
             "tour.news_2026_09_bank",
             "tour.news_2026_09_daily",
             "tour.news_2026_09_chat",
+            "tour.news_2026_09_askai",
             "tour.news_2026_09_fees",
+            "tour.news_2026_09_demo",
             "tour.news_2026_09_pulse",
+            "tour.news_2026_09_profile",
         ),
-        steps=("tax", "bank", "daily", "assistant", "income", "pulse"),
+        steps=("tax", "bank", "daily", "assistant", "market", "income",
+               "pulse", "prefs", "import"),
     ),
 )
 
@@ -268,6 +274,52 @@ CURRENT_VERSION = RELEASES[-1].version
 
 
 # --------------------------------------------------------------- shared state
+def _has_searched(prefs: dict) -> bool:
+    """Whether this account has ever looked a ticker up in the top bar."""
+    return bool(prefs.get("recent_searches"))
+
+
+def _has_asked(_prefs: dict) -> bool:
+    """Whether any conversation with the assistant has a turn in it."""
+    try:
+        book = auth.load_book()
+    except Exception:
+        return False
+    return any(c.get("messages") for c in book.get("conversations", []))
+
+
+def _watchlist_is_own(_prefs: dict) -> bool:
+    """Whether the watchlist has been touched since it was seeded.
+
+    Compared against the seed text rather than tracked with a flag, so it is
+    also true for the accounts that predate this and for one restored from the
+    bucket. An account that edits its way back to the exact seed reads as
+    untouched, which is a shrug, not a bug.
+    """
+    try:
+        return auth.watchlist_path().read_text() != auth.STARTER_WATCHLIST
+    except OSError:
+        return False
+
+
+def explore_state(prefs: dict | None = None) -> dict[str, bool]:
+    """Which of the no-setup-required things this account has actually tried.
+
+    Separate from `setup_state`: those four are capabilities to switch on, and
+    an account with none of them connected can still do all three of these
+    right now — the search, the assistant's free chain and the watchlist
+    editor need no key, no import and no statement. On a first visit they are
+    the shortest path from "signed in" to "this is useful", which is exactly
+    what a checklist of things still to connect fails to say.
+    """
+    p = prefs if prefs is not None else auth.load_prefs()
+    return {
+        "search": _has_searched(p),
+        "ask": _has_asked(p),
+        "watchlist": _watchlist_is_own(p),
+    }
+
+
 def setup_state(prefs: dict | None = None) -> dict[str, bool]:
     """Which connectable capabilities this account has switched on.
 
@@ -399,7 +451,19 @@ def _minimize() -> None:
     st.session_state[_RESUME] = True
 
 
-def _exit_tour() -> None:
+def _exit_tour(reason: str = "exit") -> None:
+    """Close the tour for good, and record where it was left.
+
+    The step the reader walked out on is the one piece of feedback the tour
+    can give about itself: a step that most accounts abandon is either badly
+    placed or badly written, and neither is visible from the code. `reason`
+    separates the three ways out — finishing it is not the same signal as
+    skipping from step two.
+    """
+    steps = visible_steps()
+    idx = min(int(st.session_state.get(_STEP, 0)), len(steps) - 1)
+    obs.event("tour.exit", reason=reason, step=steps[idx].id,
+              index=idx + 1, of=len(steps))
     prefs = auth.load_prefs()
     prefs[PREF_DONE] = True
     # A first-timer who has just been walked through everything has no
@@ -557,7 +621,7 @@ def _tour_body() -> None:
     if last:
         if nav.button(tr("tour.finish"), key="tour_finish", type="primary",
                       icon=":material/check:"):
-            _exit_tour()
+            _exit_tour("finished")
             st.session_state["_tour_finished"] = True
             st.rerun()
     else:
@@ -571,7 +635,7 @@ def _tour_body() -> None:
     if locked:
         st.caption(tr("tour.locked"))
     if not last and st.button(tr("tour.skip"), key="tour_skip", type="tertiary"):
-        _exit_tour()
+        _exit_tour("skipped")
         st.rerun()
 
 
@@ -590,7 +654,7 @@ def _news_body() -> None:
         st.markdown(f"**{rel.version}** :gray-badge[{rel.date}]")
         for key in rel.items:
             st.markdown(f"- {tr(key)}")
-        jumps = [by_id(i) for i in rel.steps if i in shown]
+        jumps = [s for s in (by_id(i) for i in rel.steps if i in shown) if s]
         if jumps:
             row = st.container(horizontal=True)
             for step in jumps:
@@ -648,7 +712,7 @@ def _resume_strip() -> None:
             open_tour()
             st.rerun()
         if row.button(tr("tour.exit"), key="tour_strip_exit", type="tertiary"):
-            _exit_tour()
+            _exit_tour("abandoned_strip")
             st.rerun()
 
 
@@ -657,7 +721,7 @@ def render_launcher(
     container=None,
     *,
     label: str | None = None,
-    button_type: str = "secondary",
+    button_type: Literal["primary", "secondary", "tertiary"] = "secondary",
 ) -> None:
     """An "open the tutorial" button, for wherever the user looks for it — the
     Profile page, the Home setup card. `container` draws it into a row instead

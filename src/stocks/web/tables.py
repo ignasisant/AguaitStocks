@@ -13,10 +13,14 @@ don't need any of this.
 from __future__ import annotations
 
 import html
+from collections.abc import Callable, Mapping
+from typing import Any, cast
 from urllib.parse import quote
 
 import pandas as pd
 import streamlit as st
+from pandas.io.formats.style import Styler
+from pandas.io.formats.style_render import CSSDict
 
 from stocks.web.ds import (
     BORDER,
@@ -53,7 +57,7 @@ from stocks.web.logos import company_name, logo
 
 # One look for every HTML-rendered ticker table (Positions, Realized & tax,
 # earnings lists, screener, import previews) — keep them identical.
-_TABLE_STYLES = [
+_TABLE_STYLES: list[CSSDict] = [
     {"selector": "", "props": [
         ("width", "100%"), ("border-collapse", "collapse"),
         ("font-size", FS_MD),
@@ -88,7 +92,7 @@ _TABLE_STYLES = [
 
 # Extra look for click-to-sort tables: headers read as controls and the active
 # column carries its direction arrow (set by app.py's sorter as data-ag-dir).
-_SORT_STYLES = [
+_SORT_STYLES: list[CSSDict] = [
     {"selector": "th.col_heading", "props": [
         ("cursor", "pointer"), ("user-select", "none"),
         ("white-space", "nowrap"),
@@ -128,6 +132,15 @@ def signed_color(v, *, muted: bool = False) -> str:
         return ""
 
 
+# One KPI tile: label, value, optional (chip text, chip tone), optional help.
+KpiTile = tuple[str, str, tuple[str, str] | None, str | None]
+
+
+# A column's format: a template string ("{:+.1%}", "€{:+,.0f}") or a
+# value -> str callable. Both have always been accepted by every table here.
+Formatter = str | Callable[[Any], str]
+
+
 def _neutral_zero_formatter(template: str):
     """Wrap a signed format template ("{:+.1%}", "€{:+,.0f}") so an exact 0
     renders without the leading "+" — a flat/market-closed value shows as a
@@ -145,12 +158,19 @@ def _neutral_zero_formatter(template: str):
     return fmt
 
 
-def _value_formatter(fmt: dict[str, str] | None, signed: tuple[str, ...], col: str):
+def _value_formatter(
+    fmt: Mapping[str, Formatter] | None, signed: tuple[str, ...], col: str
+) -> Callable[[Any], str]:
     """Formatter for one column's raw value, matching what the Styler would
     render for it (signed columns drop the "+" on an exact 0, NaN reads
     "n/a") — pair cells are built as HTML before the Styler runs, so they
-    have to format their own numbers."""
+    have to format their own numbers.
+
+    A callable format is already a finished formatter and is handed back as
+    it is: the neutral-zero rule only means anything for a "+" template."""
     template = (fmt or {}).get(col, "{}")
+    if not isinstance(template, str):
+        return template
     if col in signed:
         return _neutral_zero_formatter(template)
 
@@ -281,9 +301,7 @@ _KPI_CSS = f"""<style>
 </style>"""
 
 
-def kpi_grid_html(
-    tiles: list[tuple[str, str, tuple[str, str] | None, str | None]],
-) -> str:
+def kpi_grid_html(tiles: list[KpiTile]) -> str:
     """KPI tiles as ONE self-contained grid: label, value, verdict chip.
 
     The Streamlit version of this block (st.metric + st.caption in a bordered
@@ -411,7 +429,7 @@ def _ticker_rows_html(
     frame: pd.DataFrame,
     *,
     spec: dict,
-    fmt: dict[str, str] | None,
+    fmt: Mapping[str, Formatter] | None,
     signed: tuple[str, ...],
     ticker_col: str,
     names: bool,
@@ -537,7 +555,7 @@ def responsive_ticker_table_html(
     *,
     mobile: dict,
     mobile_names: bool = False,
-    fmt: dict[str, str] | None = None,
+    fmt: Mapping[str, Formatter] | None = None,
     signed: tuple[str, ...] = (),
     ticker_col: str = "ticker",
     names: bool = True,
@@ -575,7 +593,7 @@ def responsive_ticker_table_html(
 def ticker_table_html(
     frame: pd.DataFrame,
     *,
-    fmt: dict[str, str] | None = None,
+    fmt: Mapping[str, Formatter] | None = None,
     signed: tuple[str, ...] = (),
     ticker_col: str | None = "ticker",
     left_cols: tuple[str, ...] = (),
@@ -693,7 +711,7 @@ def ticker_table_html(
         frame = frame.drop(columns=[pcol])
         merged.add(vcol)
     right = [c for c in frame.columns if c != ticker_col and c not in left_cols]
-    fmt_map = {
+    fmt_map: dict[str, Any] = {
         k: v for k, v in (fmt or {}).items()
         if k in frame.columns and k not in merged
     }
@@ -702,12 +720,15 @@ def ticker_table_html(
     for c in signed:
         if c in fmt_map:
             fmt_map[c] = _neutral_zero_formatter(fmt_map[c])
-    sty = frame.style.format(fmt_map or None, na_rep="n/a")
+    # `.format()` is typed as returning StylerRenderer, the base that declares
+    # none of the methods chained below it; the runtime object is a Styler.
+    sty = cast(Styler, frame.style.format(fmt_map or None, na_rep="n/a"))
     if colored := [c for c in signed if c in frame.columns and c not in merged]:
         # Rows whose market is closed dim only their day-change (muted_cols)
         # cells; total-P/L columns stay full color. Everything else keeps the
         # plain elementwise coloring.
-        dim = [c for c in muted_cols if c in colored] if muted_mask else []
+        mask = muted_mask or []
+        dim = [c for c in muted_cols if c in colored] if mask else []
         plain = [c for c in colored if c not in dim]
         if plain:
             sty = sty.map(signed_color, subset=plain)
@@ -715,7 +736,7 @@ def ticker_table_html(
             sty = sty.apply(
                 lambda col: [
                     signed_color(v, muted=m)
-                    for v, m in zip(col, muted_mask, strict=False)
+                    for v, m in zip(col, mask, strict=False)
                 ],
                 subset=[c],
                 axis=0,
@@ -728,12 +749,17 @@ def ticker_table_html(
         # relabel_index takes the full new-label list in column order and only
         # changes the rendered headers — the per-column header alignment below
         # still keys on the original names.
-        sty = sty.relabel_index([labels.get(c, c) for c in frame.columns], axis=1)
+        sty = cast(
+            Styler,
+            sty.relabel_index([labels.get(c, c) for c in frame.columns], axis=1),
+        )
     sty = sty.set_table_styles(_TABLE_STYLES)
     if right:
+        header_right: list[CSSDict] = [
+            {"selector": "th", "props": [("text-align", "right")]}
+        ]
         sty = sty.set_table_styles(
-            {c: [{"selector": "th", "props": [("text-align", "right")]}]
-             for c in right},
+            {c: header_right for c in right},
             overwrite=False,
             axis=0,
         )
@@ -785,7 +811,7 @@ def stacked_table_html(
     title: str | None = None,
     index_title: bool = False,
     title_html: bool = False,
-    fmt: dict[str, str] | None = None,
+    fmt: Mapping[str, Formatter] | None = None,
     signed: tuple[str, ...] = (),
     labels: dict[str, str] | None = None,
     hide: tuple[str, ...] = (),
@@ -834,10 +860,7 @@ def stacked_table_html(
                 pass
             if isinstance(v, str) and not v.strip():
                 continue
-            f = (fmt or {}).get(c)
-            text = html.escape(
-                f(v) if callable(f) else _value_formatter(fmt, signed, c)(v)
-            )
+            text = html.escape(_value_formatter(fmt, signed, c)(v))
             if c in signed and (css := signed_color(v)):
                 text = f'<span style="{css}">{text}</span>'
             lines.append(
@@ -861,7 +884,7 @@ def data_table(
     title: str | None = None,
     index_title: bool = False,
     title_html: bool = False,
-    fmt: dict[str, str] | None = None,
+    fmt: Mapping[str, Formatter] | None = None,
     signed: tuple[str, ...] = (),
     labels: dict[str, str] | None = None,
     hide: tuple[str, ...] = (),

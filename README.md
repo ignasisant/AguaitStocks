@@ -278,12 +278,34 @@ openrouter = "sk-or-..."  # openrouter.ai/settings/keys (:free models)
 # groq_model = "llama-3.3-70b-versatile"
 # Per-account daily message allowance (default 30):
 # daily_cap = 30
+# Who may spend the chain: trial (default) | open | established | allowlist
+# eligibility = "trial"
+# What a not-yet-established account gets per day (default 5):
+# trial_cap = 5
+# How long "not yet established" lasts (default 24):
+# min_account_hours = 24
+# eligibility = "allowlist" only:
+# allowed_emails = "you@example.com, someone@else.com"
 ```
 
 When configured, TopStocks AI is listed first and becomes the default for
 accounts that never picked a provider; the BYOK entries stay available in the
 same selector. Each account gets a **daily message cap** (`daily_cap`, counted
-in its prefs) so one user can't drain the shared quota. Mind the fine print:
+in its prefs) so one user can't drain the shared quota, and the process keeps a
+shared **global** daily pot (`global_daily_cap`, default 400) on top of it.
+
+Because a Google sign-in is free to obtain in bulk, `eligibility` decides who
+gets near the operator's keys. The default, **`trial`**, lets a brand-new
+account use the assistant in the session it signed up in, on the smaller
+`trial_cap` allowance, and moves it to the full `daily_cap` once it is
+`min_account_hours` old — so farming throwaway accounts buys a handful of
+messages each instead of the pot everyone else depends on. `open` hands out the
+full cap from the first minute; `established` is the hard wall (no free chain at
+all until the account is a day old); `allowlist` serves only `allowed_emails`.
+BYOK is untouched by all four — a user spending their own key needs no
+permission.
+
+Mind the fine print:
 free tiers route your prompts — including the portfolio snapshot — through the
 chosen vendors; check each vendor's data policy, or leave `[free_llm]` unset
 to stay strictly BYOK.

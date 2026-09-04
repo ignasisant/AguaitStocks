@@ -21,6 +21,7 @@ import importlib.util
 import time
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
+from typing import Any, cast
 
 from stocks import obs
 
@@ -177,8 +178,8 @@ def _anthropic_stream(api_key, model, system, messages):
         {"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}
     ]
     with client.messages.stream(
-        model=model, max_tokens=MAX_TOKENS, system=system_blocks,
-        messages=_with_cache_breakpoint(messages),
+        model=model, max_tokens=MAX_TOKENS, system=cast(Any, system_blocks),
+        messages=cast(Any, _with_cache_breakpoint(messages)),
     ) as stream:
         yield from stream.text_stream
 
@@ -204,7 +205,7 @@ def _anthropic_tools(api_key, model, system, messages, tools, execute, rounds):
     for _ in range(max(1, rounds)):
         resp = client.messages.create(
             model=model, max_tokens=MAX_TOKENS, system=system,
-            messages=convo, tools=schema,
+            messages=convo, tools=cast(Any, schema),
         )
         text = "".join(b.text for b in resp.content if b.type == "text")
         uses = [b for b in resp.content if b.type == "tool_use"]
@@ -285,7 +286,8 @@ def _openai_compat_tools(base_url: str | None = None):
         text = ""
         for _ in range(max(1, rounds)):
             resp = client.chat.completions.create(
-                model=model, max_tokens=MAX_TOKENS, messages=convo, tools=schema,
+                model=model, max_tokens=MAX_TOKENS, messages=convo,
+                tools=cast(Any, schema),
             )
             msg = resp.choices[0].message
             text = msg.content or ""
@@ -293,6 +295,10 @@ def _openai_compat_tools(base_url: str | None = None):
                 break
             convo.append(msg.model_dump(exclude_none=True))
             for tc in msg.tool_calls:
+                # Only function tools are ever sent, so a custom-tool call
+                # (which carries no `.function`) can't be one of ours.
+                if tc.type != "function":
+                    continue
                 # Never string-match the serialized arguments: models escape
                 # them differently. Bad JSON is the model's error to see.
                 try:
@@ -345,7 +351,7 @@ def _gemini_stream(api_key, model, system, messages):
     ]
     stream = client.models.generate_content_stream(
         model=model,
-        contents=contents,
+        contents=cast(Any, contents),
         config=types.GenerateContentConfig(system_instruction=system),
     )
     for chunk in stream:

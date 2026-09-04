@@ -36,6 +36,15 @@ class Platform:
     hint: str  # one-liner: where to find the export on that platform
     parse: Callable[[str, bytes], ParseResult]  # (filename, raw bytes)
     domain: str | None = None  # brand website, for the selector logo
+    # A shipped example export, offered to an account that has never imported
+    # anything (see the web Import page). Deliberately a real statement in this
+    # platform's own layout rather than a fabricated ledger: it goes through
+    # the same parse, the same validation and the same commit, so what the
+    # reader learns is the flow they will actually use, and it undoes through
+    # the ordinary "clear last import". Only Revolut carries one — the sample
+    # has to track a real broker's columns, and one that the parser's own tests
+    # already pin is the one that will not quietly rot.
+    sample: str | None = None  # filename under web/assets/
 
 
 def _parse_revolut(filename: str, data: bytes) -> ParseResult:
@@ -59,6 +68,7 @@ PLATFORMS: tuple[Platform, ...] = (
         ),
         parse=_parse_revolut,
         domain="revolut.com",
+        sample="sample-statement-revolut.csv",
     ),
     Platform(
         key="revolut_crypto",

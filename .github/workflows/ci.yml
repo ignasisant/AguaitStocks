@@ -22,9 +22,8 @@ jobs:
       - run: uv sync --frozen
       - run: uv run ruff check .
 
-  # Type checking, scoped to the packages that are already clean (see
-  # [tool.ty.src] in pyproject.toml). A red run here means a new annotation
-  # slipped, not that the whole tree is unchecked.
+  # Type checking over all of src/stocks (see [tool.ty.src] in pyproject.toml).
+  # A red run here means a new annotation slipped.
   types:
     runs-on: ubuntu-latest
     timeout-minutes: 5

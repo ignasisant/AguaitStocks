@@ -3,14 +3,12 @@
 Drag-zooming the chart is a client-side Plotly relayout Streamlit never sees,
 so the change over the picked window is computed in the browser from the
 series the page ships in the readout slot's data attributes. Both halves are
-covered end to end: the page's own `_range_readout` builds the markup (lifted
-out of the page module, which cannot be imported outside a Streamlit run), and
-its data attributes are fed to the page's own JS under node with a DOM shim.
+covered end to end: `range_readout.render` builds the markup, and its data
+attributes are fed to the module's own JS under node with a DOM shim.
 """
 
 from __future__ import annotations
 
-import ast
 import html as html_mod
 import json
 import re
@@ -21,6 +19,7 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
+from stocks.web import range_readout
 from stocks.web.i18n import translate
 
 PAGE = Path("src/stocks/web/app_pages/ticker.py")
@@ -61,40 +60,19 @@ FRAME = pd.DataFrame(
 )
 
 
-def _page_bits() -> dict:
-    """`_RANGE_JS` and `_range_readout` executed in a stubbed namespace.
+@pytest.fixture(autouse=True)
+def _stub_chrome(monkeypatch):
+    """Fixed colours and a placeholder-preserving template.
 
-    The page module runs its whole body on import (it reads the sidebar
-    picker and calls st.stop), so the two definitions are lifted out of its
-    AST instead.
+    The assertions below are about the slot's wiring — which series, which
+    attributes — not about today's design tokens or catalog wording, so the
+    module's own imports of both are pinned here.
     """
-    src = PAGE.read_text()
-    tree = ast.parse(src)
-    want = ("_RANGE_JS", "_range_readout")
-    cuts = []
-    for node in tree.body:
-        name = None
-        if isinstance(node, ast.Assign) and isinstance(node.targets[0], ast.Name):
-            name = node.targets[0].id
-        elif isinstance(node, ast.FunctionDef):
-            name = node.name
-        if name in want:
-            cuts.append(ast.get_source_segment(src, node))
-    assert len(cuts) == len(want), cuts
-    ns = {
-        "pd": pd,
-        "html": html_mod,
-        "FS_XS": "12px",
-        "UP_COLOR": "#0f0",
-        "DOWN_COLOR": "#f00",
-        "active_language": lambda: "en",
-        "tr": lambda key, **kw: TMPL.format(**kw),
-    }
-    exec("\n\n".join(cuts), ns)  # noqa: S102 - page source, not user input
-    return ns
-
-
-BITS = _page_bits()
+    monkeypatch.setattr(range_readout, "FS_XS", "12px")
+    monkeypatch.setattr(range_readout, "UP_COLOR", "#0f0")
+    monkeypatch.setattr(range_readout, "DOWN_COLOR", "#f00")
+    monkeypatch.setattr(range_readout, "active_language", lambda: "en")
+    monkeypatch.setattr(range_readout, "tr", lambda key, **kw: TMPL.format(**kw))
 
 
 def _markup(frame: pd.DataFrame) -> str:
@@ -105,7 +83,7 @@ def _markup(frame: pd.DataFrame) -> str:
             captured["body"] = body
             captured["kwargs"] = kwargs
 
-    BITS["_range_readout"](Box(), frame)
+    range_readout.render(Box(), frame)
     assert captured["kwargs"] == {"unsafe_allow_javascript": True}
     return captured["body"]
 
@@ -120,7 +98,7 @@ def _dataset(markup: str) -> dict:
 
 
 def _script() -> str:
-    return BITS["_RANGE_JS"].replace("<script>", "").replace("</script>", "")
+    return range_readout.RANGE_JS.replace("<script>", "").replace("</script>", "")
 
 
 def _run(tmp_path: Path, layout: dict, frame: pd.DataFrame = FRAME) -> dict:
@@ -171,7 +149,7 @@ def test_the_price_traces_are_tagged_for_the_bridge():
     and the candlestick rendering must carry it."""
     src = PAGE.read_text()
     assert src.count('meta="price",') == 2
-    assert "_range_readout(c1, df)" in src
+    assert "range_readout.render(c1, df)" in src
 
 
 # --------------------------------------------------------- the browser reading

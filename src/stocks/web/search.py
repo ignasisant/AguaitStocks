@@ -13,8 +13,10 @@ Enter/blur, which cannot drive an as-you-type dropdown.
 from __future__ import annotations
 
 import re
+from collections.abc import Mapping, Sequence
 
 import streamlit as st
+import streamlit.components.v2  # noqa: F401 — lazy submodule
 
 from stocks.config import load_watchlist
 from stocks.fuzzy import FUZZY_CUTOFF, MIN_QUERY, fuzzy_ratio
@@ -266,7 +268,7 @@ def _fuzzy_order(
     q: str,
     tickers: list[str],
     labels: dict[str, str],
-    tag_map: dict[str, tuple],
+    tag_map: Mapping[str, Sequence[str]],
 ) -> list[str]:
     """Tickers whose symbol, name or tag fuzzy-matches `q`, best score first.
 

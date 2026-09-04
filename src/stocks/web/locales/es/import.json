@@ -32,5 +32,8 @@
   "import.broker_help": "Este formato no dice de qué bróker es: elige el que corresponda — o escribe su nombre si no está en la lista. Se marca en cada fila; Comisiones y Custodia agrupan tu cartera por ahí.",
   "import.commit_button": "Confirmar en el libro",
   "import.commit_success": "Se importaron {n} transacciones. El libro contiene ahora {total}.",
-  "import.commit_help": "Las filas confirmadas persisten en el libro entre recargas — no hace falta volver a subir nada. Abre **Cartera** para posiciones e impuestos, o **Resumen** para ver tus compras/ventas en el gráfico de precios."
+  "import.commit_help": "Las filas confirmadas persisten en el libro entre recargas — no hace falta volver a subir nada. Abre **Cartera** para posiciones e impuestos, o **Resumen** para ver tus compras/ventas en el gráfico de precios.",
+  "import.sample_caption": "¿No tienes a mano un extracto de {platform}? Prueba la aplicación con uno de ejemplo — se analiza, se previsualiza y se confirma igual que el tuyo, y se deshace con **Borrar última importación**.",
+  "import.sample_button": "Cargar un extracto de ejemplo",
+  "import.demo_rows_caption": "{n} de ellas son transacciones de prueba. Al importar un extracto se borran."
 }

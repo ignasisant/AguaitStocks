@@ -289,6 +289,8 @@ def test_the_page_is_one_element_with_every_section(body):
         "ag-l-bar",      # top bar
         "ag-l-hero",
         "ag-l-broker",   # broker list
+        "ag-l-chat",     # the assistant section
+        "ag-l-lensgrid", # its skill-library strip
         "ag-l-provcard", # provenance
         "ag-l-trustgrid",
         "ag-l-q",        # FAQ
@@ -297,6 +299,37 @@ def test_the_page_is_one_element_with_every_section(body):
         "ag-l-mbar",     # the phone CTA bar ships on every request
     ):
         assert marker in html, f"section missing: {marker}"
+
+
+def test_the_lens_strip_names_every_skill_the_assistant_actually_ships(as_lang):
+    """The strip is a claim about the skill library, so it has to match it.
+
+    `_LENSES` mirrors web/skills/*.md the way `_BROKERS` mirrors platforms.py.
+    A new skill file with no landing entry would leave the page advertising a
+    smaller library than the panel offers, and a stale id would render its own
+    locale key as the label.
+    """
+    from stocks.web import chat_skills
+
+    assert set(landing._LENSES) == chat_skills.valid_ids()
+    as_lang("en")
+    html = landing._assistant()
+    assert f"{len(landing._LENSES)} analysis lenses" in html
+    assert "chat.skill." not in html, "a lens id with no locale label"
+
+
+def test_the_assistant_is_pitched_once(as_lang):
+    """The bento's AI and Telegram tiles moved into the assistant section.
+
+    Two pitches for one feature read as two weaker features, and the bento's
+    summary was the weaker of the two once the section existed.
+    """
+    for lang in ("en", "es"):
+        as_lang(lang)
+        bento = landing._bento()
+        for key in ("landing.ai_c1_h", "landing.ai_n1_h"):
+            assert landing.tr(key) not in bento
+        assert landing.tr("landing.ai_n1_h") in landing._assistant()
 
 
 def test_every_cta_leaves_the_landing_for_the_app(body):
@@ -340,6 +373,28 @@ def test_the_jurisdiction_toggle_keeps_the_language(as_lang):
     as_lang("en", "US")
     en_us = landing.page_body()
     assert f'class="ag-l-jurswitch" href="{landing.PATH_EN_ES}"' in en_us
+
+
+def test_the_repository_url_has_exactly_one_definition():
+    """A retyped owner slug is a 404 on the link the whole pitch rests on.
+
+    The shipped URL had a hyphen the owner slug does not, in three separate
+    modules, so every "read the source yourself" link, the structured data's
+    codeRepository and the legal pages' contact address all 404. One
+    definition, imported — and this test fails if a second literal shows up to
+    drift from it.
+    """
+    from pathlib import Path
+
+    web = Path(landing.__file__).parent
+    offenders = [
+        f"{path.name}:{n}"
+        for path in sorted(web.rglob("*.py"))
+        for n, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1)
+        if "https://github.com/" in line and path.name != "landing.py"
+    ]
+    assert not offenders, f"second repository URL literal: {offenders}"
+    assert landing.GITHUB_URL == "https://github.com/ignasisant/stocks"
 
 
 def test_the_brand_mark_is_absolute(body):

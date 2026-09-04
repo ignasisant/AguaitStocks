@@ -45,12 +45,13 @@ from stocks.portfolio.tax.base import (
     ReportingFlag,
     TaxPeriod,
     TaxSettings,
-    covers,
     days_window,
     flag,
+    open_period,
     progressive_tax,
     recovered_losses,
     replacement_dates,
+    sales_in,
 )
 
 CODE = "US"
@@ -349,16 +350,8 @@ def fiscal_period(
     base: the buckets net over the whole tax year.
     """
     cfg = settings or TaxSettings()
-    out = UsTaxPeriod(
-        jurisdiction=CODE,
-        currency=CURRENCY,
-        year=int(period[:4]),
-        period=period,
-        settings=cfg,
-    )
-    for s in realized:
-        if not covers(period, s.sell_date, YEAR_START):
-            continue
+    out = open_period(UsTaxPeriod, CODE, CURRENCY, period, settings=cfg)
+    for s in sales_in(period, realized, YEAR_START):
         out.sales.append(s)
         long = _is_long(s)
         gain = s.gain  # base-currency gain; USD here (see tax.base)

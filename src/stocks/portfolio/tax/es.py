@@ -25,12 +25,13 @@ from stocks.portfolio.tax.base import (
     ReportingFlag,
     TaxPeriod,
     TaxSettings,
-    covers,
     flag,
     months_window,
+    open_period,
     progressive_tax,
     recovered_losses,
     replacement_dates,
+    sales_in,
 )
 
 CODE = "ES"
@@ -91,12 +92,8 @@ def fiscal_period(
     slice is a breakdown, not a taxable base — IRPF nets the savings base over
     the whole ejercicio.
     """
-    out = EsTaxPeriod(
-        jurisdiction=CODE, currency=CURRENCY, year=int(period[:4]), period=period
-    )
-    for s in realized:
-        if not covers(period, s.sell_date, YEAR_START):
-            continue
+    out = open_period(EsTaxPeriod, CODE, CURRENCY, period)
+    for s in sales_in(period, realized, YEAR_START):
         out.sales.append(s)
         gain = s.gain
         if gain >= 0:

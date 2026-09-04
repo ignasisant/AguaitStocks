@@ -15,6 +15,7 @@ choices, and one "chat_history::<watchlist_path>" thread per account.
 
 from __future__ import annotations
 
+import re
 import time
 from datetime import UTC, datetime
 from html import escape
@@ -28,7 +29,7 @@ from cryptography.fernet import Fernet
 from stocks import obs
 from stocks.chat import agent, engine, market, tokens, toolbox, tools
 from stocks.config import load_watchlist
-from stocks.portfolio import autodetect, last_import, llm_map, platforms
+from stocks.portfolio import autodetect, demo, last_import, llm_map, platforms
 from stocks.portfolio.ledger import add_many, all_transactions
 from stocks.portfolio.validate import known_tickers, validate
 from stocks.secrets_env import secret
@@ -42,10 +43,8 @@ from stocks.web import (
     skeletons,
 )
 from stocks.web.i18n import t as tr
-from stocks.web.portfolio_data import enriched_positions
+from stocks.web.portfolio_data import enriched_positions, ledger_state
 from stocks.web.widgets import (
-    asset_logo,
-    brand_logo,
     data_table,
     db_mtime,
     viewer_tz,
@@ -187,7 +186,9 @@ def active_key(provider: llm.Provider) -> str:
 # Free-chain daily allowance: constants and counter logic live in the shared
 # engine (stocks/chat/engine.py) so the web panel and the Telegram bot spend
 # from the same per-account pot ("free_msgs::<date>" in prefs).
-_free_daily_cap = engine.free_daily_cap
+def _free_daily_cap() -> int:
+    """This account's allowance today — the reduced one while it is new."""
+    return engine.free_daily_cap(auth.load_prefs())
 
 
 def _spend_free_quota() -> bool:
@@ -197,6 +198,34 @@ def _spend_free_quota() -> bool:
         return False
     auth.save_prefs(prefs)
     return True
+
+
+def _refund_free_quota(units: int) -> None:
+    """Hand back units a turn spent without ever producing an answer.
+
+    Prefs are re-read rather than reused: the spend that is being undone saved
+    them, so the copy on disk is the current one.
+    """
+    if units <= 0:
+        return
+    prefs = auth.load_prefs()
+    engine.refund_free_quota(prefs, units)
+    auth.save_prefs(prefs)
+
+
+def _cap_message() -> str:
+    """The refusal for the wall a spend actually hit.
+
+    Three walls guard the free chain and they fail differently: this account's
+    allowance resets tomorrow, the shared pot is everyone's and may be back
+    within the hour, and an ineligible account never had an allowance at all.
+    Naming the account cap for either of the others tells the reader they spent
+    messages they never sent.
+    """
+    prefs = auth.load_prefs()
+    reason = engine.free_cap_reason(prefs)
+    return tr(engine.FREE_CAP_ERRORS[reason],
+              cap=engine.free_daily_cap(prefs), full=engine.free_daily_cap())
 
 
 def _active_model(provider: llm.Provider) -> str:
@@ -210,39 +239,6 @@ def _active_model(provider: llm.Provider) -> str:
 
 _DEFAULT_WIDTH = 380  # px; must match the .st-key-chatpanel fallback in the CSS
 _MIN_WIDTH, _MAX_WIDTH = 320, 1500  # clamp range for the drag-to-resize handle
-
-
-def _provider_option_md(pid: str) -> str:
-    """Segmented-control label: provider logo (markdown image) + brand name."""
-    p = llm.PROVIDERS[pid]
-    src = brand_logo(p.id, p.domain) if p.domain else asset_logo("topstocks-icon.svg")
-    img = f"![{p.label}]({src}) " if src else ""
-    return f"{img}{p.label}"
-
-
-def _pick_provider(key: str) -> llm.Provider:
-    """Provider selector; remembers the choice in session + prefs."""
-    provs = _offered_providers()
-    ids = [p.id for p in provs]
-    prefs = auth.load_prefs()
-    default = (
-        st.session_state.get("llm_provider")
-        or prefs.get("llm_provider")
-        or llm.default_provider_id()
-    )
-    pid = st.segmented_control(
-        tr("chat.provider"),
-        ids,
-        format_func=_provider_option_md,
-        default=default if default in ids else ids[0],
-        required=True,  # clicking the active segment must not deselect it
-        key=key,
-    )
-    st.session_state["llm_provider"] = pid
-    if pid != prefs.get("llm_provider"):
-        prefs["llm_provider"] = pid
-        auth.save_prefs(prefs)
-    return llm.PROVIDERS[pid]
 
 
 def _pick_model(provider: llm.Provider, key: str) -> str:
@@ -270,17 +266,25 @@ def _key_gate(provider: llm.Provider) -> str | None:
         st.session_state[_sk(provider.id)] = key
         return key
 
-    st.info(tr("chat.byok_help", provider=provider.label))
-    entered = st.text_input(
-        tr("chat.key_label", provider=provider.label),
-        type="password",
-        placeholder=provider.key_placeholder,
-        help=tr("chat.key_help"),
-        key=f"panel_key_{provider.id}",
-    )
-    remember = st.checkbox(tr("chat.remember"), key=f"panel_remember_{provider.id}")
-    st.markdown(f"[{tr('chat.get_key')}]({provider.console_url})")
-    if entered:
+    st.caption(tr("chat.byok_help", provider=provider.label))
+    # A form, so Enter in the field and the button below it are the same
+    # action. It used to save on any rerun that found text in the box, which
+    # left the screen with no visible way to commit.
+    with st.form(f"panel_key_form_{provider.id}", border=False):
+        entered = st.text_input(
+            tr("chat.key_label", provider=provider.label),
+            type="password",
+            placeholder=provider.key_placeholder,
+            help=tr("chat.key_help"),
+            key=f"panel_key_{provider.id}",
+        )
+        remember = st.checkbox(tr("chat.remember"),
+                               key=f"panel_remember_{provider.id}")
+        st.markdown(f"[{tr('chat.get_key')}]({provider.console_url})")
+        submitted = st.form_submit_button(tr("chat.byok_save"), type="primary",
+                                          width="stretch")
+    st.caption(tr("chat.byok_reassure"))
+    if submitted and entered.strip():
         entered = entered.strip()
         st.session_state[_sk(provider.id)] = entered
         if remember:
@@ -295,6 +299,23 @@ def _key_gate(provider: llm.Provider) -> str | None:
 # ("chat_skills_mode": auto|manual|off) plus the manual pick ("chat_skills").
 
 _SKILL_MODES = ("auto", "manual", "off")
+_SKILL_MODE_KEY = "panel_skills_mode"
+
+
+def _skill_mode(prefs: dict) -> str:
+    """The mode in force right now — the picker's live value, else prefs.
+
+    The chip that opens the picker renders *before* the picker's body, so a
+    chip label read off prefs was one rerun stale: the press that switched the
+    control to Auto reran the script, the chip drew from the prefs file the
+    picker had not written yet, and the popover said "Auto" over a chip that
+    still said "Off". Reading the widget's own state first makes both agree
+    within the same rerun; prefs answer only before the picker has ever run.
+    """
+    mode = st.session_state.get(_SKILL_MODE_KEY)
+    if mode not in _SKILL_MODES:
+        mode = prefs.get("chat_skills_mode", "auto")
+    return mode if mode in _SKILL_MODES else "auto"
 
 
 def _skill_label(sid: str) -> str:
@@ -306,18 +327,29 @@ def _lens_label(ids: list[str]) -> str:
 
 
 def _pick_skills() -> None:
-    """Skill mode + manual selection; remembers both in prefs."""
+    """Skill mode + manual selection; remembers both in prefs.
+
+    The manual picker is a chip grid, not a multiselect: chips show every lens
+    at once inside the popover that opened them, and a press costs one rerun —
+    where the widget it replaces was tall enough to push the composer off
+    screen in a 380px drawer.
+    """
     prefs = auth.load_prefs()
-    saved_mode = prefs.get("chat_skills_mode", "auto")
-    if saved_mode not in _SKILL_MODES:
-        saved_mode = "auto"
-    mode = st.segmented_control(
+    # Seed the widget's state instead of passing `default=`, which a keyed
+    # control honours on its first render only. A segmented control clears
+    # itself when the selected option is pressed again, and that press's own
+    # rerun arrives here with None in state — so the saved mode snaps back
+    # highlighted rather than leaving the row blank with a chip that still
+    # names a mode.
+    if st.session_state.get(_SKILL_MODE_KEY) not in _SKILL_MODES:
+        st.session_state[_SKILL_MODE_KEY] = _skill_mode(prefs)
+    st.segmented_control(
         tr("chat.skills_mode"),
         _SKILL_MODES,
-        default=saved_mode,
         format_func=lambda m: tr(f"chat.skills_{m}"),
-        key="panel_skills_mode",
-    ) or saved_mode  # deselecting the control keeps the saved mode
+        key=_SKILL_MODE_KEY,
+    )
+    mode = _skill_mode(prefs)
     if mode != prefs.get("chat_skills_mode"):
         prefs["chat_skills_mode"] = mode
         auth.save_prefs(prefs)
@@ -326,16 +358,22 @@ def _pick_skills() -> None:
     if mode != "manual":
         return
     ids = [s.id for s in chat_skills.catalog()]
-    saved = [i for i in prefs.get("chat_skills", []) if i in ids]
-    picked = st.multiselect(
-        tr("chat.skills_label"), ids, default=saved,
-        format_func=_skill_label,
-        max_selections=chat_skills.MAX_MANUAL,
-        key="panel_skills",
-    )
-    if picked != saved:
-        prefs["chat_skills"] = picked
-        auth.save_prefs(prefs)
+    picked = [i for i in prefs.get("chat_skills", []) if i in ids]
+    # At the cap, the lenses that are off go disabled rather than silently
+    # refusing the press: the limit is the router's, and it has to be visible.
+    full = len(picked) >= chat_skills.MAX_MANUAL
+    chips = st.container(horizontal=True, key="panel_skillchips")
+    for sid in ids:
+        on = sid in picked
+        blocked = full and not on
+        if chips.button(_skill_label(sid), key=f"panel_skill_{sid}",
+                        type="primary" if on else "secondary", disabled=blocked,
+                        help=tr("chat.skills_full", n=chat_skills.MAX_MANUAL)
+                        if blocked else None):
+            prefs["chat_skills"] = ([s for s in picked if s != sid] if on
+                                    else picked + [sid])
+            auth.save_prefs(prefs)
+            st.rerun()
 
 
 def _resolve_skills(provider: llm.Provider, api_key: str, history: list[dict],
@@ -358,23 +396,6 @@ def _resolve_skills(provider: llm.Provider, api_key: str, history: list[dict],
 # Keyless DuckDuckGo search (web/chat_web.py): a planner call on the provider's
 # cheapest model decides per message whether the web is needed and with which
 # queries — the same one-extra-cheap-call shape as the skill auto-router.
-
-
-def _web_enabled() -> bool:
-    return engine.web_enabled(auth.load_prefs())
-
-
-def _pick_web() -> None:
-    """Web-search toggle; remembered in prefs ("chat_web")."""
-    if not chat_web.available():
-        return
-    prefs = auth.load_prefs()
-    saved = bool(prefs.get("chat_web", True))
-    on = st.toggle(tr("chat.web_label"), value=saved, key="panel_web",
-                   help=tr("chat.web_help"))
-    if on != saved:
-        prefs["chat_web"] = on
-        auth.save_prefs(prefs)
 
 
 def _gather_web(provider: llm.Provider, api_key: str, history: list[dict],
@@ -420,12 +441,6 @@ def _live_quotes(message: str, watchlist: Path, focus: str) -> list[market.Quote
 
 def _host(url: str) -> str:
     return urlparse(url).netloc.removeprefix("www.") or url
-
-
-def _sources_label(sources: list[dict]) -> str:
-    """'Sources: host · host …' caption, each host linking to its article."""
-    links = " · ".join(f"[{_host(s['url'])}]({s['url']})" for s in sources)
-    return tr("chat.sources", sources=links)
 
 
 # ------------------------------------------------------------- actions
@@ -493,7 +508,7 @@ def _retire_on_first_chunk(work, chunks):
 
 def _stream_with_fallback(work, provider: llm.Provider, api_key: str,
                           model: str, system: str, msgs: list[dict],
-                          prefs: dict) -> str:
+                          prefs: dict, *, spent: list[int] | None = None) -> str:
     """The answer stream, retried down the provider chain when the chosen
     provider dies: chosen first, then the other saved keys, then the keyless
     free chain — the same resolution order as the Telegram bot
@@ -505,6 +520,10 @@ def _stream_with_fallback(work, provider: llm.Provider, api_key: str,
     bubble, so a mid-answer failure propagates as before. The provider that
     actually raised rides on the exception (``chat_provider``) so the caller
     classifies and names the right one.
+
+    A free unit spent on a fallback candidate is appended to `spent`, so a
+    chain that ends in an exception can be refunded whole by the caller
+    rather than only for the unit the turn opened with.
     """
     cands = [(provider, api_key, model or provider.default_model)]
     for p, k, m in engine.attempts(prefs):
@@ -516,8 +535,11 @@ def _stream_with_fallback(work, provider: llm.Provider, api_key: str,
         # turn starts; a fallback into the free chain spends here, and a spent
         # cap just skips the candidate — the cap message would bury the real
         # story (the chosen provider failing).
-        if i and p.id == "free" and not _spend_free_quota():
-            continue
+        if i and p.id == "free":
+            if not _spend_free_quota():
+                continue
+            if spent is not None:
+                spent.append(1)
         started: list[bool] = []
 
         def _tap(chunks, seen=started):
@@ -526,13 +548,21 @@ def _stream_with_fallback(work, provider: llm.Provider, api_key: str,
                 yield c
 
         try:
-            answer = st.write_stream(_retire_on_first_chunk(
+            # write_stream hands back a list when a chunk isn't a string;
+            # every provider here yields text, so join rather than branch.
+            streamed = st.write_stream(_retire_on_first_chunk(
                 work, _tap(p.stream(k, m, system, msgs))))
+            answer = (
+                streamed if isinstance(streamed, str)
+                else "".join(str(c) for c in streamed)
+            )
         except Exception as exc:
             try:
-                exc.chat_provider = p
-            except Exception:
-                pass
+                exc.chat_provider = p  # type: ignore
+            except Exception as exc2:
+                obs.warn("chat.core.provider_annotate_failed",
+                         error_type=type(exc2).__name__,
+                         error=str(exc2)[:300])
             if started or i == len(cands) - 1:
                 raise
             last_exc = exc
@@ -606,69 +636,167 @@ def _system_prompt(skill_ids: list[str] | None = None) -> str:
 # threads reruns the panel and nothing else.
 
 
+def _hist_key(conv: dict) -> str:
+    """Session slot holding a thread's turns: per account, per conversation.
+
+    Keyed by thread as well as account so switching conversations cannot
+    redraw the previous one's cached list.
+    """
+    return f"chat_history::{auth.watchlist_path()}::{conv['id']}"
+
+
 def _conv_label(conv: dict, limit: int = 30) -> str:
     """A thread's display name: its title, or a placeholder while unnamed."""
     title = (conv.get("title") or "").strip() or tr("chat.untitled")
     return title if len(title) <= limit else title[: limit - 1] + "\u2026"
 
 
-def _conv_when(conv: dict) -> str:
-    """Last-used stamp for the picker: the time today, the date before that."""
+# The drawer shows one of three things and never two at once: the thread, the
+# thread list, or the account settings. One session key decides which, because
+# everything else used to stack on top of the conversation — the settings
+# expander pushed it down, the thread popover covered it — and a swap costs a
+# single fragment rerun.
+
+_DRAWER_VIEWS = ("thread", "threads", "settings")
+
+
+def _drawer_view() -> str:
+    view = st.session_state.get("chat_drawer_view", "thread")
+    return view if view in _DRAWER_VIEWS else "thread"
+
+
+def _open_view(view: str) -> None:
+    """Swap the drawer's body and repaint the panel (only the panel)."""
+    st.session_state["chat_drawer_view"] = view
+    st.rerun()
+
+
+def _thread_when(conv: dict) -> str:
+    """Row stamp: the time today, the weekday this week, the date before that."""
     try:
         when = datetime.fromisoformat(conv["updated"]).astimezone()
     except (KeyError, TypeError, ValueError):
         return ""
-    today = datetime.now().astimezone().date()
-    return when.strftime("%H:%M" if when.date() == today else "%Y-%m-%d")
+    days = (datetime.now().astimezone().date() - when.date()).days
+    if days <= 0:
+        return when.strftime("%H:%M")
+    return when.strftime("%a" if days < 7 else "%d %b")
 
 
-def _thread_picker(ns: str) -> None:
-    """The popover's body: switch to, rename or delete a conversation."""
-    renaming = st.session_state.get(f"{ns}_renaming")
-    for c in auth.list_conversations():
-        if c["id"] == renaming:
-            name = st.text_input(tr("chat.rename"), value=c["title"],
-                                 key=f"{ns}_rename_{c['id']}",
-                                 label_visibility="collapsed")
+def _thread_group(conv: dict) -> str:
+    """The heading a thread sits under: today, this week, or its month."""
+    try:
+        when = datetime.fromisoformat(conv["updated"]).astimezone()
+    except (KeyError, TypeError, ValueError):
+        return ""
+    days = (datetime.now().astimezone().date() - when.date()).days
+    if days <= 0:
+        return tr("chat.group_today")
+    if days < 7:
+        return tr("chat.group_week")
+    return when.strftime("%B").upper()
+
+
+def _render_thread_row(ns: str, c: dict) -> None:
+    """One row of the list: pick it, rename it, or confirm deleting it.
+
+    Rename and delete take over the row itself rather than opening anything:
+    the drawer is 380px, and a dialog over a list of threads hides the very
+    titles the reader is deciding between.
+    """
+    cid = c["id"]
+    if st.session_state.get(f"{ns}_renaming") == cid:
+        name = st.text_input(tr("chat.rename"), value=c["title"],
+                             key=f"{ns}_rename_{cid}", label_visibility="collapsed")
+        with st.container(horizontal=True):
+            if st.button(tr("chat.rename_save"), type="primary",
+                         key=f"{ns}_save_{cid}"):
+                auth.rename_conversation(cid, name)
+                st.session_state.pop(f"{ns}_renaming", None)
+                st.rerun()
+            if st.button(tr("chat.cancel"), key=f"{ns}_cancel_{cid}"):
+                st.session_state.pop(f"{ns}_renaming", None)
+                st.rerun()
+        return
+
+    if st.session_state.get(f"{ns}_deleting") == cid:
+        # Deleting a thread drops its turns and its memory index with it, so
+        # the count is named: "9 messages" is the fact that decides it.
+        with st.container(key=f"{ns}_confirm"):
+            st.markdown(tr("chat.delete_confirm",
+                           title=_conv_label(c, 24), n=c["messages"]))
             with st.container(horizontal=True):
-                if st.button(tr("chat.rename_save"), type="primary",
-                             key=f"{ns}_save_{c['id']}"):
-                    auth.rename_conversation(c["id"], name)
-                    st.session_state.pop(f"{ns}_renaming", None)
+                if st.button(tr("chat.delete_yes"), icon=":material/delete:",
+                             key=f"{ns}_delyes_{cid}"):
+                    auth.delete_conversation(cid)
+                    st.session_state.pop(f"{ns}_deleting", None)
                     st.rerun()
-                if st.button(tr("chat.cancel"), key=f"{ns}_cancel_{c['id']}"):
-                    st.session_state.pop(f"{ns}_renaming", None)
+                if st.button(tr("chat.cancel"), key=f"{ns}_delno_{cid}"):
+                    st.session_state.pop(f"{ns}_deleting", None)
                     st.rerun()
-            continue
-        with st.container(horizontal=True, vertical_alignment="center"):
-            # The open thread is the disabled row — no navigation to where you
-            # already are, and it reads as the current selection.
-            if st.button(f"{_conv_label(c, 24)} \u00b7 {_conv_when(c)}",
-                         key=f"{ns}_pick_{c['id']}", type="tertiary",
-                         width="stretch", disabled=c["active"]):
-                auth.set_active_conversation(c["id"])
-                st.rerun()
-            if st.button("", icon=":material/edit:", type="tertiary",
-                         key=f"{ns}_ren_{c['id']}", help=tr("chat.rename")):
-                st.session_state[f"{ns}_renaming"] = c["id"]
-                st.rerun()
-            if st.button("", icon=":material/delete:", type="tertiary",
-                         key=f"{ns}_del_{c['id']}", help=tr("chat.delete_thread")):
-                auth.delete_conversation(c["id"])
-                st.rerun()
+        return
 
-
-def _render_thread_bar(ns: str, conv: dict) -> None:
-    """Picker popover (labelled with the open thread) + New-thread button."""
+    # The open thread keeps a fixed container key so the CSS can mark it the
+    # way the sidebar marks the current page — it stays pressable (re-picking
+    # the open thread is simply a way back to it from here).
     with st.container(horizontal=True, vertical_alignment="center",
-                      key=f"{ns}_threadbar"):
-        with st.popover(_conv_label(conv), icon=":material/forum:",
-                        width="stretch", key=f"{ns}_threads"):
-            _thread_picker(ns)
-        if st.button("", icon=":material/add_comment:", key=f"{ns}_new",
-                     help=tr("chat.new")):
+                      key=f"{ns}_row_active" if c["active"] else f"{ns}_row_{cid}"):
+        meta = tr("chat.thread_meta", when=_thread_when(c), n=c["messages"])
+        if st.button(f"{_conv_label(c, 26)}  \n{meta}", key=f"{ns}_pick_{cid}",
+                     type="tertiary", width="stretch"):
+            auth.set_active_conversation(cid)
+            _open_view("thread")
+        with st.popover("", icon=":material/more_vert:", key=f"{ns}_menu_{cid}",
+                        help=tr("chat.thread_menu")):
+            if st.button(tr("chat.rename"), icon=":material/edit:",
+                         type="tertiary", key=f"{ns}_ren_{cid}"):
+                st.session_state[f"{ns}_renaming"] = cid
+                st.rerun()
+            if st.button(tr("chat.delete_thread"), icon=":material/delete:",
+                         type="tertiary", key=f"{ns}_del_{cid}"):
+                st.session_state[f"{ns}_deleting"] = cid
+                st.rerun()
+
+
+def _render_threads_view(ns: str) -> None:
+    """The drawer's body, swapped for the thread list.
+
+    A search field and date groups need width, which is why this replaces the
+    conversation instead of hovering over it in a popover: at the drawer's
+    width a popover could show a title and nothing that helps choose between
+    two of them.
+    """
+    with st.container(horizontal=True, vertical_alignment="center",
+                      key=f"{ns}_threadhead"):
+        if st.button(tr("chat.back"), icon=":material/chevron_left:",
+                     type="tertiary", key=f"{ns}_threads_back"):
+            _open_view("thread")
+        if st.button(tr("chat.new"), icon=":material/add:", type="primary",
+                     key=f"{ns}_threads_new"):
             auth.new_conversation()
-            st.rerun()
+            _open_view("thread")
+
+    with st.container(key=f"{ns}_view"):
+        convs = auth.list_conversations()
+        # Client-side filtering: these are tens of threads, and their titles
+        # are already in memory from the listing above — an index would cost
+        # more than it saves.
+        needle = (st.text_input(
+            tr("chat.threads_search"), key=f"{ns}_threads_q",
+            placeholder=tr("chat.threads_search"), icon=":material/search:",
+            label_visibility="collapsed") or "").strip().lower()
+        if needle:
+            convs = [c for c in convs
+                     if needle in (c.get("title") or "").lower()]
+
+        group = ""
+        for c in convs:
+            heading = _thread_group(c)
+            if heading != group:
+                group = heading
+                st.html(f'<div class="ts-chat-group">{escape(heading)}</div>')
+            _render_thread_row(ns, c)
+
 
 
 def _maybe_autotitle(conv: dict, history: list[dict], provider: llm.Provider,
@@ -711,6 +839,174 @@ def _uploads_key(ns: str) -> str:
 
 def _pending_key(ns: str) -> str:
     return f"{ns}_pending_import"
+
+
+def _seed_key(ns: str) -> str:
+    return f"{ns}_seed"
+
+
+# The opening screen's suggestions, in two sets of three.
+#
+# With a ledger behind it the assistant's best trick is the reader's own book,
+# so those are the questions the design puts on the opening screen. A fresh
+# account has no ledger and would be offered three questions it cannot answer,
+# so it gets the watchlist set instead: live quotes, fundamentals and the
+# earnings calendar all work with no import at all. Those carry {a}/{b} slots
+# for two of the account's own tickers, so the suggestion reads as a question
+# about *their* list rather than a demo.
+_STARTERS = (
+    "chat.starter_summary",
+    "chat.starter_concentration",
+    "chat.starter_earnings_week",
+)
+_STARTERS_NEW = (
+    "chat.starter_movers",
+    "chat.starter_compare",
+    "chat.starter_earnings",
+)
+
+
+def _position_count() -> int:
+    """Open positions in the account's ledger; 0 when there is no ledger yet.
+
+    The share-matching replay is cached on the database's mtime and reads no
+    prices, so this is nothing like the live-priced table the system prompt
+    builds — cheap enough to run while drawing an empty thread.
+    """
+    db = auth.db_path()
+    if not db.exists():
+        return 0
+    try:
+        positions = ledger_state(str(db), db_mtime(str(db)),
+                                 auth.reporting_currency())[1]
+    except Exception:  # a half-written or foreign db must not block the panel
+        return 0
+    return sum(1 for pos in positions if pos.quantity)
+
+
+def _starter_tickers() -> tuple[str, str]:
+    """Two tickers to name in the suggestions: favorites first, then order.
+
+    Falls back to the two the copy reads least oddly with when the watchlist
+    is short or empty — a suggestion is only ever a prefilled question, so a
+    generic pair is better than hiding the row.
+    """
+    holdings = load_watchlist(auth.watchlist_path())
+    picked = [h.ticker for h in holdings if h.favorite]
+    picked += [h.ticker for h in holdings if h.ticker not in picked]
+    picked += ["AAPL", "MSFT"]
+    return picked[0], picked[1]
+
+
+def _render_starters(ns: str) -> None:
+    """Suggestion chips for an empty thread; each one submits as if typed.
+
+    Written to the same seed key the input reads below, so a chip goes through
+    the identical turn pipeline — rate limit, action probe, routing, quota —
+    rather than a shortcut that would drift from it.
+    """
+    a, b = _starter_tickers()
+    # Stacked, not wrapped: these are whole questions, so a horizontal
+    # container gave each one its own line anyway — with a row gap between
+    # them big enough to push the drop zone off screen. The caps label rides
+    # inside the same container, so its distance to the first tile is the
+    # container's tight gap rather than the page's element spacing.
+    row = st.container(key=f"{ns}_starters", gap="xxsmall")
+    row.html('<div class="ts-chat-group ts-chat-group-tight">'
+             + escape(tr("chat.start_with")) + "</div>")
+    for key in (_STARTERS if _position_count() else _STARTERS_NEW):
+        prompt = tr(key, a=a, b=b)
+        if row.button(prompt, key=f"{ns}_{key}", type="tertiary",
+                      width="stretch"):
+            st.session_state[_seed_key(ns)] = prompt
+            st.rerun()
+
+
+# The four things worth knowing before the first question. Rows, not cards:
+# at the drawer's width cards would push the suggestions off screen, and the
+# reader has to be able to see both at once.
+#
+# Drawn as raw HTML with the artboard's own glyphs rather than as st.markdown
+# with :material/…: directives. Three reasons, all found the hard way: the
+# icon span Streamlit emits takes its colour from the theme and ignored every
+# rule aimed at it, a nested st.container gets picked up by app.py's card
+# tagger and grew a card around the list, and a wrapped second line tucked
+# under the icon instead of hanging with the text.
+_CAP_ICONS = (
+    '<path d="M21.21 15.89A10 10 0 1 1 8 2.83"></path>'
+    '<path d="M22 12A10 10 0 0 0 12 2v10z"></path>',
+    '<circle cx="12" cy="12" r="8.5"></circle>'
+    '<path d="M3.5 12h17M12 3.5c3 3.5 3 13.5 0 17M12 3.5c-3 3.5-3 13.5 0 17">'
+    "</path>",
+    '<path d="M12 3v12"></path><polyline points="7 10 12 15 17 10"></polyline>'
+    '<path d="M3 21h18"></path>',
+    '<path d="M18 8a6 6 0 0 0-12 0c0 7-3 9-3 9h18s-3-2-3-9"></path>'
+    '<path d="M10 21h4"></path>',
+)
+_CAPABILITIES = ("chat.cap_analyze", "chat.cap_web", "chat.cap_import",
+                 "chat.cap_alerts")
+
+
+def _glyph(paths: str, size: int = 15) -> str:
+    """One of the artboard's line icons, inheriting the row's colour."""
+    return (
+        f'<svg width="{size}" height="{size}" viewBox="0 0 24 24" fill="none"'
+        ' stroke="currentColor" stroke-width="1.5" aria-hidden="true">'
+        f"{paths}</svg>"
+    )
+
+
+def _rich(text: str) -> str:
+    """Catalog copy with its **bold** lead, as escaped HTML."""
+    return re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", escape(text))
+
+
+# The drop zone's glyph. Inline SVG rather than a Material name: this block
+# is raw HTML (st.html), where Streamlit's icon directives mean nothing.
+_DROP_GLYPH = (
+    '<svg width="15" height="15" viewBox="0 0 24 24" fill="none"'
+    ' stroke="currentColor" stroke-width="1.5" aria-hidden="true">'
+    '<path d="M12 3v12"></path><polyline points="7 10 12 15 17 10"></polyline>'
+    '<path d="M3 21h18"></path></svg>'
+)
+
+
+def _render_empty_state(ns: str) -> None:
+    """The opening screen: what the assistant can do, and three ways in.
+
+    An empty scroll region and a placeholder said nothing — not that the
+    assistant can see the reader's own book, not that it reads a pasted link,
+    not that a statement dropped on the input becomes an import. The ticker
+    count is the line that proves the first claim, so it is counted from the
+    account rather than written into the copy.
+    """
+    # One flex column: it carries the artboard's 18px rhythm between the four
+    # blocks, and lets the drop zone sit on the composer instead of floating
+    # under the suggestions with the panel's dead space beneath it.
+    with st.container(key=f"{ns}_empty"):
+        # The count is the line that proves the assistant can see the reader's
+        # own data, so it is read from the account: positions when a ledger
+        # exists, watchlist tickers when it does not.
+        held = _position_count()
+        intro = (tr("chat.empty_body", n=held) if held
+                 else tr("chat.empty_body_new",
+                         n=len(load_watchlist(auth.watchlist_path()))))
+        rows = "".join(
+            f'<div class="ts-cap">{_glyph(paths)}'
+            f"<span>{_rich(tr(key))}</span></div>"
+            for paths, key in zip(_CAP_ICONS, _CAPABILITIES, strict=True)
+        )
+        st.html(
+            '<div class="ts-empty-head">'
+            f'<span class="ts-empty-title">{escape(tr("chat.empty_title"))}</span>'
+            f'<span class="ts-empty-body">{escape(intro)}</span></div>'
+            f'<div class="ts-caps">{rows}</div>'
+        )
+        _render_starters(ns)
+        # Drawn, because the drop target has always existed and never looked
+        # like one: the input accepts a statement, and nothing said so.
+        st.html('<div class="ts-chat-drop">' + _DROP_GLYPH
+                + escape(tr("chat.drop_zone", mb=MAX_UPLOAD_MB)) + "</div>")
 
 
 def _import_hint(ns: str, message: str) -> str | None:
@@ -800,7 +1096,9 @@ def _prepare_import(name: str, data: bytes, provider: llm.Provider,
     found = autodetect.detect(name, data, provider, api_key)
     checked = validate(
         found.result,
-        all_transactions(paths.db),
+        # Demo rows go on commit, so checking against them would raise
+        # duplicates that will not exist (stocks.portfolio.demo).
+        demo.without(all_transactions(paths.db)),
         known=known_tickers(paths.watchlist, paths.db),
     )
     dupes = [c.tx for c in checked.duplicates]
@@ -895,6 +1193,9 @@ def _commit_import(ns: str, pending: dict, history: list[dict],
         txs += pending.get("duplicate_transactions") or []
     if broker:
         txs = platforms.stamp_broker(txs, broker)
+    # First real import wipes the demo book — an invented cost basis must
+    # never end up mixed into a real one.
+    demo.clear(paths.db)
     ids = add_many(txs, paths.db)
     last_import.save(
         last_import.ImportRecord(
@@ -1064,6 +1365,102 @@ def _render_meta(msg: dict) -> None:
         st.html(f'<div class="ts-chat-meta">{escape(" · ".join(bits))}</div>')
 
 
+# An answer used to carry up to five rows of chrome — lens, tool lines, the
+# attachment captions, the source list, the clock — all of them weighted like
+# captions, all competing with the prose they describe. They collapse into two
+# rows here, ordered prose > provenance > process: what shaped the answer above
+# it, where it came from below it, and the tool trace behind a counter.
+
+
+def _steps_label(msg: dict) -> str:
+    """The counter that stands in for the tool trace, cost included."""
+    took = _took(msg.get("took"))
+    steps = msg.get("steps") or []
+    if steps:
+        return tr("chat.steps_n", n=len(steps), took=took)
+    return tr("chat.no_tools", took=took)
+
+
+def _render_turn_head(ns: str, msg: dict, index: int) -> None:
+    """Above an answer: which lens produced it, and what it cost to build.
+
+    The tool lines move inside the counter's popover — they are worth reading
+    once, when something looks wrong, and not on every scroll past a turn.
+    """
+    skills, steps = msg.get("skills"), msg.get("steps")
+    if not (skills or steps or msg.get("took")):
+        return
+    with st.container(horizontal=True, vertical_alignment="center",
+                      key=f"{ns}_thead_{index}"):
+        if skills:
+            st.html('<span class="ts-chat-lens">'
+                    + escape(_lens_label(skills)) + "</span>")
+        if steps:
+            with st.popover(_steps_label(msg), key=f"{ns}_steps_{index}"):
+                _render_steps(steps)
+        elif msg.get("took"):
+            st.html('<span class="ts-chat-quota">'
+                    + escape(_steps_label(msg)) + "</span>")
+
+
+def _render_turn_foot(ns: str, msg: dict, index: int) -> None:
+    """Under an answer: how many pages it stands on, and when it was written.
+
+    The domains go in a popover — a reader checking provenance wants the list,
+    a reader following the argument does not, and six hostnames under every
+    answer served neither.
+    """
+    web = msg.get("web") or []
+    clock = _clock(msg.get("ts"))
+    if not (web or clock):
+        return
+    with st.container(horizontal=True, vertical_alignment="center",
+                      key=f"{ns}_tfoot_{index}"):
+        if web:
+            with st.popover(tr("chat.sources_n", n=len(web)),
+                            icon=":material/link:", key=f"{ns}_src_{index}"):
+                for source in web:
+                    url = source.get("url", "")
+                    st.markdown(f"[{_host(url)}]({url})")
+        if clock:
+            st.html(f'<span class="ts-chat-clock">{escape(clock)}</span>')
+
+
+def _render_files(msg: dict) -> None:
+    """What was attached to a turn, as chips inside the turn that carried it."""
+    for f in msg.get("files", []):
+        st.html('<span class="ts-chat-file">' + escape(f["name"]) + "</span>")
+
+
+def _notice(box, key: str, icon: str = ":material/error:"):
+    """A container shaped like an answer, for the four ways a turn can fail.
+
+    Rate limits, a spent quota and a dead provider used to print full-width
+    Streamlit blocks outside the conversation: they broke the thread in half
+    and never said what had become of the question. Given the answer's own
+    avatar column and bubble, each one reads as what it is — the reply that
+    turn got — and the question stays visible above it.
+    """
+    with box:
+        holder = st.container(key=key)
+    with holder:
+        return st.chat_message("assistant", avatar=icon)
+
+
+def _render_turn(ns: str, msg: dict, index: int) -> None:
+    """One stored turn, drawn the way it will be re-drawn on every reload."""
+    with st.chat_message(msg["role"]):
+        if msg["role"] == "assistant":
+            _render_turn_head(ns, msg, index)
+            st.markdown(msg["content"])
+            _render_files(msg)
+            _render_turn_foot(ns, msg, index)
+        else:
+            st.markdown(msg["content"])
+            _render_files(msg)
+            _render_meta(msg)
+
+
 def _step_arg(args: dict) -> str:
     """The argument that identifies a call — the query, the URL, the tickers."""
     value = next((args[k] for k in _STEP_ARG_KEYS if args.get(k)), None)
@@ -1168,6 +1565,12 @@ _WORK_JS = """
 """
 
 
+# Where each phase sits on the bar. Four steps, not a continuum: the script
+# only knows which phase it is in, and pretending otherwise (a creeping bar)
+# would be a lie the reader learns to ignore.
+_WORK_STEPS = {"thinking": 18, "gathering": 42, "searching": 70, "writing": 92}
+
+
 class _Working:
     """The line that says what the assistant is doing right now.
 
@@ -1187,11 +1590,19 @@ class _Working:
         reset = "0" if self._started else "1"
         self._started = True
         label = escape(tr(f"chat.work_{key}"))
+        # A discrete bar, advanced by the phase change itself: an elapsed
+        # count alone ("18s") says nothing about whether to keep waiting, and
+        # an indeterminate bar would claim progress the script cannot see. It
+        # animates nothing — every step is a server-rendered width.
+        pct = _WORK_STEPS.get(key, 0)
         self._slot.html(
             f'<div class="ts-work" data-reset="{reset}">'
             '<span class="ts-work-glyph">✻</span>'
             f'<span class="ts-work-label">{label}</span>'
-            '<span class="ts-work-time">0s</span></div>' + _WORK_JS,
+            '<span class="ts-work-time">0s</span></div>'
+            '<div class="ts-work-track">'
+            f'<div class="ts-work-fill" style="width:{pct}%"></div></div>'
+            + _WORK_JS,
             unsafe_allow_javascript=True,
         )
 
@@ -1233,6 +1644,123 @@ _CONV_CSS = """
 }
 .ts-work-glyph {color: var(--ag-brand-accent); width: 1em; text-align: center;}
 .ts-work-time {color: var(--ag-text-faint);}
+/* Four discrete steps under the working line. No animation of its own: the
+   width changes when the phase does, and nothing pretends to progress in
+   between. */
+.ts-work-track {
+  height: 3px; border-radius: var(--ag-radius-xs);
+  background: var(--ag-border); overflow: hidden; margin: 0.15rem 0 0.1rem;
+}
+.ts-work-fill {height: 100%; background: var(--ag-brand-accent);}
+
+/* The turn's two chrome rows. Everything here is one step below a caption and
+   none of it competes with the prose: the lens says why the answer leans the
+   way it does, the counter stands in for the tool trace, the clock and the
+   source count sit under the bubble. */
+.ts-chat-lens {
+  font-size: var(--ag-fs-2xs); font-weight: 600; color: var(--ag-purple-400);
+  background: var(--ag-purple-900); border: 1px solid var(--ag-border);
+  border-radius: var(--ag-radius-pill); padding: 0.05rem 0.45rem;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.ts-chat-clock, .ts-chat-cause {
+  font-family: "Martian Mono", monospace; font-size: var(--ag-fs-2xs);
+  color: var(--ag-text-faint); letter-spacing: -0.02em; white-space: nowrap;
+}
+/* An attachment belongs to the turn that carried it, so it is a chip inside
+   the bubble rather than a caption floating under it. */
+/* Streamlit under-sizes a caption's container, so the element after it paints
+   over the text — the same quirk app.py pads around for its metric rows. In a
+   380px panel every caption wraps to two or three lines, so it bites here on
+   nearly all of them. */
+.st-key-chatpanel [data-testid="stCaptionContainer"] {
+  padding-bottom: 0.9rem; line-height: 1.5;
+}
+
+/* Capability rows: one rule *between* each, no card chrome. The rule is a
+   border-bottom and the first row has none — as a border-top on every row it
+   landed on top of the caption above the list, striking the text through. */
+/* The opening screen: the artboard's body box — 20px top, 16px sides once the
+   scroll region's own padding is counted, 18px between blocks — as a full-
+   height flex column so the drop zone can be pushed to its foot. */
+[class*="st-key-panel_empty"] [data-testid="stVerticalBlock"] {
+  gap: 1.1rem; height: 100%; min-height: 100%;
+}
+.st-key-chatpanel .st-key-panel_empty { padding: 0.6rem 0.4rem 0; }
+.st-key-chatpanel .st-key-panel_empty [data-testid="stHtml"]:has(.ts-chat-drop) {
+  margin-top: auto;
+}
+/* Intro: 16px/600 over 12px/1.55, 6px apart — the artboard's own steps. */
+.ts-empty-head {display: flex; flex-direction: column; gap: 0.35rem;}
+.ts-empty-title {
+  font-size: var(--ag-fs-lg); font-weight: 600; line-height: 1.35;
+  color: var(--ag-text-primary);
+}
+.ts-empty-body {
+  font-size: var(--ag-fs-sm); line-height: 1.55;
+  color: var(--ag-text-secondary);
+}
+/* The capability list: ruled top and bottom, 9px rows, icon and text in two
+   columns so a wrapped line hangs with the text. */
+.ts-caps {display: flex; flex-direction: column; gap: 1px;}
+.ts-cap {
+  display: flex; gap: 0.65rem; align-items: flex-start; padding: 0.55rem 0;
+  border-top: 1px solid var(--ag-rule-panel);
+  font-size: var(--ag-fs-sm); line-height: 1.5;
+  color: var(--ag-text-secondary);
+}
+.ts-cap:last-child {border-bottom: 1px solid var(--ag-rule-panel);}
+.ts-cap svg {flex-shrink: 0; margin-top: 1px; color: var(--ag-brand-accent);}
+.ts-cap b {color: var(--ag-text-primary); font-weight: 600;}
+/* Suggestions: one tile per question, tight, left-aligned, and each one a
+   press away from being sent as typed. Three selectors, not one: the button,
+   its inner flex wrapper and its markdown container each centre the label on
+   their own — the same fight nav.py picks for the top-bar results. */
+[class*="st-key-panel_starters"] [data-testid="stVerticalBlock"] { gap: 0.4rem; }
+[class*="st-key-panel_starters"] button {
+  justify-content: flex-start; text-align: left; min-height: 0;
+  padding: 9px 11px; border-radius: var(--ag-radius-sm);
+  background-color: var(--ag-surface-card); border: 1px solid var(--ag-border);
+  color: var(--ag-text-primary);
+}
+[class*="st-key-panel_starters"] button:hover,
+[class*="st-key-panel_starters"] button:focus,
+[class*="st-key-panel_starters"] button:active {
+  background-color: var(--ag-surface-hover); border-color: var(--ag-border-focus);
+  color: var(--ag-text-primary);
+}
+[class*="st-key-panel_starters"] button > div { justify-content: flex-start; }
+[class*="st-key-panel_starters"] button [data-testid="stMarkdownContainer"] {
+  width: 100%; text-align: left;
+}
+[class*="st-key-panel_starters"] button p {
+  font-size: var(--ag-fs-sm); font-weight: 400; line-height: 1.35;
+  text-align: left; white-space: normal;
+}
+/* The caps label sits inside the container, so it drops the padding it needs
+   when it heads a settings section. */
+.ts-chat-group-tight { padding: 0.25rem 0 0; }
+/* The "or with your key" rule: a label with a line through it. */
+.ts-chat-or {
+  display: flex; align-items: center; gap: 0.6rem; margin: 0.8rem 0 0.2rem;
+  font-family: "Martian Mono", monospace; font-size: var(--ag-fs-2xs);
+  color: var(--ag-text-faint);
+}
+.ts-chat-or::before, .ts-chat-or::after {
+  content: ""; flex: 1; height: 1px; background: var(--ag-border);
+}
+.ts-chat-drop {
+  display: flex; align-items: center; gap: 0.55rem;
+  border: 1px dashed var(--ag-border-focus); border-radius: var(--ag-radius-sm);
+  padding: 0.75rem; font-size: var(--ag-fs-xs); color: var(--ag-text-muted);
+}
+.ts-chat-drop svg { flex-shrink: 0; }
+.ts-chat-file {
+  display: inline-block; font-size: var(--ag-fs-xs); color: var(--ag-purple-400);
+  background: var(--ag-purple-900); border: 1px solid var(--ag-purple-800);
+  border-radius: var(--ag-radius-xs); padding: 0.05rem 0.4rem;
+  margin-top: 0.35rem;
+}
 </style>
 """
 
@@ -1255,10 +1783,7 @@ def render_conversation(ns: str, provider: llm.Provider, model: str,
     """
     css.inject(_CONV_CSS)
     conv = auth.active_conversation()
-    _render_thread_bar(ns, conv)
-    # Keyed by thread as well as account: switching conversations must not
-    # redraw the previous one's cached list.
-    hist_key = f"chat_history::{auth.watchlist_path()}::{conv['id']}"
+    hist_key = _hist_key(conv)
     if hist_key not in st.session_state:
         st.session_state[hist_key] = auth.load_chat()
     history: list[dict] = st.session_state[hist_key]
@@ -1270,24 +1795,22 @@ def render_conversation(ns: str, provider: llm.Provider, model: str,
     # fill the panel. New turns are written back into box so they render in place.
     box = st.container(height=460, border=False, autoscroll=True, key=f"{ns}_scroll")
     with box:
-        for msg in history:
-            with st.chat_message(msg["role"]):
-                if msg.get("skills"):  # which lens produced this answer
-                    st.caption(_lens_label(msg["skills"]))
-                if msg.get("steps"):  # what was fetched for it, tool by tool
-                    _render_steps(msg["steps"])
-                st.markdown(msg["content"])
-                for f in msg.get("files", []):  # what was attached to the turn
-                    st.caption(f":material/attach_file: {f['name']}")
-                if msg.get("web"):  # which pages grounded this answer
-                    st.caption(_sources_label(msg["web"]))
-                _render_meta(msg)  # clock, and for an answer what it cost
+        if not history:
+            _render_empty_state(ns)
+        for index, msg in enumerate(history):
+            _render_turn(ns, msg, index)
 
+    _render_rail(ns)
     text, files = _submitted(st.chat_input(
         tr("chat.placeholder"), key=f"{ns}_input",
         accept_file="multiple", file_type=list(autodetect.supported_types()),
         max_upload_size=MAX_UPLOAD_MB,
     ))
+    # A suggestion clicked on the opening screen. Popped, not read: it must
+    # fire once, and typed text always wins if both land on the same run.
+    seed = st.session_state.pop(_seed_key(ns), None)
+    if seed and not text:
+        text = seed
     if text or files:
         # Burst protection on top of the free chain's daily cap: every turn
         # fans out into routing/search/provider calls, so a runaway client
@@ -1295,11 +1818,14 @@ def render_conversation(ns: str, provider: llm.Provider, model: str,
         # by the account's data dir — reconnecting doesn't reset it.
         rl_key = f"chat::{auth.user_paths().root}"
         if not ratelimit.allow(rl_key):
-            st.warning(
-                tr("chat.rate_limited", seconds=ratelimit.retry_after(rl_key)),
-                icon=":material/hourglass_top:",
-            )
-            st.stop()
+            with _notice(box, f"{ns}_notice_rate", ":material/hourglass_top:"):
+                st.markdown(tr("chat.rate_limited",
+                               seconds=ratelimit.retry_after(rl_key)))
+            # Return, not st.stop(): the panel draws its free counter after
+            # this call, and Streamlit drops what a stopped script writes on
+            # its way out. Nothing follows the conversation on the surfaces
+            # that render it, so the two end the run alike.
+            return
         # A new question supersedes a failed one: the turn that never got an
         # answer goes with its error, since two user turns in a row would
         # reach the provider as one malformed exchange.
@@ -1315,11 +1841,20 @@ def render_conversation(ns: str, provider: llm.Provider, model: str,
                 (f.name, f.getvalue()) for f in files
             ]
         history.append(turn)
-        with box, st.chat_message("user"):
-            st.markdown(turn["content"])
-            for f in turn.get("files", []):
-                st.caption(f":material/attach_file: {f['name']}")
-            _render_meta(turn)
+        # Written before the answer rather than with it. Generating is the
+        # long part of a turn — routing, searches, then the stream — and a
+        # reload during it used to take the unsaved question down with the
+        # session, leaving no trace that anything had been asked. Stored, the
+        # trailing unanswered turn is the same shape Retry leaves behind, so
+        # the generate block below picks it up on the next run and answers it.
+        #
+        # Not for an attached statement: only the bytes in session state can
+        # be imported and they do not survive a reload, so that turn would
+        # come back as a question nothing can answer.
+        if not files:
+            auth.save_chat(history)
+        with box:
+            _render_turn(ns, turn, len(history) - 1)
 
     # An attached statement is an import, not a question: it is parsed,
     # validated and previewed here, and never reaches the model as text.
@@ -1345,8 +1880,15 @@ def render_conversation(ns: str, provider: llm.Provider, model: str,
         # probe, the routing calls, the searches and the wait on the provider
         # all pass with the bubble otherwise empty, and it names the step the
         # wait is currently in while counting the seconds it has taken.
+        #
+        # The bubble is opened first and the line drawn *inside* it, so the
+        # arrival of the first token changes the bubble's contents instead of
+        # replacing a row above it with a bubble — no layout jump at the one
+        # moment the reader is staring at the spot.
         started = time.time()
-        work = _Working(box)
+        with box:
+            bubble = st.chat_message("assistant")
+        work = _Working(bubble)
         work.phase("thinking")
         # App actions first: an executed action (favorite / alert / group)
         # answers with a deterministic localized confirmation — no main model
@@ -1357,21 +1899,37 @@ def render_conversation(ns: str, provider: llm.Provider, model: str,
             note = _action_reply(act)
             answered = _stamp({"role": "assistant", "content": note,
                                "action": act.kind}, time.time() - started)
-            with box, st.chat_message("assistant"):
+            with bubble:
                 st.markdown(note)
-                _render_meta(answered)
+                _render_turn_foot(ns, answered, len(history))
             history.append(answered)
             auth.save_chat(history)
             if _maybe_autotitle(conv, history, provider, api_key):
                 st.rerun()
         else:
-            if provider.id == "free" and not _spend_free_quota():
-                work.clear()
-                history.pop()  # drop the turn we won't answer
-                auth.save_chat(history)
-                st.error(tr("chat.free_cap", cap=_free_daily_cap()))
-                st.stop()
-            with box, st.chat_message("assistant"):
+            # Every free unit this turn spends, so a turn that ends in a
+            # failure can give them all back: the spend happens before the
+            # model is called (the last moment the turn can be refused), and
+            # without the refund a dead provider costs the reader a message it
+            # never wrote — then costs another one on Retry.
+            spent: list[int] = []
+            if provider.id == "free":
+                if not _spend_free_quota():
+                    work.clear()
+                    history.pop()  # drop the turn we won't answer
+                    auth.save_chat(history)
+                    with _notice(box, f"{ns}_notice_quota",
+                                 ":material/hourglass_top:"):
+                        st.markdown(_cap_message())
+                        # The way out of a shared cap is a key of your own, so
+                        # the notice offers it instead of describing it.
+                        if st.button(tr("chat.free_add_key"),
+                                     icon=":material/key:", type="primary",
+                                     key=f"{ns}_free_key"):
+                            _open_view("settings")
+                    return  # see the rate-limit branch above
+                spent.append(1)
+            with bubble:
                 # Routing and search run under the working line above; it
                 # survives into write_stream and is retired by
                 # _retire_on_first_chunk the moment the model's first token
@@ -1413,11 +1971,11 @@ def render_conversation(ns: str, provider: llm.Provider, model: str,
                                                  watchlist, focus),
                         )
                         hits, live = hits or [], live or []
-                    if skills:
-                        st.caption(_lens_label(skills))
-                    # What the answer was built on, above the answer itself.
+                    # Reserved now, written after the answer: the row states
+                    # the lens and what the turn cost, and the cost is not
+                    # known until the last token has landed.
+                    head = st.container()
                     steps = _steps(evidence, hits, live)
-                    _render_steps(steps)
                     # Everything fetched rides on the outgoing copy of the user
                     # turn, not the system prompt — the stored history keeps
                     # the user's own text, and prompt caches stay warm.
@@ -1437,20 +1995,39 @@ def render_conversation(ns: str, provider: llm.Provider, model: str,
                     msgs = tokens.fit(msgs, system=system)
                     work.phase("writing")
                     answer = _stream_with_fallback(
-                        work, provider, api_key, model, system, msgs, prefs)
+                        work, provider, api_key, model, system, msgs, prefs,
+                        spent=spent)
                     web_sources = chat_web.sources(hits) or evidence.sources()
-                    if web_sources:
-                        st.caption(_sources_label(web_sources))
                     answered = _stamp({"role": "assistant", "content": answer},
                                       time.time() - started)
-                    _render_meta(answered)
+                    if skills:
+                        answered["skills"] = skills
+                    if steps:  # redrawn with the turn on every reload
+                        answered["steps"] = steps
+                    if web_sources:
+                        answered["web"] = web_sources
+                    with head:
+                        _render_turn_head(ns, answered, len(history))
+                    _render_turn_foot(ns, answered, len(history))
                 except Exception as exc:  # classified per provider; unknown -> re-raise
                     work.clear()
+                    # Nothing was answered, so nothing was owed: both the unit
+                    # this turn opened with and any spent falling down the
+                    # chain go back before the failure is pinned.
+                    _refund_free_quota(sum(spent))
                     # The chain tags the exception with the provider that
                     # actually raised (the chosen one, or the last fallback).
                     failed = getattr(exc, "chat_provider", provider)
                     err = failed.error_key(exc)
                     if err is None:
+                        # Unclassified — the crash page is still the right
+                        # answer here. But the question is on disk now, so
+                        # leaving it unmarked would re-run the same crash on
+                        # every reload of the thread. Pin the generic failure
+                        # first: the reader gets their question back with
+                        # Retry under it instead of a page that will not load.
+                        history[-1]["error"] = ["chat.api_error", failed.label]
+                        auth.save_chat(history)
                         raise
                     # The question stays on the thread with its failure
                     # pinned beside it (rendered below) instead of vanishing
@@ -1458,14 +2035,7 @@ def render_conversation(ns: str, provider: llm.Provider, model: str,
                     history[-1]["error"] = [err, failed.label]
                     auth.save_chat(history)
                     st.rerun()
-            turn: dict = answered
-            if skills:
-                turn["skills"] = skills
-            if steps:  # the tool lines, redrawn with the turn on every reload
-                turn["steps"] = steps
-            if web_sources:
-                turn["web"] = web_sources
-            history.append(turn)
+            history.append(answered)  # already carries lens, trace and sources
             auth.save_chat(history)  # persist the completed user+assistant turn
             if _maybe_autotitle(conv, history, provider, api_key):
                 st.rerun()
@@ -1479,8 +2049,14 @@ def render_conversation(ns: str, provider: llm.Provider, model: str,
         # sits under it, and Retry only clears the mark — the same trailing
         # user turn then generates again through the one path above.
         err, label = failure
-        with box:
-            st.error(tr(err, provider=label))
+        with _notice(box, f"{ns}_notice_fail"):
+            st.markdown(tr(err, provider=label))
+            # One mono line with the technical cause, for the reader who wants
+            # to know which provider and which failure before pressing Retry.
+            cause = " · ".join(bit for bit in (
+                label.lower(), err.rsplit(".", 1)[-1],
+                _clock(history[-1].get("ts"))) if bit)
+            st.html(f'<span class="ts-chat-cause">{escape(cause)}</span>')
             with st.container(horizontal=True):
                 if st.button(tr("chat.retry"), icon=":material/refresh:",
                              type="primary", key=f"{ns}_retry"):
@@ -1495,21 +2071,341 @@ def render_conversation(ns: str, provider: llm.Provider, model: str,
         return
 
     if history and history[-1]["role"] == "assistant":
+        # Regenerate only. Clearing the thread is destructive and used to sit
+        # one button away from it, inside the scroll region — it now lives in
+        # the settings view, behind a confirmation.
         with box, st.container(horizontal=True):
             if st.button(tr("chat.regenerate"), icon=":material/refresh:",
                          key=f"{ns}_regen"):
                 history.pop()
                 auth.save_chat(history)
                 st.rerun()
-            if st.button(tr("chat.clear"), icon=":material/delete_sweep:",
-                         key=f"{ns}_clear"):
-                history.clear()  # same list object as session_state — stays empty
-                auth.save_chat(history)
-                # An emptied thread keeps a title about turns that are gone;
-                # drop it (a no-op on one the user named) so the next question
-                # re-titles it.
-                auth.autotitle_conversation(conv["id"], "")
+
+
+# ----------------------------------------------------------- drawer chrome
+# The two header rows and the composer rail. Between them they replace the
+# settings expander that used to sit above the conversation: what the reader
+# needs at rest (which thread, which model, how much free quota is left) is
+# now always on screen in 70px, and the controls that change an answer sit
+# beside the input they change.
+
+
+def _free_left() -> int:
+    """Free messages this account has left today (never below zero).
+
+    The account's own counter is half the wall: the free chain also has a
+    process-wide pot, and an account holding 12 units in front of an empty pot
+    holds none. engine.free_left states whichever binds first, so the strip
+    cannot promise a message the next send refuses.
+    """
+    return engine.free_left(auth.load_prefs())
+
+
+# Width presets. The drag handle stays as fine tuning, remembered per browser,
+# but it never looked like a control — so the three widths anyone actually
+# asks for are named buttons in the header: compact to read beside the page,
+# wide for tables and sources, full for the import review. A press rewrites
+# the same --chat-w the handle drives and stores it under the same key, so the
+# two mechanisms cannot disagree.
+_WIDTHS = (
+    ("compact", "380px", ":material/width_normal:"),
+    ("wide", "720px", ":material/width_wide:"),
+    ("full", "100vw", ":material/fullscreen:"),
+)
+
+_WIDTH_JS = """
+<script>
+(function () {
+  var w = "%s";
+  document.documentElement.style.setProperty('--chat-w', w);
+  try { localStorage.setItem('chatPanelWidth', w); } catch (e) {}
+})();
+</script>
+"""
+
+
+def _render_width_presets(ns: str) -> None:
+    """Three width buttons. Pressing one only records the choice.
+
+    Session state drives which button looks active and which width is still
+    waiting to be applied; the width itself lives in the browser
+    (localStorage), so a drag survives a rerun and a preset survives a reload.
+    """
+    active = st.session_state.get("chat_width", "compact")
+    for name, _width, icon in _WIDTHS:
+        if st.button("", icon=icon, key=f"{ns}_w_{name}",
+                     type="primary" if name == active else "tertiary",
+                     help=tr(f"chat.width_{name}")):
+            st.session_state["chat_width"] = name
+            st.session_state["chat_width_apply"] = name
+            st.rerun()
+
+
+def _apply_width() -> None:
+    """Hand a just-pressed preset to the browser, once.
+
+    It cannot be emitted from the button branch: st.rerun() discards whatever
+    the run had already written, so the script would never reach the page. And
+    it must not be emitted on every run either — that would overwrite a drag
+    with the last preset pressed on the next fragment rerun.
+    """
+    pending = st.session_state.pop("chat_width_apply", None)
+    if pending is None:
+        return
+    width = dict((name, w) for name, w, _icon in _WIDTHS).get(pending)
+    if width:
+        st.html(_WIDTH_JS % width, unsafe_allow_javascript=True)
+
+
+def _render_panel_head(ns: str, conv: dict) -> None:
+    """Row 1: the open thread (the way into the list), new, widths, close.
+
+    The old row spent 72% of the width on the word "Assistant" and 28% on a
+    text Close button, neither of which said anything the launcher had not
+    already said. Both are gone: the title is the thread, and closing is an
+    icon.
+    """
+    with st.container(horizontal=True, vertical_alignment="center",
+                      key=f"{ns}_head"):
+        # An unnamed thread is a placeholder, so it is greyed the way the
+        # artboard has it. The colour rides in the label (Streamlit's own
+        # markdown directive) rather than in CSS, which cannot tell an
+        # untitled thread from a titled one.
+        named = bool((conv.get("title") or "").strip())
+        label = _conv_label(conv, 22)
+        if st.button(label if named else f":gray[{label}]",
+                     icon=":material/forum:", type="tertiary", width="stretch",
+                     key=f"{ns}_open_threads", help=tr("chat.threads_title")):
+            _open_view("threads")
+        if st.button("", icon=":material/add:", type="tertiary",
+                     key=f"{ns}_new", help=tr("chat.new")):
+            auth.new_conversation()
+            _open_view("thread")
+        _render_width_presets(ns)
+        if st.button("", icon=":material/close:", type="tertiary",
+                     key=f"{ns}_close", help=tr("chat.close")):
+            st.session_state["chat_panel_open"] = False
+            # The panel container itself is created outside this fragment, so
+            # closing has to repaint the whole app to take it away.
+            st.rerun(scope="app")
+
+
+def _render_status_strip(ns: str, provider: llm.Provider, model: str):
+    """Row 2: what is answering, what is left of the free pot, a way to change it.
+
+    This is the line the app already had a string for ("chat.using") and never
+    showed: until now neither question — which model is this, and how many
+    free messages do I have — could be answered without opening something.
+
+    Returns the counter's slot (None when the provider is the reader's own
+    key, which has no counter). The two buttons stay where they are — moving
+    them below the thread would make a press wait for the turn underneath —
+    but the count itself is written by _fill_quota after the turn has spent
+    what it spends. See _free_left.
+    """
+    slot = None
+    with st.container(horizontal=True, vertical_alignment="center",
+                      key=f"{ns}_status"):
+        if st.button(provider.label, icon=":material/auto_awesome:",
+                     type="tertiary", key=f"{ns}_status_model",
+                     help=tr("chat.using", provider=provider.label, model=model)):
+            _open_view("settings")
+        if not provider.needs_key:
+            slot = st.empty()
+        if st.button(tr("chat.settings_short"), icon=":material/settings:",
+                     type="tertiary", key=f"{ns}_gear"):
+            _open_view("settings")
+    return slot
+
+
+def _fill_quota(slot) -> None:
+    """Write the free counter into the slot the strip left for it.
+
+    Called at the very end of the panel run: the turn below the strip spends
+    the unit it is about to state, so a count written on the way past says
+    what was left *before* the message the reader just sent — and stays wrong
+    until some later rerun happens to repaint the panel.
+    """
+    if slot is None:
+        return
+    with slot:
+        st.html('<span class="ts-chat-quota">'
+                + escape(tr("chat.free_left", left=_free_left(),
+                            cap=_free_daily_cap()))
+                + "</span>")
+
+
+def _render_rail(ns: str) -> None:
+    """Per-message controls, beside the input they act on.
+
+    Internet and the skill lens change the *next* answer, so they belong at
+    the composer rather than in an account settings panel opened once a
+    quarter. Both are buttons, not widgets: a press is one rerun, and the
+    skill picker only pays for itself when it is opened.
+    """
+    prefs = auth.load_prefs()
+    with st.container(horizontal=True, vertical_alignment="center",
+                      key=f"{ns}_rail"):
+        if chat_web.available():
+            on = bool(prefs.get("chat_web", True))
+            if st.button(tr("chat.web_chip"), icon=":material/language:",
+                         type="primary" if on else "secondary",
+                         key=f"{ns}_rail_web", help=tr("chat.web_help")):
+                prefs["chat_web"] = not on
+                auth.save_prefs(prefs)
                 st.rerun()
+        mode = _skill_mode(prefs)
+        with st.popover(tr("chat.skills_chip", mode=tr(f"chat.skills_{mode}")),
+                        icon=":material/auto_awesome:", key=f"{ns}_rail_skills"):
+            _pick_skills()
+
+
+# ------------------------------------------------------------- settings view
+
+
+def _provider_tiles(ns: str, columns: int = 2) -> llm.Provider:
+    """Provider chooser as tiles; remembers the choice in session + prefs.
+
+    A segmented control cannot hold four providers at 380px — the logos and
+    brand names overflow the row — and its label plus hint is chrome the panel
+    already provides. Tiles wrap instead, and each one says whether it needs a
+    key of its own.
+    """
+    provs = _offered_providers()
+    ids = [p.id for p in provs]
+    prefs = auth.load_prefs()
+    pid = (st.session_state.get("llm_provider") or prefs.get("llm_provider")
+           or llm.default_provider_id())
+    if pid not in ids:
+        pid = ids[0]
+    cols = st.columns(columns)
+    for n, prov in enumerate(provs):
+        hint = tr("chat.key_needed") if prov.needs_key else tr("chat.free_tag")
+        if cols[n % columns].button(
+                prov.label, key=f"{ns}_prov_{prov.id}", width="stretch",
+                help=hint, type="primary" if prov.id == pid else "secondary"):
+            st.session_state["llm_provider"] = prov.id
+            if prov.id != prefs.get("llm_provider"):
+                prefs["llm_provider"] = prov.id
+                auth.save_prefs(prefs)
+            st.rerun()
+    st.session_state["llm_provider"] = pid
+    if pid != prefs.get("llm_provider"):
+        prefs["llm_provider"] = pid
+        auth.save_prefs(prefs)
+    return llm.PROVIDERS[pid]
+
+
+def _render_setup(ns: str) -> None:
+    """First run, with the free path first.
+
+    The keyless chain has existed for a while and the setup screen never
+    offered it: a reader arriving with no key was shown a provider list and an
+    API-key field, which reads as "you cannot use this yet". The free
+    assistant is now the primary button and the key form sits below it, for
+    the reader who already knows which provider they want.
+    """
+    # The panel gave up its own padding when the header rows went full-bleed,
+    # so this screen carries the same padded body as the other views.
+    with st.container(key=f"{ns}_view"):
+        st.markdown(f"##### {tr('chat.setup_title')}")
+        st.caption(tr("chat.setup_body"))
+
+        free = next((p for p in _offered_providers() if not p.needs_key), None)
+        if free is not None:
+            if st.button(tr("chat.free_cta"), icon=":material/auto_awesome:",
+                         type="primary", width="stretch", key=f"{ns}_use_free"):
+                prefs = auth.load_prefs()
+                prefs["llm_provider"] = free.id
+                auth.save_prefs(prefs)
+                st.session_state["llm_provider"] = free.id
+                st.rerun()
+            st.caption(tr("chat.free_cta_note", cap=_free_daily_cap()))
+            st.html('<div class="ts-chat-or">' + escape(tr("chat.setup_or"))
+                    + "</div>")
+
+        provider = _provider_tiles(f"{ns}_setup", columns=3)
+        if provider.needs_key:
+            _key_gate(provider)  # renders the form; reruns the fragment on submit
+        else:
+            # Pressing a keyless tile already reran the fragment, and the panel
+            # skips this screen entirely once one is active — so there is nothing
+            # to rerun here, only the terms of the free chain to state.
+            st.caption(tr("chat.free_note"))
+
+
+def _render_settings_view(ns: str, conv: dict) -> None:
+    """The drawer's body, swapped for the account-level settings.
+
+    Provider, model and key are set once and then left alone for months,
+    which is exactly why they had no business in the slot above every
+    conversation. Here they get room, and the destructive action that used to
+    ride inside the message list ends up where a destructive action belongs:
+    at the bottom, behind a confirmation.
+    """
+    with st.container(horizontal=True, vertical_alignment="center",
+                      key=f"{ns}_settingshead"):
+        if st.button(tr("chat.back_thread"), icon=":material/chevron_left:",
+                     type="tertiary", key=f"{ns}_settings_back"):
+            _open_view("thread")
+
+    with st.container(key=f"{ns}_view"):
+        st.html('<div class="ts-chat-group">' + escape(tr("chat.sec_provider"))
+                + "</div>")
+        provider = _provider_tiles(ns)
+
+        st.html('<div class="ts-chat-group">' + escape(tr("chat.sec_model"))
+                + "</div>")
+        if len(provider.models) > 1:
+            _pick_model(provider, f"{ns}_model_{provider.id}")
+        else:
+            st.caption(provider.default_model)
+        if not provider.needs_key:
+            # The free chain's pot, as a figure and as a bar: the caption alone
+            # never told anyone how close they were to the wall.
+            cap, left = _free_daily_cap(), _free_left()
+            with st.container(horizontal=True, vertical_alignment="center",
+                              key=f"{ns}_quota"):
+                st.caption(tr("chat.free_left_label"))
+                st.html('<span class="ts-chat-quota">'
+                        + escape(f"{left} / {cap}") + "</span>")
+            st.progress(max(0.0, min(1.0, left / cap)) if cap else 0.0)
+            st.caption(tr("chat.free_note"))
+
+        if provider.needs_key:
+            st.html('<div class="ts-chat-group">' + escape(tr("chat.sec_key"))
+                    + "</div>")
+            configured = active_key(provider)
+            if configured:
+                _show_key(provider, configured)
+                if st.button(tr("chat.forget"), icon=":material/logout:",
+                             key=f"{ns}_forget"):
+                    _forget_key(provider.id)
+                    st.rerun()
+            else:
+                _key_gate(provider)
+
+        st.html('<div class="ts-chat-group">' + escape(tr("chat.sec_thread"))
+                + "</div>")
+        if st.session_state.get(f"{ns}_clearing"):
+            with st.container(key=f"{ns}_clearconfirm"):
+                st.markdown(tr("chat.delete_confirm",
+                               title=_conv_label(conv, 24),
+                               n=len(st.session_state.get(_hist_key(conv), []))))
+                with st.container(horizontal=True):
+                    if st.button(tr("chat.delete_yes"), icon=":material/delete:",
+                                 key=f"{ns}_clear_yes"):
+                        auth.delete_conversation(conv["id"])
+                        st.session_state.pop(f"{ns}_clearing", None)
+                        st.session_state.pop(_hist_key(conv), None)
+                        _open_view("thread")
+                    if st.button(tr("chat.cancel"), key=f"{ns}_clear_no"):
+                        st.session_state.pop(f"{ns}_clearing", None)
+                        st.rerun()
+        elif st.button(tr("chat.clear_thread"), icon=":material/delete:",
+                       key=f"{ns}_clear_thread"):
+            st.session_state[f"{ns}_clearing"] = True
+            st.rerun()
 
 
 # ------------------------------------------------------------- side panel
@@ -1557,9 +2453,11 @@ _PANEL_CSS = """
   position: fixed; top: 0; right: 0; bottom: 0;   /* full height */
   /* width driven by the --chat-w var (set live by the width slider), never
      wider than the viewport. */
-  width: min(var(--chat-w, 380px), 100vw); z-index: 1000000;
+  width: min(var(--chat-w, 380px), 100vw); max-width: 100vw; z-index: 1000000;
   background: var(--ag-surface-page); border-left: 1px solid var(--ag-border);
-  padding: 0.75rem 1rem 1rem; overflow: hidden;
+  /* No padding of its own: the header rows are full-bleed with their own
+     rules, and the views below pad themselves. */
+  padding: 0; overflow: hidden;
   box-shadow: -10px 0 30px var(--ag-shadow-color);
   display: flex; flex-direction: column;
 }
@@ -1600,14 +2498,23 @@ body:has(.st-key-chatpanel) .st-key-topbar_search {
 .st-key-chatpanel [data-testid="stChatInput"] {
   background: var(--ag-surface-page); padding-top: 0.4rem;
 }
-/* Send button on the LEFT of the input. The input row is a flex container of
-   [textarea wrapper (order 0), upload group (order -1), button group (order 0)];
-   pulling the group that holds the submit button to order -2 puts it before
-   everything else. Same rule also reorders the expanded (multi-line) bottom
-   row, so the button stays leftmost in both layouts. */
+/* Attach and send sit together at the end of the field. Streamlit puts the
+   upload group first (order -1), which left the paperclip at the far left of
+   the row with the placeholder pushed off it. */
 .st-key-chatpanel [data-testid="stChatInput"]
-  div:has(> button[data-testid="stChatInputSubmitButton"]) {
-  order: -2;
+  div:has(> button[data-testid="stChatInputSubmitButton"]) { order: 2; }
+.st-key-chatpanel [data-testid="stChatInput"]
+  div:has(> [data-testid="stChatInputFileUploadButton"]) { order: 1; }
+/* The artboard's attach affordance is a paperclip; Streamlit draws a plus,
+   and draws it as an SVG component, so no CSS can swap the glyph. Hiding it
+   and printing the Material ligature in its place can — the font is loaded
+   app-wide for Streamlit's own icons. */
+.st-key-chatpanel [data-testid="stChatInputFileUploadButton"] svg {
+  display: none;
+}
+.st-key-chatpanel [data-testid="stChatInputFileUploadButton"] button::after {
+  content: "attach_file"; font-family: "Material Symbols Rounded";
+  font-size: 1.2rem; line-height: 1; color: var(--ag-text-muted);
 }
 /* Conversation palette. Streamlit's default avatars borrow the market-semantic
    redColor (user) and orangeColor (assistant) tokens — a pink face and an
@@ -1617,11 +2524,10 @@ body:has(.st-key-chatpanel) .st-key-topbar_search {
 .st-key-chatpanel [data-testid="stChatMessage"] {
   background: transparent; gap: 0.6rem; padding: 0.15rem 0;
 }
+/* Flat, not a gradient with a halo: at 26px the gradient reads as noise and
+   the halo competes with the CTA glow the launcher already owns. */
 .st-key-chatpanel [data-testid="stChatMessageAvatarAssistant"] {
-  background: linear-gradient(
-    135deg, var(--ag-brand-accent), var(--ag-purple-700)
-  ) !important;
-  box-shadow: 0 2px 8px var(--ag-cta-halo);
+  background: var(--ag-purple-800) !important;
 }
 .st-key-chatpanel [data-testid="stChatMessageAvatarUser"] {
   background: var(--ag-surface-card) !important;
@@ -1641,20 +2547,204 @@ body:has(.st-key-chatpanel) .st-key-topbar_search {
   [data-testid="stChatMessageContent"] {
   background: var(--ag-surface-card); border: 1px solid var(--ag-border);
 }
+/* The reader's own turn on the nav-active purple rather than a 16% tint of
+   the CTA: the tint sat too close to the card fill to read as a bubble. */
 .st-key-chatpanel [data-testid="stChatMessage"]\
 :has([data-testid="stChatMessageAvatarUser"])
   [data-testid="stChatMessageContent"] {
-  background: var(--ag-cta-tint); border: 1px solid var(--ag-cta-tint-edge);
-}
-/* Settings expander: captions (the skills-mode hint) spill a few px past
-   their under-sized container — same Streamlit quirk as the metric-row
-   captions in app.py — and the next element paints over the text. Pad the
-   caption to swallow the spill, and give the forget-key button its own
-   breathing room above. */
-.st-key-chatpanel [data-testid="stExpanderDetails"] [data-testid="stCaptionContainer"] {
-  padding-bottom: 0.6rem;
+  background: var(--ag-purple-900); border: 1px solid var(--ag-purple-800);
 }
 .st-key-chatpanel .st-key-panel_forget { margin-top: 0.4rem; }
+/* ---------------------------------------------------------- drawer chrome */
+/* Two thin header rows in place of the old title bar plus settings expander:
+   row 1 (thread, new, widths, close) and row 2 (model, free quota, settings).
+   Together they cost ~70px and answer what the expander only answered once
+   opened. */
+.st-key-chatpanel .st-key-panel_head {
+  gap: 0.35rem; padding: 0.5rem 0.6rem 0.5rem 0.75rem;
+  border-bottom: 1px solid var(--ag-rule-panel);
+}
+/* The thread name is the row's only stretchy element, and it must truncate
+   rather than wrap: two lines here would shove the conversation down. */
+.st-key-chatpanel .st-key-panel_open_threads button {
+  justify-content: flex-start !important; padding: 0.35rem; font-weight: 600;
+  color: var(--ag-text-primary) !important;
+}
+.st-key-chatpanel .st-key-panel_open_threads button > div {
+  justify-content: flex-start;
+}
+.st-key-chatpanel .st-key-panel_open_threads button
+  [data-testid="stMarkdownContainer"] { width: 100%; text-align: left; }
+.st-key-chatpanel .st-key-panel_open_threads button p {
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  text-align: left;
+}
+/* The greyed placeholder for an unnamed thread arrives as Streamlit's own
+   :gray[…] span, which carries an inline colour — the token has to shout to
+   land on it. */
+.st-key-chatpanel .st-key-panel_open_threads button span[style*="color"] {
+  color: var(--ag-text-secondary) !important;
+}
+/* Icon-only buttons in both header rows: square, no label width. */
+.st-key-chatpanel .st-key-panel_head button {
+  min-width: 0; padding: 0.3rem; border-radius: var(--ag-radius-nav);
+}
+.st-key-chatpanel .st-key-panel_new,
+.st-key-chatpanel .st-key-panel_close,
+.st-key-chatpanel [class*="st-key-panel_w_"] { width: max-content !important; }
+/* Width presets read as one segmented group: a track behind three squares,
+   the active one filled with the nav-active purple. */
+.st-key-chatpanel [class*="st-key-panel_w_"] button {
+  width: 28px; height: 28px; background: transparent;
+  border-color: transparent; color: var(--ag-text-muted) !important;
+}
+.st-key-chatpanel [class*="st-key-panel_w_"] button:hover {
+  background: var(--ag-surface-hover); color: var(--ag-text-primary) !important;
+}
+.st-key-chatpanel [class*="st-key-panel_w_"]
+  button[data-testid="stBaseButton-primary"] {
+  background: var(--ag-purple-900) !important;
+  border-color: var(--ag-purple-900) !important;
+  color: var(--ag-purple-400) !important;
+}
+/* 1k's limits: the 720px preset cannot fit under 1100px without covering the
+   page it is meant to sit beside, and phones have no presets at all. */
+@media (max-width: 1099px) { .st-key-chatpanel .st-key-panel_w_wide { display: none; } }
+@media (max-width: 640px) {
+  .st-key-chatpanel [class*="st-key-panel_w_"] { display: none; }
+}
+
+.st-key-chatpanel .st-key-panel_status {
+  gap: 0.5rem; padding: 0.25rem 0.75rem;
+  border-bottom: 1px solid var(--ag-rule-panel);
+}
+.st-key-chatpanel .st-key-panel_status button {
+  min-width: 0; padding: 0.1rem 0.5rem; font-size: var(--ag-fs-xs);
+  border-radius: var(--ag-radius-pill); font-weight: 600;
+}
+.st-key-chatpanel .st-key-panel_status_model button {
+  background: var(--ag-purple-900); color: var(--ag-purple-400) !important;
+}
+.st-key-chatpanel .st-key-panel_status_model button * {
+  color: var(--ag-purple-400) !important;
+}
+/* The way into settings sits at the far end of the strip. */
+.st-key-chatpanel .st-key-panel_gear { margin-left: auto; width: max-content !important; }
+.st-key-chatpanel .st-key-panel_gear button {
+  background: transparent; border-color: transparent; font-weight: 500;
+  color: var(--ag-text-muted) !important;
+}
+/* Counters and stamps stay in the instrumentation font, one step below a
+   caption, so they never read as part of an answer. */
+.ts-chat-quota {
+  font-family: "Martian Mono", monospace; font-size: var(--ag-fs-2xs);
+  color: var(--ag-text-muted); letter-spacing: -0.02em; white-space: nowrap;
+}
+/* Section caps: the one label style shared by the settings sections and the
+   thread list's date groups. */
+.ts-chat-group {
+  font-size: var(--ag-fs-2xs); font-weight: 600; letter-spacing: 0.06em;
+  color: var(--ag-text-faint); padding: 0.5rem 0 0.25rem;
+}
+
+/* Composer rail: the two controls that change the next answer, as chips. The
+   rail's top edge is what separates the composer from the conversation. */
+.st-key-chatpanel .st-key-panel_rail {
+  gap: 0.35rem; padding: 0.5rem 0.75rem 0;
+  border-top: 1px solid var(--ag-rule-panel);
+}
+.st-key-chatpanel .st-key-panel_rail button {
+  min-width: 0; padding: 0.15rem 0.6rem; font-size: var(--ag-fs-xs);
+  font-weight: 500; border-radius: var(--ag-radius-pill);
+}
+.st-key-chatpanel .st-key-panel_rail
+  button[data-testid="stBaseButton-primary"] { font-weight: 600; }
+.st-key-chatpanel .st-key-panel_rail_web,
+.st-key-chatpanel .st-key-panel_rail_skills { width: max-content !important; }
+.st-key-chatpanel .st-key-panel_rail
+  button[data-testid="stBaseButton-primary"] {
+  background: var(--ag-purple-900) !important;
+  border-color: var(--ag-purple-900) !important;
+  color: var(--ag-purple-400) !important;
+}
+.st-key-chatpanel .st-key-panel_rail button[data-testid="stBaseButton-primary"] * {
+  color: var(--ag-purple-400) !important;
+}
+/* Skill chips inside the rail's popover: same pill vocabulary, wrapping. */
+.st-key-panel_skillchips { flex-wrap: wrap; gap: 0.3rem; }
+.st-key-panel_skillchips button {
+  min-width: 0; padding: 0.15rem 0.55rem; font-size: var(--ag-fs-xs);
+  border-radius: var(--ag-radius-nav);
+}
+.st-key-panel_skillchips > div { width: max-content !important; }
+
+/* Threads and settings views: both replace the conversation, so both pad
+   themselves and both use the header row's grammar. */
+.st-key-chatpanel .st-key-panel_threadhead,
+.st-key-chatpanel .st-key-panel_settingshead {
+  gap: 0.5rem; padding: 0.5rem 0.75rem 0.25rem;
+}
+.st-key-chatpanel .st-key-panel_view { padding-inline: 0.75rem; overflow: auto; }
+/* The open thread is marked the way the sidebar marks the current page: a
+   filled row with an accent edge. It stays pressable — from this view,
+   pressing it is the way back to it. */
+.st-key-chatpanel .st-key-panel_row_active {
+  background: var(--ag-purple-900); border-left: 2px solid var(--ag-brand-accent);
+  border-radius: var(--ag-radius-nav);
+}
+.st-key-chatpanel [class*="st-key-panel_row_"] { padding: 0.1rem 0.25rem; }
+.st-key-chatpanel [class*="st-key-panel_row_"] button {
+  justify-content: flex-start; text-align: left;
+}
+.st-key-chatpanel [class*="st-key-panel_menu_"] { width: max-content !important; }
+/* A confirmation is not an error block: it is the row, raised. */
+.st-key-chatpanel .st-key-panel_confirm,
+.st-key-chatpanel .st-key-panel_clearconfirm {
+  background: var(--ag-surface-card); border: 1px solid var(--ag-border-focus);
+  border-radius: var(--ag-radius-sm); padding: 0.6rem; margin: 0.25rem 0.75rem;
+}
+/* Delete is the one admitted exception to the reserved market reds: this is
+   destruction, not a price. */
+.st-key-chatpanel [class*="st-key-panel_delyes_"] button,
+.st-key-chatpanel .st-key-panel_clear_yes button,
+.st-key-chatpanel .st-key-panel_clear_thread button {
+  color: var(--ag-down) !important;
+}
+.st-key-chatpanel [class*="st-key-panel_delyes_"] button:hover,
+.st-key-chatpanel .st-key-panel_clear_yes button:hover {
+  background: var(--ag-down-fill) !important;
+  border-color: var(--ag-down-fill) !important;
+}
+/* The conversation and the input carry the horizontal padding the panel gave
+   up, so the header rows can run full-bleed. */
+.st-key-chatpanel .st-key-panel_scroll { padding-inline: 0.6rem; }
+.st-key-chatpanel [data-testid="stChatInput"] { margin-inline: 0.75rem; }
+
+/* Turn chrome rows: thin, tight, and the popover triggers inside them read as
+   instrumentation rather than buttons. */
+.st-key-chatpanel [class*="_thead_"], .st-key-chatpanel [class*="_tfoot_"] {
+  gap: 0.4rem; align-items: center;
+}
+.st-key-chatpanel [class*="_thead_"] button,
+.st-key-chatpanel [class*="_tfoot_"] button {
+  min-width: 0; padding: 0.05rem 0.35rem; background: transparent;
+  border-color: transparent; font-family: "Martian Mono", monospace;
+  font-size: var(--ag-fs-2xs); color: var(--ag-text-faint) !important;
+}
+.st-key-chatpanel [class*="_thead_"] button:hover,
+.st-key-chatpanel [class*="_tfoot_"] button:hover {
+  background: var(--ag-surface-hover); color: var(--ag-text-secondary) !important;
+}
+.st-key-chatpanel [class*="_thead_"] > div,
+.st-key-chatpanel [class*="_tfoot_"] > div { width: max-content !important; }
+/* The clock is pushed to the far end of the foot row. */
+.st-key-chatpanel [class*="_tfoot_"] > div:last-child { margin-left: auto; }
+/* A failure keeps the answer's shape but takes a visible edge, so it is not
+   mistaken for something the model said. */
+.st-key-chatpanel [class*="_notice_"] [data-testid="stChatMessageContent"] {
+  border: 1px solid var(--ag-border-focus);
+}
+
 /* Wide screens: reserve room so page content never hides under the panel, but
    never surrender more than 60% of the width to it (tracks --chat-w). */
 @media (min-width: 1100px) {
@@ -1683,8 +2773,19 @@ _RESIZE_JS = f"""
 (function() {{
   const MIN = {_MIN_WIDTH}, MAX = {_MAX_WIDTH};
   const root = document.documentElement;
-  const saved = parseInt(localStorage.getItem('chatPanelWidth'), 10);
-  if (saved) root.style.setProperty('--chat-w', saved + 'px');
+  // Any CSS length, not just a pixel count: the header's presets store
+  // '380px', '720px' or '100vw' under this same key. Bare integers are what
+  // every build before the presets wrote, and they must get their unit back:
+  // 'min(380, 100vw)' is invalid, which drops the width declaration and
+  // stretches the panel across the whole page.
+  const raw = (localStorage.getItem('chatPanelWidth') || '').trim();
+  const saved = /^[0-9]+$/.test(raw) ? raw + 'px' : raw;
+  if (/^[0-9]+(px|vw)$/.test(saved)) {{
+    root.style.setProperty('--chat-w', saved);
+    if (saved !== raw) {{  // rewrite the legacy unit-less value once
+      try {{ localStorage.setItem('chatPanelWidth', saved); }} catch (e) {{}}
+    }}
+  }}
 
   // Bind the document-level listeners exactly once — st.html re-runs on every
   // full rerun, and the panel is created/destroyed on open/close.
@@ -1703,7 +2804,7 @@ _RESIZE_JS = f"""
       document.body.style.userSelect = '';
       document.body.style.cursor = '';
       const px = parseInt(getComputedStyle(root).getPropertyValue('--chat-w'), 10);
-      if (px) localStorage.setItem('chatPanelWidth', px);
+      if (px) localStorage.setItem('chatPanelWidth', px + 'px');
     }});
   }}
 
@@ -1735,49 +2836,104 @@ _RESIZE_JS = f"""
 @st.fragment
 def _panel_body() -> None:
     """The panel's interactive core, in a fragment so sending a message (or
-    changing provider/model/key) reruns only the panel, not the underlying page.
+    switching view, provider, model or key) reruns only the panel.
 
-    Fully self-contained: when no provider key is configured it shows the BYOK
-    setup inline; once configured it tucks provider/model/forget into a
-    collapsed expander and renders the conversation below."""
+    Fully self-contained: with no provider key configured it shows the BYOK
+    setup inline; once configured it draws the two header rows and then
+    whichever view the drawer is on — the thread, the thread list, or the
+    account settings.
+    """
     provider = active_provider()
     if provider is None:  # no SDK installed — should not happen once deps sync
         st.error("No LLM provider is installed.")
         return
 
     if provider.needs_key and not active_key(provider):
-        # Setup mode: choose a provider and enter its key, right here.
-        provider = _pick_provider("panel_provider_setup")
-        if provider.needs_key:
-            _key_gate(provider)  # renders the form; reruns the fragment on submit
-            return
-        st.rerun()  # keyless provider picked — drop the setup form
-
-    # Configured: settings out of the way, conversation front and centre.
-    with st.expander(tr("chat.settings"), expanded=False):
-        provider = _pick_provider("panel_provider")
-        if len(provider.models) > 1:
-            _pick_model(provider, f"panel_model_{provider.id}")  # persists the choice
-        _pick_skills()
-        _pick_web()
-        # The key itself is shown (masked, revealable) so it can be checked
-        # against the provider console. Forgetting is the only path to a
-        # different key, since the BYOK form stays hidden while one is set.
-        configured = active_key(provider) if provider.needs_key else ""
-        if configured:
-            _show_key(provider, configured)
-            if st.button(tr("chat.forget"), icon=":material/logout:",
-                         key="panel_forget"):
-                _forget_key(provider.id)
-                st.rerun()
-
-    key = active_key(provider)  # provider may have just switched in the expander
-    if provider.needs_key and not key:
-        _key_gate(provider)  # newly-selected provider has no key yet -> prompt
+        _render_setup("panel")  # free path first, key form under it
         return
-    if not provider.needs_key:
-        st.caption(tr("chat.free_note"))
-    render_conversation("panel", provider, _active_model(provider), key)
+
+    conv = auth.active_conversation()
+    model = _active_model(provider)
+    _render_panel_head("panel", conv)
+    quota = _render_status_strip("panel", provider, model)
+    _apply_width()  # outside the header row: a script block would gap it
+
+    # The counter is filled last, whichever way the body ends — including the
+    # early return on a spent cap, which is the one moment the number is
+    # worth reading.
+    try:
+        view = _drawer_view()
+        if view == "threads":
+            _render_threads_view("panel")
+            return
+        if view == "settings":
+            _render_settings_view("panel", conv)
+            return
+
+        key = active_key(provider)  # settings may have just switched it
+        if provider.needs_key and not key:
+            _key_gate(provider)  # newly-selected provider has no key -> prompt
+            return
+        render_conversation("panel", provider, model, key)
+    finally:
+        _fill_quota(quota)
+
+
+# ------------------------------------------------- open across a page reload
+# A reload is a brand-new Streamlit session, so an open panel held only in
+# session state would collapse back to the launcher icon — mid-conversation,
+# and with no way to tell that the thread is still there. The flag is really a
+# per-user setting, so it lives in prefs alongside the other things that
+# survive a reload (currency, recent searches).
+_OPEN_PREF = "chat_panel_open"
+
+
+def _panel_is_open() -> bool:
+    """Whether the panel is open on this run, seeded from prefs once.
+
+    Prefs are read on the first run of a session only. After that session
+    state is the truth: a close has to stay closed for the rest of the run
+    that follows it, while prefs still say open until the write-through below
+    lands."""
+    if _OPEN_PREF not in st.session_state:
+        st.session_state[_OPEN_PREF] = bool(auth.load_prefs().get(_OPEN_PREF, False))
+    return bool(st.session_state[_OPEN_PREF])
+
+
+def _remember_open(is_open: bool) -> None:
+    """Write the state through to prefs, and only when it actually changed.
+
+    Persisting here rather than at each toggle is what keeps it honest: the
+    launcher, the close icon, the Home card's "ask about this" and the daily
+    brief all set the flag and then rerun through `render_side_panel`, so one
+    write-through covers every one of them without each having to remember to
+    save. The guard keeps a settled state from re-uploading prefs (save_prefs
+    mirrors to the bucket) on every script run."""
+    prefs = auth.load_prefs()
+    if bool(prefs.get(_OPEN_PREF, False)) == is_open:
+        return
+    prefs[_OPEN_PREF] = is_open
+    auth.save_prefs(prefs)
+
+
+def ask(question: str) -> None:
+    """Open the assistant with `question` already asked. Does not return.
+
+    The entry point for the pages' "analyse this" buttons (the ticker header's
+    Analyse with AI). `question` lands on the same seed key the opening
+    screen's suggestion chips write, so it goes through the identical turn
+    pipeline — rate limit, action probe, skill routing, quota — instead of a
+    shortcut that would drift from it. The drawer is forced back to the thread
+    view: a seed left sitting behind the thread list or the settings screen
+    would fire whenever the reader happened to come back.
+
+    Reruns the whole app, not the fragment: the panel is drawn by app.py, so a
+    fragment-scoped rerun would set the flag and repaint nothing.
+    """
+    st.session_state[_seed_key("panel")] = question
+    st.session_state[_OPEN_PREF] = True
+    st.session_state["chat_drawer_view"] = "thread"
+    st.rerun(scope="app")
 
 
 def render_side_panel(view_label: str) -> None:
@@ -1788,7 +2944,9 @@ def render_side_panel(view_label: str) -> None:
     st.session_state["_chat_view"] = view_label  # read by _view_context()
     css.inject(_PANEL_CSS)
 
-    if not st.session_state.get("chat_panel_open", False):
+    is_open = _panel_is_open()
+    _remember_open(is_open)
+    if not is_open:
         with st.container(key="chatfab"):
             if st.button("", icon=":material/auto_awesome:", key="chat_fab_open",
                          type="primary", help=tr("chat.title")):
@@ -1796,13 +2954,10 @@ def render_side_panel(view_label: str) -> None:
                 st.rerun()
         return
 
+    # No title row of its own: the panel's first row is the header the
+    # fragment draws (thread name, new, widths, close), so a rerun that
+    # switches view or thread repaints it too.
     with st.container(key="chatpanel"):
-        title_col, close_col = st.columns([0.72, 0.28], vertical_alignment="center")
-        title_col.markdown(f"**{tr('chat.title')}**")
-        if close_col.button(tr("chat.close"), icon=":material/close:",
-                            key="chat_panel_close", width="stretch"):
-            st.session_state["chat_panel_open"] = False
-            st.rerun()
         _panel_body()
     # Emitted after the panel exists so the handle can attach. Outside the
     # fragment, so sending a chat message does not re-run this script.

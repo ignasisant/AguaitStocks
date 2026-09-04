@@ -176,7 +176,12 @@ _BENCHMARK = "SPY"
 _FISCAL_YEAR = 2026
 _CHART_YEARS = ("2023", "2024", "2025", "2026")
 
-_GITHUB_URL = "https://github.com/ignasi-sant/stocks"
+# The public repository. One definition for the whole site: the top bar and
+# footer links here, the "codeRepository" in seo.py's structured data, and the
+# contact address the legal pages send people to. A stale owner slug here is a
+# 404 on the one link that backs up the "read the source yourself" claim, so it
+# is imported rather than retyped.
+GITHUB_URL = "https://github.com/ignasisant/stocks"
 
 # Q/A pairs in the FAQ section (landing.faq_q1..q8 / faq_a1..a8). `seo.py`
 # reads the same range to emit the FAQPage structured data, so the rich result
@@ -283,6 +288,12 @@ _WARN_MARK = (
     '2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"></path><line x1="12" y1="9" '
     'x2="12" y2="13"></line><line x1="12" y1="17" x2="12.01" y2="17"></line>'
     "</svg>"
+)
+
+_CHECK_MARK = (
+    '<svg viewBox="0 0 24 24" fill="none" stroke="var(--ag-brand-accent)" '
+    'stroke-width="2" stroke-linecap="round" stroke-linejoin="round" '
+    'aria-hidden="true"><path d="M20 6L9 17l-5-5"></path></svg>'
 )
 
 
@@ -417,6 +428,21 @@ a:focus-visible, button:focus-visible, summary:focus-visible {
   gap: 48px; align-items: center;
 }
 .ag-l-hero-copy { display: flex; flex-direction: column; gap: 20px; }
+/* The "assistant built in" pill above the headline. Its own alpha tints are
+   the chat tokens — same fill the assistant's own bubbles use downpage. */
+.ag-l-badge {
+  display: flex; align-items: center; gap: 8px; align-self: flex-start;
+  background: var(--ag-cta-tint); border: 1px solid var(--ag-cta-tint-edge);
+  border-radius: var(--ag-radius-pill); padding: 6px 14px;
+}
+.ag-l-badge i {
+  width: 6px; height: 6px; border-radius: 50%; flex-shrink: 0;
+  background: var(--ag-brand-accent);
+}
+.ag-l-badge b {
+  font-weight: 400; font-size: var(--ag-fs-2xs);
+  letter-spacing: 0.06em; color: var(--ag-purple-400);
+}
 .ag-l-hero h1 {
   font-weight: 800; font-size: 46px; line-height: 1.08;
   letter-spacing: -0.02em; text-wrap: pretty;
@@ -683,6 +709,129 @@ a:focus-visible, button:focus-visible, summary:focus-visible {
 }
 .ag-l-mini-h span + span, .ag-l-mini-r span + span { text-align: right; }
 
+/* --- AI assistant --- */
+/* The chat mock is the one place on the page that reproduces app chrome, so it
+   borrows the app's own chat tokens (cta-tint for the user bubble, page tone
+   for the assistant's) rather than inventing a second set. */
+.ag-l-ai {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(400px, 100%), 1fr));
+  gap: 16px; align-items: start;
+}
+.ag-l-chat {
+  background: var(--ag-surface-raised); border: 1px solid var(--ag-border);
+  border-radius: var(--ag-radius-lg); padding: 18px;
+  display: flex; flex-direction: column; gap: 12px;
+  box-shadow: var(--ag-shadow-overlay);
+}
+.ag-l-chat-h {
+  display: flex; align-items: center; gap: 10px;
+  padding-bottom: 12px; border-bottom: 1px solid var(--ag-border);
+}
+.ag-l-chat-h b { font-size: var(--ag-fs-md); font-weight: 600; }
+.ag-l-avatar {
+  width: 24px; height: 24px; flex-shrink: 0;
+  border-radius: var(--ag-radius-nav);
+  background: var(--ag-cta-tint); border: 1px solid var(--ag-brand-cta);
+  display: flex; align-items: center; justify-content: center;
+  font-family: 'Epilogue', sans-serif; font-weight: 800;
+  font-size: var(--ag-fs-xs); color: var(--ag-purple-400);
+}
+.ag-l-chip {
+  font-size: 9px; font-style: normal; color: var(--ag-text-muted);
+  border: 1px solid var(--ag-border); border-radius: var(--ag-radius-xs);
+  padding: 2px 6px;
+}
+.ag-l-ask {
+  align-self: flex-end; max-width: 82%;
+  background: var(--ag-brand-cta); color: var(--ag-on-brand);
+  border-radius: var(--ag-radius-md) var(--ag-radius-md) 4px var(--ag-radius-md);
+  padding: 10px 13px; font-size: 13.5px; line-height: 1.5;
+}
+.ag-l-said {
+  max-width: 92%; background: var(--ag-surface-page);
+  border: 1px solid var(--ag-border);
+  border-radius: var(--ag-radius-md) var(--ag-radius-md) var(--ag-radius-md) 4px;
+  padding: 12px 14px; display: flex; flex-direction: column; gap: 10px;
+}
+.ag-l-said p { font-size: 13.5px; line-height: 1.55; text-wrap: pretty; }
+.ag-l-said p b { color: var(--ag-text-primary); font-weight: 600; }
+.ag-l-tags { display: flex; gap: 6px; flex-wrap: wrap; }
+.ag-l-action {
+  display: flex; align-items: center; gap: 10px;
+  background: var(--ag-cta-tint); border: 1px solid var(--ag-cta-tint-edge);
+  border-radius: var(--ag-radius-nav); padding: 9px 12px;
+}
+.ag-l-action svg { width: 14px; height: 14px; flex-shrink: 0; }
+.ag-l-action span { flex: 1; font-size: 12.5px; color: var(--ag-purple-400); }
+.ag-l-composer {
+  display: flex; align-items: center; gap: 8px;
+  background: var(--ag-surface-page); border: 1px solid var(--ag-border);
+  border-radius: 10px; padding: 9px 12px;
+}
+.ag-l-composer span {
+  flex: 1; font-size: var(--ag-fs-md); color: var(--ag-text-faint);
+}
+.ag-l-aicards { display: flex; flex-direction: column; gap: 12px; }
+.ag-l-aicards .ag-l-tile { padding: 20px; gap: 10px; border-radius: 14px; }
+.ag-l-aicards h3 { font-weight: 700; font-size: 17px; }
+.ag-l-aicards p {
+  font-size: 13.5px; line-height: 1.55; color: var(--ag-text-secondary);
+  text-wrap: pretty;
+}
+.ag-l-aicards p.ag-l-aside {
+  font-size: var(--ag-fs-md); color: var(--ag-text-muted);
+}
+.ag-l-chips { display: flex; gap: 7px; flex-wrap: wrap; }
+.ag-l-chips span {
+  font-size: var(--ag-fs-sm); color: var(--ag-purple-400);
+  background: var(--ag-cta-tint); border: 1px solid var(--ag-cta-tint-edge);
+  border-radius: var(--ag-radius-nav); padding: 5px 10px;
+}
+.ag-l-models { display: flex; gap: 8px; flex-wrap: wrap; }
+.ag-l-models span {
+  font-family: 'Martian Mono', monospace; font-size: var(--ag-fs-2xs);
+  color: var(--ag-text-secondary);
+  border: 1px solid var(--ag-border); border-radius: var(--ag-radius-nav);
+  padding: 5px 9px;
+}
+.ag-l-lenses {
+  display: flex; flex-direction: column; gap: 14px;
+  border-top: 1px solid var(--ag-border); padding-top: 28px;
+}
+.ag-l-lenses-h { display: flex; flex-direction: column; gap: 6px; max-width: 60ch; }
+.ag-l-lenses-h h3 { font-weight: 700; font-size: 19px; }
+.ag-l-lenses-h p {
+  font-size: var(--ag-fs-base); line-height: 1.55;
+  color: var(--ag-text-secondary);
+}
+.ag-l-lensgrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(190px, 100%), 1fr));
+  gap: 8px;
+}
+.ag-l-lensgrid span {
+  font-size: 12.5px; color: var(--ag-text-secondary);
+  background: var(--ag-surface-page); border: 1px solid var(--ag-border);
+  border-radius: var(--ag-radius-sm); padding: 9px 12px;
+}
+.ag-l-ainotes {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(300px, 100%), 1fr));
+  gap: 16px;
+}
+.ag-l-brandtile {
+  background: var(--ag-surface-brand-band);
+  border: 1px solid var(--ag-border-brand-band);
+  border-radius: 14px; padding: 20px;
+  display: flex; flex-direction: column; gap: 8px;
+}
+.ag-l-brandtile h3 { font-weight: 700; font-size: var(--ag-fs-lg); }
+.ag-l-brandtile p {
+  font-size: 13.5px; line-height: 1.55; color: var(--ag-text-secondary);
+  text-wrap: pretty;
+}
+
 /* --- provenance band --- */
 .ag-l-prov {
   background: var(--ag-surface-brand-band);
@@ -716,7 +865,7 @@ a:focus-visible, button:focus-visible, summary:focus-visible {
   background: color-mix(in srgb, var(--ag-landing-up) 12%, transparent);
   border: 1px solid color-mix(in srgb, var(--ag-landing-up) 35%, transparent);
 }
-.ag-l-tag.consensus {
+.ag-l-tag.consensus, .ag-l-tag.source {
   color: var(--ag-landing-info);
   background: color-mix(in srgb, var(--ag-landing-info) 12%, transparent);
   border: 1px solid color-mix(in srgb, var(--ag-landing-info) 35%, transparent);
@@ -963,7 +1112,7 @@ a:focus-visible, button:focus-visible, summary:focus-visible {
   .ag-l-depth .ag-l-depth-copy { order: -1; }  /* heading above its mock */
   .ag-l-sec { padding-top: 56px; padding-bottom: 56px; }
   .ag-l-prov-in { padding-top: 52px; padding-bottom: 52px; }
-  .ag-l-diagrams, .ag-l-bento-lg { grid-template-columns: 1fr; }
+  .ag-l-diagrams, .ag-l-bento-lg, .ag-l-ai { grid-template-columns: 1fr; }
   .ag-l-final { padding-top: 64px; padding-bottom: 64px; }
   .ag-l-final h2 { font-size: 32px; }
 }
@@ -1047,7 +1196,7 @@ _MOBILE_RULES = """
 .ag-l-head p { font-size: var(--ag-fs-base); }
 .ag-l-gap { grid-template-columns: 1fr; padding: 16px 18px; gap: 12px; }
 .ag-l-diagrams, .ag-l-steps, .ag-l-bento-lg, .ag-l-bento-sm,
-.ag-l-trustgrid { grid-template-columns: 1fr; }
+.ag-l-trustgrid, .ag-l-ai, .ag-l-ainotes { grid-template-columns: 1fr; }
 .ag-l-step { padding: 20px; }
 .ag-l-diagram { padding: 16px; }
 
@@ -1090,6 +1239,20 @@ _MOBILE_RULES = """
 .ag-l-bento-lg .ag-l-tile { padding: 20px; }
 .ag-l-bento-sm .ag-l-tile { padding: 18px; }
 .ag-l-bento-lg h3 { font-size: 17px; }
+
+/* --- AI assistant --- */
+/* The bubbles give up their inset (a 82%-wide bubble inside a 328px column is
+   four words a line), and the lens grid keeps two columns: the labels are two
+   or three words, so one column would be a 17-row list. */
+.ag-l-chat { padding: 14px; }
+.ag-l-ask, .ag-l-said { max-width: 100%; }
+.ag-l-aicards .ag-l-tile { padding: 18px; }
+.ag-l-aicards h3, .ag-l-lenses-h h3 { font-size: var(--ag-fs-lg); }
+.ag-l-lenses { padding-top: 20px; }
+.ag-l-lensgrid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.ag-l-lensgrid span { padding: 8px 10px; font-size: 12px; }
+.ag-l-brandtile { padding: 18px; }
+.ag-l-badge { padding: 5px 12px; }
 
 /* --- FAQ --- */
 .ag-l-faq { padding: 44px 16px; gap: 20px; }
@@ -1223,7 +1386,7 @@ def _top_bar() -> str:
   <div class="ag-l-brand">{_mark()}<span>TopStocks</span></div>
   <div class="ag-l-spacer"></div>
   {_lang_toggle()}
-  <a class="ag-l-ghlink" href="{esc(_GITHUB_URL)}" target="_blank"
+  <a class="ag-l-ghlink" href="{esc(GITHUB_URL)}" target="_blank"
      rel="noopener noreferrer">{_GITHUB_MARK}{esc(tr("landing.nav_github"))}</a>
   {_signin_link("ag-l-cta-ghost", tr("common.sign_in_google"), with_mark=False)}
 </div></header>"""
@@ -1267,6 +1430,8 @@ def _hero() -> str:
     return f"""
 <section class="ag-l-wrap ag-l-hero">
   <div class="ag-l-hero-copy">
+    <div class="ag-l-badge"><i></i>
+      <b class="ag-l-mono">{esc(tr("landing.hero_badge"))}</b></div>
     <h1>{esc(tr("landing.hero_title"))}</h1>
     <p class="ag-l-lede">{esc(tr("landing.hero_sub"))}</p>
     <div class="ag-l-ctarow">
@@ -1460,6 +1625,141 @@ def _how() -> str:
 </section>"""
 
 
+# The assistant's skill library (web/skills/*.md), in the order the chat panel's
+# own picker lists them — sorted by id, because each file is named after it.
+# Labels come from the chat catalog, so the landing and the picker can never
+# call the same lens two different things, and both stay bilingual for free.
+_LENSES = (
+    "bear-case", "crypto", "dividend", "earnings-review", "emerging-markets",
+    "energy", "etfs", "financials", "growth-momentum", "healthcare", "macro",
+    "portfolio-risk", "spain-tax", "tech", "technical", "us-tax", "value",
+)
+
+# App operations the assistant performs on its own (chat/tools.py). Only the
+# five additive ones are named: the other three are the same tools in reverse
+# (unfavorite, untag, remove_ticker) and read as filler in a chip strip.
+_AI_ACTIONS = ("alert", "tag", "watchlist", "position", "favourite")
+
+# The BYOK providers, in registry order (web/llm.py PROVIDERS). Brand names, so
+# they are literal; the free tier in front of them is a phrase that translates.
+_AI_MODELS = ("CLAUDE", "CHATGPT", "GEMINI")
+
+# The sample answer's realised gain. Its tax line is derived from the same
+# headline rate the IRPF panel uses, so the two mocks agree with each other.
+_AI_GAIN = 4180
+
+
+def _assistant() -> str:
+    """The assistant section: one worked exchange, then what carries it.
+
+    The mock is the only place the landing reproduces app chrome, and it earns
+    that by being the claim itself — "the answer is about your book" is not
+    something a paragraph can show. Every figure in it is a figure that already
+    appears elsewhere on the page (MSFT at 30.8% of the book, 1/HHI 6.8, a
+    15-share sale matched across two lots), so a reader who scrolls back finds
+    the same numbers rather than a second, contradictory sample portfolio.
+    """
+    rate = _PANEL_RATE.get(active_jurisdiction(), 19.0)
+
+    # Escaped first, marked up second: the sentence names its two figures
+    # inline and bolds them, exactly like the provenance paragraph.
+    answer = esc(tr("landing.ai_a")).format(
+        tech=esc(_pct(48.2, signed=False)),
+        msft=esc(_pct(30.8, signed=False)),
+        names=esc(_dec(6.8, 1)),
+        shares=esc(_plain(15)),
+        gain=f"<b>{esc(_money(_AI_GAIN))}</b>",
+        tax=f"<b>{esc(_money(round(_AI_GAIN * rate / 100)))}</b>",
+    )
+
+    tags = "".join(
+        f'<span class="ag-l-tag {cls}">{esc(tr(key))}</span>'
+        for key, cls in (
+            ("landing.ai_src_ledger", "fact"),
+            ("landing.ai_src_rule", "derived"),
+            ("landing.ai_src_fx", "source"),
+        )
+    )
+
+    chat = f"""
+<div class="ag-l-chat">
+  <div class="ag-l-chat-h">
+    <span class="ag-l-avatar" aria-hidden="true">A</span>
+    <b>{esc(tr("landing.ai_who"))}</b>
+    <span class="ag-l-mono ag-l-chip">
+      {esc(tr("landing.ai_context", n=24, value=_money(61484)))}</span>
+  </div>
+  <div class="ag-l-ask">{esc(tr("landing.ai_q"))}</div>
+  <div class="ag-l-said">
+    <p>{answer}</p>
+    <div class="ag-l-tags">{tags}</div>
+    <div class="ag-l-action">{_CHECK_MARK}
+      <span>{esc(tr("landing.ai_action", price="$390"))}</span>
+      <i class="ag-l-mono ag-l-chip">{esc(tr("landing.ai_action_tag"))}</i>
+    </div>
+  </div>
+  <div class="ag-l-composer">
+    <span>{esc(tr("landing.ai_composer"))}</span>
+    <i class="ag-l-mono ag-l-chip">{esc(tr("landing.ai_websearch"))}</i>
+  </div>
+</div>"""
+
+    action_chips = "".join(
+        f'<span>{esc(tr(f"landing.ai_act_{name}"))}</span>' for name in _AI_ACTIONS
+    )
+    models = "".join(
+        f"<span>{esc(m)}</span>"
+        for m in (tr("landing.ai_free"), *_AI_MODELS)
+    )
+
+    cards = f"""
+<div class="ag-l-aicards">
+  <div class="ag-l-tile">
+    <h3>{esc(tr("landing.ai_c1_h"))}</h3>
+    <p>{esc(tr("landing.ai_c1_b"))}</p>
+  </div>
+  <div class="ag-l-tile">
+    <h3>{esc(tr("landing.ai_c2_h"))}</h3>
+    <div class="ag-l-chips">{action_chips}</div>
+    <p class="ag-l-aside">{esc(tr("landing.ai_c2_b"))}</p>
+  </div>
+  <div class="ag-l-tile">
+    <h3>{esc(tr("landing.ai_c3_h"))}</h3>
+    <div class="ag-l-models">{models}</div>
+    <p>{esc(tr("landing.ai_c3_b"))}</p>
+  </div>
+</div>"""
+
+    lenses = "".join(
+        f'<span>{esc(translate(f"chat.skill.{lens}", active_language()))}</span>'
+        for lens in _LENSES
+    )
+
+    notes = "".join(
+        f'<div class="ag-l-brandtile"><h3>{esc(tr(f"landing.ai_n{i}_h"))}</h3>'
+        f'<p>{esc(tr(f"landing.ai_n{i}_b"))}</p></div>'
+        for i in range(1, 4)
+    )
+
+    return f"""
+<section class="ag-l-band"><div class="ag-l-wrap ag-l-sec">
+  <div class="ag-l-head">
+    <span class="ag-l-eyebrow">{esc(tr("landing.ai_eyebrow"))}</span>
+    <h2>{esc(tr("landing.ai_title"))}</h2>
+    <p>{esc(tr("landing.ai_body"))}</p>
+  </div>
+  <div class="ag-l-ai">{chat}{cards}</div>
+  <div class="ag-l-lenses">
+    <div class="ag-l-lenses-h">
+      <h3>{esc(tr("landing.ai_lenses_title", n=len(_LENSES)))}</h3>
+      <p>{esc(tr("landing.ai_lenses_sub"))}</p>
+    </div>
+    <div class="ag-l-lensgrid">{lenses}</div>
+  </div>
+  <div class="ag-l-ainotes">{notes}</div>
+</div></section>"""
+
+
 def _provenance() -> str:
     cards = (
         ("landing.prov_k1_label", {}, "$391.0B", "fact", "landing.tag_fact",
@@ -1517,12 +1817,12 @@ def _bento() -> str:
         inner = "".join(f'<span class="ag-l-pill">{esc(p)}</span>' for p in items)
         return f'<div class="ag-l-pills">{inner}</div>'
 
+    # No AI or Telegram tile: the assistant has its own section upstream, and a
+    # one-paragraph summary of it here read as a second, weaker pitch.
     small = (
-        ("landing.f_ai_title", "landing.f_ai_body"),
         ("landing.f_deep_title", "landing.f_deep_body"),
         ("landing.f_earnings_title", "landing.f_earnings_body"),
         ("landing.f_alerts_title", "landing.f_alerts_body"),
-        ("landing.f_telegram_title", "landing.f_telegram_body"),
         ("landing.f_crypto_title", "landing.f_crypto_body"),
     )
     small_html = "".join(
@@ -1669,7 +1969,7 @@ def _footer() -> str:
 <footer class="ag-l-rule"><div class="ag-l-wrap ag-l-foot">
   <div class="ag-l-foot-row">
     <div class="ag-l-brand">{_mark()}<span>TopStocks</span></div>
-    <a href="{esc(_GITHUB_URL)}" target="_blank"
+    <a href="{esc(GITHUB_URL)}" target="_blank"
        rel="noopener noreferrer">{esc(tr("landing.nav_github"))}</a>
     <a href="/legal/privacy{_legal_lang_q()}">{esc(tr("landing.footer_privacy"))}</a>
     <a href="/legal/terms{_legal_lang_q()}">{esc(tr("landing.footer_terms"))}</a>
@@ -1824,6 +2124,7 @@ def page_body() -> str:
         + _brokers()
         + _gap()
         + _how()
+        + _assistant()
         + _provenance()
         + _bento()
         + _depth_a()

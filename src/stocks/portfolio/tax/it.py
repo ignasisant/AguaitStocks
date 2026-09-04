@@ -36,7 +36,8 @@ from stocks.portfolio.tax.base import (
     ReportingFlag,
     TaxPeriod,
     TaxSettings,
-    covers,
+    open_period,
+    sales_in,
 )
 
 CODE = "IT"
@@ -88,12 +89,8 @@ def fiscal_period(
     a loss changes nothing about that loss (only which lot a later sale takes,
     which the LIFO replay already settled).
     """
-    out = ItTaxPeriod(
-        jurisdiction=CODE, currency=CURRENCY, year=int(period[:4]), period=period
-    )
-    for s in realized:
-        if not covers(period, s.sell_date, YEAR_START):
-            continue
+    out = open_period(ItTaxPeriod, CODE, CURRENCY, period)
+    for s in sales_in(period, realized, YEAR_START):
         out.sales.append(s)
         if s.gain >= 0:
             out.realized_gain += s.gain

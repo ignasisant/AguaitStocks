@@ -193,7 +193,7 @@ def cmd_telegram_chat(args: argparse.Namespace) -> None:
                        chat_path=user.chat_path, watchlist=user.watchlist,
                        db=user.db, message=args.ask, lang=user.lang)
         if reply.error:
-            print(f"error: {reply.error} (cap {free_daily_cap()})")
+            print(f"error: {reply.error} (cap {free_daily_cap(user.prefs)})")
         else:
             print(f"[{reply.provider_id}] {reply.text}")
         return
@@ -651,7 +651,14 @@ def cmd_positions(args: argparse.Namespace) -> None:
     if not positions:
         print("no open positions")
         return
-    values = market_values(positions, base=ccy)  # concurrent price+FX lookups
+    try:
+        values = market_values(positions, base=ccy)  # one bulk price+FX pass
+    except Exception as exc:
+        # Throttled by Yahoo: print the book at cost with the value columns
+        # blank rather than dying on a traceback.
+        print(f"warning: prices unavailable ({type(exc).__name__}) — "
+              "value and P/L columns left blank")
+        values = {}
     print(f"{'TICKER':8s} {'QTY':>10s} {f'COST {ccy}':>12s} "
           f"{f'VALUE {ccy}':>12s} {f'P/L {ccy}':>12s}")
     total_cost = total_value = 0.0
@@ -758,7 +765,10 @@ def cmd_tax(args: argparse.Namespace) -> None:
 
     # Reporting thresholds are jurisdiction-currency amounts; the priced book
     # comes back in EUR, so a non-EUR jurisdiction converts at spot.
-    values = market_values(positions)  # concurrent price+FX lookups
+    try:
+        values = market_values(positions)  # one bulk price+FX pass
+    except Exception:
+        values = {}  # throttled: every position falls back to its cost below
     foreign = sum(values.get(p.ticker) or p.cost for p in positions)
     if ccy != "EUR":
         try:

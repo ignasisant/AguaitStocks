@@ -36,6 +36,8 @@ from dataclasses import dataclass, field
 
 import pandas as pd
 
+from stocks.analysis import naive_dates
+
 TRADING_YEAR = 252
 # Percentile windows need enough history to mean anything; below this a rank
 # is noise dressed as a score, so the component drops out of the composite
@@ -195,10 +197,9 @@ def naive_index(series: pd.Series) -> pd.Series:
     two rows. Dropping the zone is right here because these are daily bars —
     the timestamp is a session label, not an instant.
     """
-    idx = series.index
-    if getattr(idx, "tz", None) is not None:
+    if getattr(series.index, "tz", None) is not None:
         series = pd.Series(
-            series.to_numpy(), index=idx.tz_localize(None), name=series.name
+            series.to_numpy(), index=naive_dates(series.index), name=series.name
         )
     return series
 
@@ -234,7 +235,7 @@ def ytd_return(series: pd.Series) -> float:
         return float("nan")
     idx = s.index
     if getattr(idx, "tz", None) is not None:
-        idx = idx.tz_localize(None)
+        idx = naive_dates(idx)
         s = pd.Series(s.to_numpy(), index=idx, name=s.name)
     year = idx[-1].year
     prior = s[idx < pd.Timestamp(year=year, month=1, day=1)]

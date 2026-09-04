@@ -28,19 +28,21 @@ import re
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from functools import lru_cache
 from pathlib import Path
 
 import streamlit as st
-import yaml
 
 from stocks import storage
 from stocks.chat import memory
 from stocks.config import (
     CURRENCIES,
-    CURRENCY_SYMBOL,
     DATA_DIR,
     PROJECT_ROOT,
     WATCHLIST_FILE,
+    stat_key,
+    yaml_dump,
+    yaml_load,
 )
 from stocks.web import css
 from stocks.web.i18n import t as tr
@@ -76,20 +78,64 @@ DEFAULT_PREFS = {  # language None = auto (browser)
     "tax_other_income": 0.0,
     "tax_niit": False,
     "tax_subnational_rate": 0.0,
+    # Whether the assistant drawer was open when the tab was last rendered, so
+    # a reload puts the reader back in the conversation instead of behind the
+    # launcher icon. Written by chat_core.render_side_panel.
+    "chat_panel_open": False,
 }
 
+# Seeded on first login so a brand-new account has a working app instead of a
+# page of empty states. Deliberately a *watchlist* and nothing more: no
+# `shares`/`cost`, so every figure the app shows for these rows is live market
+# data and nothing is ever presented as a holding the user does not own.
+#
+# The spread is the point — sectors, currencies and two asset classes — because
+# the sections that make the first visit worth anything all rank or group across
+# the list: the screener's P/E table, the earnings calendar, the 52-week
+# extremes scan, the sentiment pass, the daily AI card. Two US mega-caps gave
+# all of them one row and nothing to compare. The tags seed the dashboard's
+# group expanders and the earnings filter pills; the untagged rows keep the
+# plain "Watchlist" group populated too.
 STARTER_WATCHLIST = """\
 # Personal watchlist — managed from the Profile page.
 #
+# These are examples to explore with, not holdings: replace them with the
+# tickers you actually follow. Nothing here counts as a position.
+#
 # Per-entry fields:
 #   favorite: true   -> pinned to top of the dashboard + quick-access buttons
+#   tags: [Tech]     -> groups the dashboard expanders and the earnings filters
 #   shares: 12       -> makes it a real position (portfolio weights by value)
 #   cost: 145.30     -> average buy price/share, for unrealised P/L
 watchlist:
   - ticker: AAPL
     name: Apple
+    favorite: true
+    tags: [Tech]
   - ticker: MSFT
     name: Microsoft
+    tags: [Tech]
+  - ticker: NVDA
+    name: Nvidia
+    favorite: true
+    tags: [Tech]
+  - ticker: ASML
+    name: ASML Holding
+    tags: [Europe]
+  - ticker: NVO
+    name: Novo Nordisk
+    tags: [Europe]
+  - ticker: ITX.MC
+    name: Inditex
+    tags: [Europe]
+  - ticker: TSM
+    name: Taiwan Semiconductor
+  - ticker: JPM
+    name: JPMorgan Chase
+  - ticker: XOM
+    name: Exxon Mobil
+  - ticker: BTC-EUR
+    name: Bitcoin
 """
 
 
@@ -310,7 +356,7 @@ def is_logged_in() -> bool:
         # accessor is called by every page, so an unguarded read takes the
         # whole app down instead of degrading to "nobody is signed in".
         configured = False
-    return (
+    return bool(
         configured
         and st.user.is_logged_in
         and bool(str(getattr(st.user, "email", "") or "").strip())
@@ -546,27 +592,41 @@ def db_path() -> Path:
     return user_paths().db
 
 
-def last_import_path() -> Path:
-    return user_paths().last_import
-
-
 def chat_path() -> Path:
     return user_paths().chat
-
-
-def action_path() -> Path:
-    return user_paths().action
 
 
 # ------------------------------------------------------------- preferences
 
 
-def load_prefs(path: Path | None = None) -> dict:
-    p = path or user_paths().prefs
+@lru_cache(maxsize=64)
+def _prefs_stored(path: Path, _key: tuple[int, int] | None) -> dict:
+    """The stored half of `load_prefs`, memoized on the file's stat signature.
+
+    Keyed like `config._yaml`: `save_prefs` changes the file, which changes the
+    key, so there is no invalidation call to forget. Never handed out directly
+    — `load_prefs` merges a fresh dict over the defaults, because its callers
+    mutate what they get back and then save it.
+    """
+    if _key is None:
+        return {}
     try:
-        return {**DEFAULT_PREFS, **json.loads(p.read_text())}
+        stored = json.loads(path.read_text())
     except (OSError, ValueError, TypeError):
-        return dict(DEFAULT_PREFS)
+        return {}
+    return stored if isinstance(stored, dict) else {}
+
+
+def load_prefs(path: Path | None = None) -> dict:
+    """This account's preferences, defaults filled in.
+
+    Read on nearly every rerun by a dozen callers (the language resolver, the
+    setup card, the tour, the chat panel), so the file read and parse are
+    memoized while the merge stays per-call: the result is mutable and callers
+    edit it in place before `save_prefs`.
+    """
+    p = path or user_paths().prefs
+    return {**DEFAULT_PREFS, **_prefs_stored(p, stat_key(p))}
 
 
 def save_prefs(prefs: dict, path: Path | None = None) -> None:
@@ -641,6 +701,42 @@ PROFILE_RISK = ("aggressive", "very_aggressive", "balanced", "conservative")
 PROFILE_HORIZON = ("5y_plus", "3_5y", "1_3y", "under_1y")
 PROFILE_FOCUS = ("tech", "em", "crypto", "dividends_value")
 PROFILE_CONSTRAINTS = ("spain_tax", "us_tax", "eur", "no_leverage", "esg")
+
+# Example tickers per declared focus, offered on the Profile page to an
+# account whose watchlist does not have them yet (see focus_suggestions).
+#
+# Keyed on `focus` — a stated interest — and deliberately NOT on `risk`. A
+# list assembled from someone's risk tolerance is a recommendation however it
+# is worded, and this app is not in that business; a list assembled from "you
+# said you follow emerging markets" is a shortcut for typing eight symbols,
+# which is all it is meant to be. The seed already covers each area thinly, so
+# these widen rather than replace, and nothing is ever removed.
+#
+# Tags are the English labels the starter watchlist uses, so an appended row
+# lands in the same dashboard group as the seeded ones rather than starting a
+# near-duplicate group.
+FOCUS_EXAMPLES: dict[str, tuple[tuple[str, str, str], ...]] = {
+    "tech": (
+        ("GOOGL", "Alphabet", "Tech"),
+        ("AMD", "AMD", "Tech"),
+        ("NOW", "ServiceNow", "Tech"),
+    ),
+    "em": (
+        ("BABA", "Alibaba", "Emerging markets"),
+        ("INFY", "Infosys", "Emerging markets"),
+        ("NU", "Nu Holdings", "Emerging markets"),
+    ),
+    "crypto": (
+        ("ETH-EUR", "Ethereum", "Crypto"),
+        ("SOL-EUR", "Solana", "Crypto"),
+        ("COIN", "Coinbase", "Crypto"),
+    ),
+    "dividends_value": (
+        ("KO", "Coca-Cola", "Dividends"),
+        ("PG", "Procter & Gamble", "Dividends"),
+        ("ENB", "Enbridge", "Dividends"),
+    ),
+}
 
 _PROFILE_DEFAULTS = {
     "risk": "aggressive",
@@ -996,12 +1092,32 @@ def reporting_currency() -> str:
     return ccy if ccy in CURRENCIES else "EUR"
 
 
-def currency_symbol() -> str:
-    """The reporting currency's symbol, for figures rendered as strings."""
-    return CURRENCY_SYMBOL.get(reporting_currency(), "")
-
-
 # ---------------------------------------------------------------- watchlist
+
+
+def focus_suggestions(
+    profile: dict | None = None, path: Path | None = None
+) -> list[dict]:
+    """Example rows for the account's declared focus that it does not have yet.
+
+    Returns `save_watchlist_entries` rows, in `FOCUS_EXAMPLES` order, with
+    everything already on the watchlist filtered out — so the offer shrinks as
+    it is taken up and disappears once there is nothing left to add. Empty
+    whenever no focus is declared, which is what keeps this off the page for
+    an account that skipped the profile.
+    """
+    from stocks.config import load_watchlist  # local: same reason as all_tags
+
+    p = profile if profile is not None else load_profile()
+    have = {h.ticker.upper() for h in load_watchlist(path or watchlist_path())}
+    out: list[dict] = []
+    for area in p.get("focus") or []:
+        for ticker, name, tag in FOCUS_EXAMPLES.get(area, ()):
+            if ticker.upper() in have:
+                continue
+            have.add(ticker.upper())  # a ticker in two areas is offered once
+            out.append({"ticker": ticker, "name": name, "tags": [tag]})
+    return out
 
 
 def save_watchlist_entries(entries: list[dict], path: Path | None = None) -> None:
@@ -1015,7 +1131,7 @@ def save_watchlist_entries(entries: list[dict], path: Path | None = None) -> Non
     and de-duplicated (first row wins).
     """
     p = path or watchlist_path()
-    raw = (yaml.safe_load(p.read_text()) or {}) if p.exists() else {}
+    raw = yaml_load(p.read_text()) if p.exists() else {}
     old_alerts = {
         str(item.get("ticker", "")).upper(): item.get("alerts")
         for item in (raw.get("watchlist") or [])
@@ -1058,7 +1174,7 @@ def save_watchlist_entries(entries: list[dict], path: Path | None = None) -> Non
         items.append(item)
 
     raw["watchlist"] = items
-    p.write_text(yaml.safe_dump(raw, sort_keys=False, allow_unicode=True))
+    p.write_text(yaml_dump(raw))
     _persist(p)
 
 
@@ -1084,7 +1200,7 @@ def _update_entry(ticker: str, mutate, path: Path | None = None) -> dict:
     held-only symbol adds it to the watchlist. Everything else in the YAML
     (other entries, alerts, aliases) is preserved. Returns the entry."""
     p = path or watchlist_path()
-    raw = (yaml.safe_load(p.read_text()) or {}) if p.exists() else {}
+    raw = yaml_load(p.read_text()) if p.exists() else {}
     items: list[dict] = raw.get("watchlist") or []
     t = ticker.strip().upper()
     entry = next(
@@ -1095,7 +1211,7 @@ def _update_entry(ticker: str, mutate, path: Path | None = None) -> dict:
         items.append(entry)
     mutate(entry)
     raw["watchlist"] = items
-    p.write_text(yaml.safe_dump(raw, sort_keys=False, allow_unicode=True))
+    p.write_text(yaml_dump(raw))
     _persist(p)
     return entry
 
@@ -1181,14 +1297,14 @@ def remove_entry(ticker: str, path: Path | None = None) -> None:
     p = path or watchlist_path()
     if not p.exists():
         return
-    raw = yaml.safe_load(p.read_text()) or {}
+    raw = yaml_load(p.read_text())
     items = raw.get("watchlist") or []
     t = ticker.strip().upper()
     kept = [i for i in items if str(i.get("ticker", "")).upper() != t]
     if len(kept) == len(items):
         return
     raw["watchlist"] = kept
-    p.write_text(yaml.safe_dump(raw, sort_keys=False, allow_unicode=True))
+    p.write_text(yaml_dump(raw))
     _persist(p)
 
 

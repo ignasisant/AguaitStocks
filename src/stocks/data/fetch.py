@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import threading
 import time
 from collections.abc import Callable
 from pathlib import Path
@@ -41,6 +42,64 @@ def resolve(ticker: str) -> str:
     """Yahoo Finance symbol for a ticker, mapping broker codes via
     watchlist.yaml `aliases` (identity when unmapped)."""
     return ticker_aliases().get(ticker.upper(), ticker)
+
+
+# `.info` is the heaviest call yfinance makes — a full quoteSummary — and it
+# used to be fetched independently by everything that wanted one field of it:
+# the allocation profile (sector/country/currency), the session quote
+# (pre/post prices), the fund classifier (quoteType), the logo resolver
+# (website) and the earnings currency. One ticker on one page render could
+# pay for it three to five times over, and that pile of requests is what
+# trips Yahoo's rate limiter from a datacenter IP.
+#
+# The TTL is deliberately short. The same blob carries both facts that never
+# move (sector, country) and facts that move by the second (premarket price),
+# so it is pinned to the faster of the two — the point is to collapse the
+# several calls *within one render*, not to hold quotes. The web layer's own
+# st.cache_data wrappers still bound how often a render happens at all.
+_INFO_TTL_S = 120.0
+_info_memo: dict[str, tuple[float, dict]] = {}
+_info_lock = threading.Lock()
+
+
+def clear_info_cache() -> None:
+    """Forget every memoized `.info` blob.
+
+    For tests that swap yfinance out between assertions, and for anything that
+    wants the next read to go to the network — a memo hit doesn't see a
+    patched `yfinance.Ticker`, and within the TTL it doesn't see a new quote.
+    """
+    with _info_lock:
+        _info_memo.clear()
+
+
+def info(ticker: str) -> dict:
+    """Yahoo's quote/profile blob for `ticker` (yfinance `.info`), memoized.
+
+    Returns {} when Yahoo has nothing (or hands back a non-dict). Errors are
+    not memoized and propagate — callers decide whether a missing profile is
+    fatal (`data.earnings` re-raises a rate limit) or cosmetic (`data.logo`
+    swallows everything). Safe to call from a thread pool: entries are shared
+    under a lock, so a `load_meta` fan-out over one ticker fetches once.
+    """
+    key = resolve(ticker)
+    now = time.monotonic()
+    with _info_lock:
+        hit = _info_memo.get(key)
+        if hit is not None and now - hit[0] < _INFO_TTL_S:
+            return hit[1]
+    fetched = yf.Ticker(key).info
+    blob = fetched if isinstance(fetched, dict) else {}
+    with _info_lock:
+        _info_memo[key] = (time.monotonic(), blob)
+        # Bounded: a long-lived server would otherwise accumulate an entry per
+        # symbol anyone ever looked at. Evicting the expired ones is enough —
+        # the live set is one page's worth of tickers.
+        if len(_info_memo) > 512:
+            cutoff = time.monotonic() - _INFO_TTL_S
+            for stale in [k for k, (at, _) in _info_memo.items() if at < cutoff]:
+                del _info_memo[stale]
+    return blob
 
 
 def fetch_history(ticker: str, period: str = "1y", interval: str = "1d") -> pd.DataFrame:
@@ -84,8 +143,18 @@ def fetch_many(
     out: dict[str, pd.DataFrame] = {}
     for t in tickers:
         try:
-            # yf.download keeps the ticker column level only for >1 symbol.
-            df = data[symbol_of[t]] if len(symbols) > 1 else data
+            # Strip the ticker column level when there is one. Older yfinance
+            # only added it for multi-symbol downloads, so this used to key off
+            # the symbol count; 1.5.x adds it for a single symbol too, and the
+            # count test then handed the caller a frame whose columns were
+            # ('AAPL', 'Close') — every `df["Close"]` downstream silently found
+            # nothing, so a one-name watchlist or a single-position book read as
+            # unpriced. Ask the frame what shape it is instead.
+            df = (
+                data[symbol_of[t]]
+                if isinstance(data.columns, pd.MultiIndex)
+                else data
+            )
         except KeyError:
             continue
         df = df.dropna(how="all")

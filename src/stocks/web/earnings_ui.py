@@ -21,8 +21,10 @@ from urllib.error import URLError
 
 import pandas as pd
 import streamlit as st
+import streamlit.components.v2  # noqa: F401 — lazy submodule
 from yfinance.exceptions import YFRateLimitError
 
+from stocks.config import currency_symbol
 from stocks.data.earnings import (
     Quarter,
     fetch_quarters,
@@ -43,7 +45,6 @@ from stocks.data.estimates import (
     quarter_outlook,
 )
 from stocks.web import notices, skeletons
-from stocks.web.auth import CURRENCY_SYMBOL
 from stocks.web.i18n import t as tr
 from stocks.web.widgets import (
     BORDER,
@@ -133,7 +134,7 @@ def _money(value: float | None, currency: str | None = None) -> str:
     """Compact money: 81.6B / 1.24T, prefixed with the currency's symbol."""
     if value is None:
         return "—"
-    prefix = CURRENCY_SYMBOL.get(currency or "") or (f"{currency} " if currency else "")
+    prefix = currency_symbol(currency)
     for div, suffix in ((1e12, "T"), (1e9, "B"), (1e6, "M"), (1e3, "K")):
         if abs(value) >= div:
             return f"{prefix}{value / div:,.2f}{suffix}"
@@ -282,7 +283,7 @@ def _range_html(
 ) -> str:
     """Consensus dispersion: the low-high band with the mean marked on it."""
     span = None if low is None or high is None else high - low
-    if avg is None or span is None or span <= 0:
+    if avg is None or low is None or span is None or span <= 0:
         position = 50.0
     else:
         position = min(max((avg - low) / span * 100, 4.0), 96.0)
@@ -326,9 +327,10 @@ def _revenue_section(quarters: list[Quarter], q: Quarter, currency: str | None) 
     qoq = pct_change(q.revenue, prev_q.revenue if prev_q else None)
     trend = quarters[:TREND_QUARTERS]
     # TTM only means something with four consecutive quarters in hand.
+    _ttm_q = [x.revenue for x in quarters[:4]]
     ttm = (
-        sum(x.revenue for x in quarters[:4])
-        if len(quarters) >= 4 and all(x.revenue is not None for x in quarters[:4])
+        sum(v for v in _ttm_q if v is not None)
+        if len(_ttm_q) == 4 and all(v is not None for v in _ttm_q)
         else None
     )
 

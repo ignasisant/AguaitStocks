@@ -104,7 +104,12 @@ def test_company_domain_swallows_yfinance_errors(monkeypatch):
         def info(self):
             raise RuntimeError("429 Too Many Requests")
 
-    monkeypatch.setattr(logo_mod.yf, "Ticker", Boom)
+    import yfinance
+
+    from stocks.data.fetch import clear_info_cache
+
+    monkeypatch.setattr(yfinance, "Ticker", Boom)
+    clear_info_cache()  # the shared .info memo would answer before Boom runs
     assert logo_mod._company_domain("AAPL") is None
 
 
